@@ -15,7 +15,13 @@ export function send(res: ServerResponse, status: number, body: unknown, headers
   res.end(JSON.stringify(body));
 }
 
+// A body can be read once; the cloud reads it to check the signature before
+// the route handler parses it, so it is kept here.
+const bodies = new WeakMap<IncomingMessage, Buffer>();
+
 export async function readBody(req: IncomingMessage): Promise<Buffer> {
+  const read = bodies.get(req);
+  if (read) return read;
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
@@ -23,7 +29,9 @@ export async function readBody(req: IncomingMessage): Promise<Buffer> {
     if (size > 1_000_000) throw new RelayError(413, "请求太大");
     chunks.push(chunk as Buffer);
   }
-  return Buffer.concat(chunks);
+  const body = Buffer.concat(chunks);
+  bodies.set(req, body);
+  return body;
 }
 
 export function parseJson(raw: Buffer): Record<string, unknown> {

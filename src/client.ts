@@ -1,4 +1,5 @@
-import type { AgentConfig } from "./config.js";
+import type { AgentClient, AgentConfig } from "./config.js";
+import { signRequest, type DeviceKey } from "./device.js";
 import type { RelayEvent, Scope, ThreadDetail, ThreadStatus, ThreadSummary } from "./types.js";
 
 export class RelayClientError extends Error {
@@ -10,25 +11,74 @@ export class RelayClientError extends Error {
   }
 }
 
+export interface Contact {
+  id: string;
+  name: string;
+  agents: AgentConfig[];
+}
+
+export interface DeviceLinkTicket {
+  id: string;
+  url: string;
+  // The pairing code shown on the confirmation page.
+  code: string;
+  expiresAt: string;
+}
+
 // Thin HTTP client for the relay API, used by the sidecar, the MCP server and
-// the hook command.
+// the hook command. It authenticates with the local relay's token, or, for the
+// cloud, by signing each request with this computer's key.
 export class RelayClient {
   constructor(
     readonly baseUrl: string,
-    private token: string,
+    private auth: string | DeviceKey,
   ) {}
 
+  private headers(method: string, path: string, body: string): Record<string, string> {
+    if (typeof this.auth === "string") return { "x-achat-token": this.auth };
+    const url = new URL(this.baseUrl + path);
+    return signRequest(this.auth, method, url.pathname + url.search, body);
+  }
+
   private async call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    const text = body === undefined ? "" : JSON.stringify(body);
     const res = await fetch(this.baseUrl + path, {
       method,
-      headers: { "x-achat-token": this.token, "content-type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      headers: { ...this.headers(method, path, text), "content-type": "application/json" },
+      body: body === undefined ? undefined : text,
       signal,
     });
-    const text = await res.text();
-    const data = text ? JSON.parse(text) : null;
+    const reply = await res.text();
+    let data: { error?: string } | null = null;
+    try {
+      data = reply ? JSON.parse(reply) : null;
+    } catch {
+      throw new RelayClientError(res.status, `Achat 服务返回了无法识别的内容（HTTP ${res.status}）`);
+    }
     if (!res.ok) throw new RelayClientError(res.status, data?.error ?? `HTTP ${res.status}`);
     return data as T;
+  }
+
+  me(): Promise<{ account: { id: string; name: string }; device?: { id: string; name: string } }> {
+    return this.call("GET", "/api/me");
+  }
+
+  contacts(): Promise<Contact[]> {
+    return this.call("GET", "/api/contacts");
+  }
+
+  createInvite(): Promise<{ url: string; expiresAt: string }> {
+    return this.call("POST", "/api/invites", {});
+  }
+
+  // Asks the cloud to add this computer, signed with its new key; a person
+  // confirms on the returned page.
+  createDeviceLink(input: { publicKey: string; name: string; clients: AgentClient[] }): Promise<DeviceLinkTicket> {
+    return this.call("POST", "/api/device-links", input);
+  }
+
+  removeDevice(id: string): Promise<{ ok: boolean }> {
+    return this.call("DELETE", `/api/devices/${encodeURIComponent(id)}`);
   }
 
   health(): Promise<{ pid: number; startedAt: number }> {
@@ -97,14 +147,17 @@ export class RelayClient {
   // function that stops it.
   subscribe(agent: string | undefined, onEvent: (e: RelayEvent) => void, onConnect?: () => void): () => void {
     const controller = new AbortController();
-    const q = new URLSearchParams({ token: this.token });
+    const q = new URLSearchParams();
+    if (typeof this.auth === "string") q.set("token", this.auth);
     if (agent) q.set("agent", agent);
-    const url = `${this.baseUrl}/api/events?${q}`;
+    const path = `/api/events?${q}`;
 
     const loop = async (): Promise<void> => {
       while (!controller.signal.aborted) {
         try {
-          const res = await fetch(url, { signal: controller.signal });
+          // Signed again on every reconnect: a signature is only accepted once.
+          const headers = typeof this.auth === "string" ? {} : this.headers("GET", path, "");
+          const res = await fetch(this.baseUrl + path, { signal: controller.signal, headers });
           if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
           onConnect?.();
           const decoder = new TextDecoder();

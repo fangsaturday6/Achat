@@ -60,7 +60,9 @@ export async function threadsApi(
       res.write(`data: ${JSON.stringify(e)}\n\n`);
     });
     const heartbeat = setInterval(() => res.write(": ping\n\n"), 25_000);
-    req.on("close", () => {
+    // The response closes with the connection; the request may already have
+    // closed once its (empty) body was read.
+    res.on("close", () => {
       clearInterval(heartbeat);
       off();
     });
