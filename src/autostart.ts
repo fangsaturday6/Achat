@@ -128,15 +128,17 @@ function run(commands: string[][], ignoreFailures: boolean): void {
   }
 }
 
-export function enableAutostart(cliPath: string): string {
+// Writes the service file and (re)starts the service. `log` is null when this
+// system is not supported.
+export function enableAutostart(cliPath: string): { text: string; log: string | null } {
   const plan = autostartPlan(cliPath);
-  if (!plan) return "这台电脑还不支持开机自启，需要时在终端运行 achat start。";
+  if (!plan) return { text: "这台电脑还不支持开机自启，需要时在终端运行 achat start。", log: null };
   run(plan.stop, true);
   mkdirSync(dirname(plan.path), { recursive: true });
   mkdirSync(achatHome(), { recursive: true, mode: 0o700 });
   writeFileSync(plan.path, plan.content);
   run(plan.start, false);
-  return `Achat 已在后台运行，开机后会自动启动（日志：${plan.log}）。`;
+  return { text: `已设为开机自启，后台运行（日志：${plan.log}）。`, log: plan.log };
 }
 
 export function disableAutostart(cliPath: string): string {

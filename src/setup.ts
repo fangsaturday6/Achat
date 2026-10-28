@@ -42,6 +42,8 @@ interface ClaudeSettings {
 
 export interface SetupResult {
   lines: string[];
+  // Set when the background service was (re)started.
+  autostarted?: { log: string };
 }
 
 export interface SetupOptions {
@@ -126,11 +128,12 @@ export function setup(cliPath: string, { dryRun = false, autostart = true }: Set
   }
 
   const achat = onPath("achat") ? "achat" : `node ${/\s/.test(cliPath) ? JSON.stringify(cliPath) : cliPath}`;
-  let running = false;
+  let autostarted: SetupResult["autostarted"];
   if (autostart && !dryRun) {
     try {
-      lines.push(`✓ ${enableAutostart(cliPath)}`);
-      running = true;
+      const { text, log } = enableAutostart(cliPath);
+      lines.push(`${log ? "✓" : "•"} ${text}`);
+      if (log) autostarted = { log };
     } catch (err) {
       lines.push(`• 开机自启没有设置成功：${(err as Error).message}`);
     }
@@ -141,7 +144,7 @@ export function setup(cliPath: string, { dryRun = false, autostart = true }: Set
   const next: (string | null)[] = [
     "",
     `装好了：${found.join("、")}。`,
-    running || (autostart && dryRun)
+    autostarted || (autostart && dryRun)
       ? `关闭开机自启：${achat} autostart off`
       : `接下来在终端运行 \`${achat} start\` 启动 Achat（关掉终端就会停止）。`,
     found.includes("Codex") ? "Codex 需要重新开一次会话才能用。" : null,
@@ -154,5 +157,5 @@ export function setup(cliPath: string, { dryRun = false, autostart = true }: Set
   ];
   lines.push(...next.filter((l) => l !== null));
   if (dryRun) lines.unshift("（演练模式，没有写入任何文件）");
-  return { lines };
+  return { lines, autostarted };
 }

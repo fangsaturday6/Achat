@@ -70,6 +70,7 @@ export async function startRelay(opts: RelayOptions): Promise<RunningRelay> {
   const store = new Store(opts.dbPath);
   const service = new RelayService(store, opts.config);
   const token = opts.config.token;
+  const startedAt = Date.now();
   let port = opts.port ?? opts.config.port;
 
   // Only answer requests addressed to this machine by name, so a web page on
@@ -122,6 +123,7 @@ export async function startRelay(opts: RelayOptions): Promise<RunningRelay> {
 
     if (method === "GET" && parts[0] === "events") return events(req, res, url);
     if (method === "GET" && parts[0] === "agents") return send(res, 200, service.listAgents());
+    if (method === "GET" && parts[0] === "health") return send(res, 200, { pid: process.pid, startedAt });
 
     if (parts[0] === "threads" && parts.length === 1) {
       if (method === "GET") {

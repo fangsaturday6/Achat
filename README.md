@@ -42,7 +42,9 @@ npm run build
 node dist/cli.js setup
 ```
 
-如果之前在终端里运行着 `start`，按 Ctrl+C 关掉，后台的 Achat 会接着运行。Codex 要重新开一次会话。
+`setup` 会重启后台的 Achat；如果之前在终端里运行着更新前的 `start`，它会停掉那个旧进程，最后一行显示"新版 Achat 已在运行"就对了。Codex 要重新开一次会话。
+
+正在运行的 Achat 是不是新版，可以用 `node dist/cli.js status` 查看。
 
 ## 组成
 

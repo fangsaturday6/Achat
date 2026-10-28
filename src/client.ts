@@ -31,6 +31,10 @@ export class RelayClient {
     return data as T;
   }
 
+  health(): Promise<{ pid: number; startedAt: number }> {
+    return this.call("GET", "/api/health");
+  }
+
   agents(): Promise<AgentConfig[]> {
     return this.call("GET", "/api/agents");
   }

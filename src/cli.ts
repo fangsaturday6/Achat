@@ -104,22 +104,37 @@ async function main(): Promise<void> {
     }
     case "setup": {
       const { setup } = await import("./setup.js");
-      const result = setup(join(packageRoot, "dist", "cli.js"), {
-        dryRun: args.includes("--dry-run"),
-        autostart: !args.includes("--no-autostart"),
-      });
+      const cli = join(packageRoot, "dist", "cli.js");
+      const dryRun = args.includes("--dry-run");
+      const autostart = !args.includes("--no-autostart");
+      const result = setup(cli, { dryRun, autostart });
       console.log(result.lines.join("\n"));
+      if (result.autostarted) {
+        const { takeOver } = await import("./running.js");
+        console.log("\n" + (await takeOver(client, cli, cfg.port, result.autostarted.log)));
+      }
       return;
     }
     case "autostart": {
       const { disableAutostart, enableAutostart } = await import("./autostart.js");
       const cli = join(packageRoot, "dist", "cli.js");
-      if (args[0] === "on") console.log(enableAutostart(cli));
-      else if (args[0] === "off") console.log(disableAutostart(cli));
+      if (args[0] === "on") {
+        const { text, log } = enableAutostart(cli);
+        console.log(text);
+        if (log) {
+          const { takeOver } = await import("./running.js");
+          console.log(await takeOver(client, cli, cfg.port, log));
+        }
+      } else if (args[0] === "off") console.log(disableAutostart(cli));
       else throw new Error("用法：achat autostart on|off");
       return;
     }
     case "status": {
+      const { checkRunning } = await import("./running.js");
+      const running = await checkRunning(client, join(packageRoot, "dist", "cli.js"));
+      if (running.state === "stale") {
+        console.log("正在运行的 Achat 是更新前启动的，还在用旧代码。运行 setup 换成新版。\n");
+      }
       const threads = await client.listThreads();
       const { STATUS_LABELS } = await import("./types.js");
       if (!threads.length) console.log("还没有协作。");
