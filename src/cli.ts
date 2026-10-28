@@ -21,8 +21,10 @@ async function readStdin(): Promise<void> {
 
 const HELP = `用法：achat <命令>
 
-  setup [--dry-run]                 为这台电脑上的 Claude Code 和 Codex 配好 Achat
-  start                             启动消息中转服务、接待进程和查看网页
+  setup [--dry-run] [--no-autostart]
+                                    为这台电脑上的 Claude Code 和 Codex 配好 Achat，并设为开机自启
+  start [--wait]                    启动消息中转服务、接待进程和查看网页；--wait 在端口被占用时等它空出来
+  autostart on|off                  打开或关闭开机自启
   status                            列出最近的协作
   mcp                               以 MCP 服务运行（由 AI 客户端调用，ACHAT_AGENT 指定身份）
   hook user-prompt --agent <id>     Claude Code 的待批准提醒 hook
@@ -37,11 +39,27 @@ async function main(): Promise<void> {
     case "start": {
       const { startRelay } = await import("./relay/server.js");
       const { Sidecar } = await import("./sidecar/sidecar.js");
-      const { ClaudeRunner } = await import("./sidecar/runners.js");
+      const { ClaudeRunner, CodexRunner } = await import("./sidecar/runners.js");
       const { desktopNotify } = await import("./sidecar/notify.js");
-      const relay = await startRelay({ config: cfg, dbPath: dbPath(), webDir: join(packageRoot, "web") });
+      const open = () => startRelay({ config: cfg, dbPath: dbPath(), webDir: join(packageRoot, "web") });
+      let relay: Awaited<ReturnType<typeof open>>;
+      for (let waiting = false; ; waiting = true) {
+        try {
+          relay = await open();
+          break;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "EADDRINUSE") throw err;
+          if (!args.includes("--wait")) {
+            console.error(`Achat 已经在运行：${relayUrl(cfg)}`);
+            process.exit(1);
+          }
+          // The background service waits here while a terminal copy holds the port.
+          if (!waiting) console.log(`端口 ${cfg.port} 被占用，等它空出来再启动……`);
+          await new Promise((r) => setTimeout(r, 5000));
+        }
+      }
       const runners = Object.fromEntries(
-        cfg.agents.filter((a) => a.client === "claude").map((a) => [a.id, new ClaudeRunner()]),
+        cfg.agents.map((a) => [a.id, a.client === "claude" ? new ClaudeRunner() : new CodexRunner()]),
       );
       const sidecar = new Sidecar({
         client: new RelayClient(relay.url, cfg.token),
@@ -86,8 +104,19 @@ async function main(): Promise<void> {
     }
     case "setup": {
       const { setup } = await import("./setup.js");
-      const result = setup(join(packageRoot, "dist", "cli.js"), args.includes("--dry-run"));
+      const result = setup(join(packageRoot, "dist", "cli.js"), {
+        dryRun: args.includes("--dry-run"),
+        autostart: !args.includes("--no-autostart"),
+      });
       console.log(result.lines.join("\n"));
+      return;
+    }
+    case "autostart": {
+      const { disableAutostart, enableAutostart } = await import("./autostart.js");
+      const cli = join(packageRoot, "dist", "cli.js");
+      if (args[0] === "on") console.log(enableAutostart(cli));
+      else if (args[0] === "off") console.log(disableAutostart(cli));
+      else throw new Error("用法：achat autostart on|off");
       return;
     }
     case "status": {
@@ -106,6 +135,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: Error) => {
-  console.error(err.message);
+  const refused = (err as { cause?: { code?: string } }).cause?.code === "ECONNREFUSED";
+  console.error(refused ? "Achat 没有在运行。运行 achat start，或者 achat autostart on 设为开机自启。" : err.message);
   process.exit(1);
 });

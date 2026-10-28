@@ -51,21 +51,33 @@ export function defaultConfig(): AchatConfig {
     port: DEFAULT_PORT,
     token: randomBytes(24).toString("base64url"),
     agents: DEFAULT_AGENTS,
-    defaults: { maxRounds: 5, budgetUsd: 1 },
+    defaults: { maxRounds: 5, budgetUsd: 5 },
     limits: { surfacedPerContactPerDay: 5, sentPerDay: 20 },
   };
 }
 
+// Early versions wrote the defaults into config.json, which pinned them there.
+const FIRST_DEFAULTS = JSON.stringify({ maxRounds: 5, budgetUsd: 1 });
+
+function save(stored: Partial<AchatConfig>): void {
+  mkdirSync(achatHome(), { recursive: true, mode: 0o700 });
+  writeFileSync(configPath(), JSON.stringify(stored, null, 2) + "\n", { mode: 0o600 });
+}
+
+// config.json holds this computer's port, token and agents, plus any defaults
+// or limits the person changed; everything else comes from defaultConfig().
 export function loadConfig(): AchatConfig {
   const path = configPath();
+  const base = defaultConfig();
   if (!existsSync(path)) {
-    const cfg = defaultConfig();
-    mkdirSync(achatHome(), { recursive: true, mode: 0o700 });
-    writeFileSync(path, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
-    return cfg;
+    save({ port: base.port, token: base.token, agents: base.agents });
+    return base;
   }
   const stored = JSON.parse(readFileSync(path, "utf8")) as Partial<AchatConfig>;
-  const base = defaultConfig();
+  if (JSON.stringify(stored.defaults) === FIRST_DEFAULTS) {
+    delete stored.defaults;
+    save(stored);
+  }
   return {
     ...base,
     ...stored,

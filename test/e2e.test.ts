@@ -40,12 +40,12 @@ describe("experiment 0 end to end", () => {
   });
   after(() => relay.close());
 
-  function startSidecar(replies: (string | Error)[]): void {
+  function startSidecar(replies: (string | Error)[], receiver = CLAUDE): void {
     runner = new ScriptedRunner(replies);
     sidecar = new Sidecar({
       client,
       agents: config.agents,
-      runners: { [CLAUDE]: runner },
+      runners: { [receiver]: runner },
       notify: (title, body) => notes.push(`${title} ${body}`),
       webUrl: relay.url,
       log: () => {},
@@ -86,6 +86,21 @@ describe("experiment 0 end to end", () => {
     const closed = textOf(await codex.callTool({ name: "close_thread", arguments: { thread_id: pending.id } }));
     assert.match(closed, /已结束/);
     assert.equal((await client.getThread(pending.id)).status, "closed");
+  });
+
+  test("Claude asks Codex, which searches its own history", async () => {
+    startSidecar(["周末定了三件事"], CODEX);
+    const claude = await mcpClient(client, CLAUDE, relay.url);
+    const asking = claude.callTool({
+      name: "send_request",
+      arguments: { to: "我的 Codex", topic: "周末的方案", message: "周末讨论的方案定了哪些？" },
+    });
+    const pending = await until(async () => (await client.listThreads({ status: "pending", to: CODEX }))[0]);
+    await client.approve(pending.id);
+    assert.match(textOf(await asking), /周末定了三件事/);
+    assert.match(runner.calls[0].systemPrompt, /Codex 对话记录/);
+    assert.match(runner.calls[0].systemPrompt, /你是「我的 Codex」/);
+    await claude.callTool({ name: "close_thread", arguments: { thread_id: pending.id } });
   });
 
   test("a declined request costs nothing and tells the asker", async () => {

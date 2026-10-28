@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { enableAutostart } from "./autostart.js";
 import { loadConfig, relayUrl } from "./config.js";
 
 const SKILL = `---
@@ -43,9 +44,16 @@ export interface SetupResult {
   lines: string[];
 }
 
+export interface SetupOptions {
+  // Only report what would change.
+  dryRun?: boolean;
+  // Start Achat in the background now and at every login.
+  autostart?: boolean;
+}
+
 // Configures every supported AI client on this computer to use Achat:
 // the MCP tools, the pending-request reminder and the Achat skill.
-export function setup(cliPath: string, dryRun = false): SetupResult {
+export function setup(cliPath: string, { dryRun = false, autostart = true }: SetupOptions = {}): SetupResult {
   const lines: string[] = [];
   const cfg = loadConfig();
   const node = process.execPath;
@@ -116,17 +124,35 @@ export function setup(cliPath: string, dryRun = false): SetupResult {
     lines.push("没有在这台电脑上找到 Claude Code 或 Codex。");
     return { lines };
   }
-  lines.push(
+
+  const achat = onPath("achat") ? "achat" : `node ${/\s/.test(cliPath) ? JSON.stringify(cliPath) : cliPath}`;
+  let running = false;
+  if (autostart && !dryRun) {
+    try {
+      lines.push(`✓ ${enableAutostart(cliPath)}`);
+      running = true;
+    } catch (err) {
+      lines.push(`• 开机自启没有设置成功：${(err as Error).message}`);
+    }
+  } else if (autostart) {
+    lines.push("✓ 设为开机自启，并在后台启动 Achat");
+  }
+
+  const next: (string | null)[] = [
     "",
     `装好了：${found.join("、")}。`,
-    "接下来在终端运行 `achat start` 启动 Achat（关掉终端就会停止）。",
-    found.includes("Codex") ? "Codex 需要重新开一次会话才能用。" : "",
+    running || (autostart && dryRun)
+      ? `关闭开机自启：${achat} autostart off`
+      : `接下来在终端运行 \`${achat} start\` 启动 Achat（关掉终端就会停止）。`,
+    found.includes("Codex") ? "Codex 需要重新开一次会话才能用。" : null,
     `查看和批准：${relayUrl(cfg)}`,
     "",
-    "可以试试，在 Codex 里说：",
-    "  “问问我的 Claude，上次的视频是怎么做的”",
+    "可以试试：",
+    found.includes("Codex") ? "  在 Codex 里说：“问问我的 Claude，上次的视频是怎么做的”" : null,
+    found.length === 2 ? "  在 Claude Code 里说：“问问我的 Codex，周末讨论的方案定了哪些”" : null,
     "  “我要和某人连上”（实验 0 还不支持，实验 1 加入）",
-  );
+  ];
+  lines.push(...next.filter((l) => l !== null));
   if (dryRun) lines.unshift("（演练模式，没有写入任何文件）");
-  return { lines: lines.filter((l, i, all) => !(l === "" && all[i - 1] === "")) };
+  return { lines };
 }
