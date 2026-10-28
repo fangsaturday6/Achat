@@ -43,6 +43,14 @@ export interface CreateRequestInput {
   message: string;
 }
 
+// Where the relay looks up the AIs it carries messages between: the fixed
+// list in config.json locally, the accounts database in the cloud.
+export interface AgentDirectory {
+  get(id: string): AgentConfig | undefined;
+}
+
+export type RelaySettings = Pick<AchatConfig, "defaults" | "limits">;
+
 export interface PostMessageInput {
   from: string;
   body: string;
@@ -55,19 +63,14 @@ export interface PostMessageInput {
 // HTTP API, the sidecar and the MCP tools see the same rules.
 export class RelayService {
   private events = new EventEmitter();
-  private agents: Map<string, AgentConfig>;
 
   constructor(
     private store: Store,
-    private config: AchatConfig,
+    private config: RelaySettings,
+    private agents: AgentDirectory,
     private now: () => Date = () => new Date(),
   ) {
-    this.agents = new Map(config.agents.map((a) => [a.id, a]));
     this.events.setMaxListeners(0);
-  }
-
-  listAgents(): AgentConfig[] {
-    return [...this.agents.values()];
   }
 
   agentName(id: string | null): string {
@@ -117,14 +120,22 @@ export class RelayService {
     return { ...thread, messages: this.store.messages(id) };
   }
 
-  listThreads(filter: { agent?: string; to?: string; status?: ThreadStatus; surfaced?: boolean }): ThreadSummary[] {
+  listThreads(filter: {
+    agent?: string;
+    agents?: string[];
+    to?: string;
+    status?: ThreadStatus;
+    surfaced?: boolean;
+  }): ThreadSummary[] {
     return this.store
       .listThreads(filter)
       .filter((t) => !filter.surfaced || !t.quiet)
       .map((t) => ({ ...t, lastMessage: this.store.lastMessage(t.id) }));
   }
 
-  createRequest(input: CreateRequestInput): ThreadDetail {
+  // `autoApprove` starts the thread right away with the default scope, for
+  // requests between AIs of the same person.
+  createRequest(input: CreateRequestInput, opts: { autoApprove?: boolean } = {}): ThreadDetail {
     this.requireAgent(input.from);
     this.requireAgent(input.to);
     if (input.from === input.to) throw new RelayError(400, "不能给自己发请求");
@@ -154,7 +165,14 @@ export class RelayService {
         now,
       );
       const msg = this.store.addMessage(thread.id, { sender: input.from, kind: "request", body: message }, now);
-      return { ...thread, messages: [msg] };
+      if (!opts.autoApprove) return { ...thread, messages: [msg] };
+      const started = this.store.updateThread(thread.id, { status: "active" }, now);
+      const note = this.store.addMessage(
+        thread.id,
+        { sender: null, kind: "system", body: `同一个人的 AI，自动接待 · ${this.scopeNote(started.scope)}` },
+        now,
+      );
+      return { ...started, messages: [msg, note] };
     });
     this.emit("thread.created", detail);
     return detail;
@@ -172,7 +190,7 @@ export class RelayService {
         {
           sender: null,
           kind: "system",
-          body: `已同意：只读对话记录 · ${finalScope.maxRounds} 轮 · $${finalScope.budgetUsd.toFixed(2)}`,
+          body: `已同意：${this.scopeNote(finalScope)}`,
         },
         now,
       );
@@ -180,6 +198,10 @@ export class RelayService {
     });
     this.emit("thread.updated", updated);
     return this.getThread(id);
+  }
+
+  private scopeNote(scope: Scope): string {
+    return `只读对话记录 · ${scope.maxRounds} 轮 · $${scope.budgetUsd.toFixed(2)}`;
   }
 
   decline(id: string): ThreadDetail {

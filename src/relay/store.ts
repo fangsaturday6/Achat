@@ -120,7 +120,8 @@ export interface ThreadPatch {
 }
 
 export class Store {
-  private db: DatabaseSync;
+  // Shared with the cloud's account tables, which live in the same file.
+  readonly db: DatabaseSync;
 
   constructor(path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
@@ -148,9 +149,15 @@ export class Store {
     return row ? toThread(row) : null;
   }
 
-  listThreads(filter: { agent?: string; to?: string; status?: ThreadStatus }): Thread[] {
+  listThreads(filter: { agent?: string; agents?: string[]; to?: string; status?: ThreadStatus }): Thread[] {
     const where: string[] = [];
     const params: string[] = [];
+    if (filter.agents) {
+      if (!filter.agents.length) return [];
+      const marks = filter.agents.map(() => "?").join(", ");
+      where.push(`(from_agent IN (${marks}) OR to_agent IN (${marks}))`);
+      params.push(...filter.agents, ...filter.agents);
+    }
     if (filter.agent) {
       where.push("(from_agent = ? OR to_agent = ?)");
       params.push(filter.agent, filter.agent);

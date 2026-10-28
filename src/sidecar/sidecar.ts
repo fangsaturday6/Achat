@@ -10,8 +10,10 @@ const MIN_ROUND_BUDGET_USD = 0.1;
 
 export interface SidecarOptions {
   client: RelayClient;
+  // Known AIs, for names; others are looked up on the relay when they appear.
   agents: AgentConfig[];
-  // Agents on this computer that can answer requests, keyed by agent id.
+  // The AIs on this computer, keyed by agent id. The sidecar notifies about
+  // and answers requests to these only.
   runners: Record<string, AgentRunner>;
   notify: Notifier;
   webUrl: string;
@@ -64,7 +66,18 @@ export class Sidecar {
   }
 
   private mine(agentId: string): boolean {
-    return this.agentsById.has(agentId);
+    return Object.hasOwn(this.opts.runners, agentId);
+  }
+
+  private async agent(id: string): Promise<AgentConfig | undefined> {
+    if (!this.agentsById.has(id)) {
+      try {
+        for (const a of await this.opts.client.agents()) this.agentsById.set(a.id, a);
+      } catch {
+        // fall back to the id
+      }
+    }
+    return this.agentsById.get(id);
   }
 
   start(): void {
@@ -92,17 +105,22 @@ export class Sidecar {
 
   private onEvent(e: RelayEvent): void {
     if (!this.mine(e.to)) return;
-    if (e.type === "thread.created" && e.status === "pending" && !e.quiet) {
-      const from = this.agentsById.get(e.from)?.name ?? e.from;
-      void this.opts.client
-        .getThread(e.threadId)
-        .then((t) => this.opts.notify(from, `[待批准] ${t.topic}`, `${this.opts.webUrl}/#/t/${e.threadId}`))
-        .catch(() => {});
+    if (e.type === "thread.created" && e.status === "pending") {
+      if (!e.quiet) void this.notifyPending(e.threadId, e.from);
       return;
     }
     if (e.status !== "active") return;
-    if (e.type === "thread.updated" || (e.type === "message.created" && e.sender === e.from)) {
-      void this.answer(e.threadId);
+    // Requests between one person's own AIs are created already active.
+    if (e.type !== "message.created" || e.sender === e.from) void this.answer(e.threadId);
+  }
+
+  private async notifyPending(threadId: string, fromId: string): Promise<void> {
+    try {
+      const from = (await this.agent(fromId))?.name ?? fromId;
+      const t = await this.opts.client.getThread(threadId);
+      this.opts.notify(from, `[待批准] ${t.topic}`, `${this.opts.webUrl}/#/t/${threadId}`);
+    } catch {
+      // the notification is a convenience; the request stays on the web page
     }
   }
 
@@ -118,8 +136,8 @@ export class Sidecar {
       const last = thread.messages.filter((m) => m.kind !== "system").at(-1);
       if (!last || last.sender !== thread.from) return;
 
-      const owner = this.agentsById.get(thread.to)!;
-      const from = this.agentsById.get(thread.from) ?? { id: thread.from, name: thread.from, client: "claude" as const };
+      const owner = (await this.agent(thread.to)) ?? { id: thread.to, name: thread.to, client: "claude" as const };
+      const from = (await this.agent(thread.from)) ?? { id: thread.from, name: thread.from, client: "claude" as const };
       const runner = this.opts.runners[thread.to];
       if (!runner) {
         await this.opts.client.fail(threadId, `${owner.name} 在这台电脑上还不能做接收方`);
