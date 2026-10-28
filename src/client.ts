@@ -72,6 +72,10 @@ export class RelayClient {
     return this.call("POST", `/api/threads/${encodeURIComponent(id)}/fail`, { reason });
   }
 
+  end(id: string, note: string): Promise<ThreadDetail> {
+    return this.call("POST", `/api/threads/${encodeURIComponent(id)}/end`, { note });
+  }
+
   postMessage(
     id: string,
     input: { from: string; body: string; costUsd?: number; redactions?: number; sessionId?: string },

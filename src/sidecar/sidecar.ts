@@ -3,7 +3,10 @@ import type { AgentConfig } from "../config.js";
 import { redact } from "../redact.js";
 import type { Message, RelayEvent, ThreadDetail } from "../types.js";
 import type { Notifier } from "./notify.js";
-import type { AgentRunner } from "./runners.js";
+import { BudgetExceededError, type AgentRunner, type RunOutput } from "./runners.js";
+
+// Below this, a round cannot do anything useful, so the thread ends instead.
+const MIN_ROUND_BUDGET_USD = 0.1;
 
 export interface SidecarOptions {
   client: RelayClient;
@@ -117,13 +120,27 @@ export class Sidecar {
         return;
       }
 
+      const left = Math.round((thread.scope.budgetUsd - thread.costUsd) * 100) / 100;
+      const budgetNote = `花费额度用完了（上限 $${thread.scope.budgetUsd.toFixed(2)}，已用 $${thread.costUsd.toFixed(2)}），这一轮没有回答。下次批准时可以把花费上限调高`;
+      if (left < MIN_ROUND_BUDGET_USD) {
+        await this.opts.client.end(threadId, budgetNote);
+        return;
+      }
+
       this.log(`回答 ${threadId}（第 ${thread.roundsUsed + 1} 轮）`);
-      const out = await runner.run({
-        prompt: responderPrompt(thread, last, from, !thread.responderSession),
-        systemPrompt: responderSystemPrompt(owner, from),
-        sessionId: thread.responderSession ?? undefined,
-        budgetUsd: Math.max(0.01, thread.scope.budgetUsd - thread.costUsd),
-      });
+      let out: RunOutput;
+      try {
+        out = await runner.run({
+          prompt: responderPrompt(thread, last, from, !thread.responderSession),
+          systemPrompt: responderSystemPrompt(owner, from),
+          sessionId: thread.responderSession ?? undefined,
+          budgetUsd: left,
+        });
+      } catch (err) {
+        if (!(err instanceof BudgetExceededError)) throw err;
+        await this.opts.client.end(threadId, budgetNote);
+        return;
+      }
       const filtered = redact(out.text);
       await this.opts.client.postMessage(threadId, {
         from: thread.to,

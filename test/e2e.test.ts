@@ -8,6 +8,7 @@ import type { AchatConfig } from "../src/config.js";
 import { userPromptHook } from "../src/hook.js";
 import { createMcpServer } from "../src/mcp/server.js";
 import type { RunningRelay } from "../src/relay/server.js";
+import { BudgetExceededError } from "../src/sidecar/runners.js";
 import { Sidecar } from "../src/sidecar/sidecar.js";
 import { CLAUDE, CODEX, ScriptedRunner, startTestRelay, until } from "./helpers.js";
 
@@ -145,6 +146,35 @@ describe("experiment 0 end to end", () => {
     );
     await client.approve(pending.id);
     assert.match(textOf(await asking), /接收方出错：预算用完/);
+  });
+
+  test("running out of budget ends the thread with a plain explanation", async () => {
+    startSidecar([new BudgetExceededError("error_max_budget_usd")]);
+    const codex = await mcpClient(client, CODEX, relay.url);
+    const asking = codex.callTool({ name: "send_request", arguments: { to: "我的 Claude", topic: "超预算", message: "问题" } });
+    const pending = await until(async () =>
+      (await client.listThreads({ status: "pending", to: CLAUDE })).find((t) => t.topic === "超预算"),
+    );
+    await client.approve(pending.id);
+    const outcome = textOf(await asking);
+    assert.match(outcome, /花费额度用完了/);
+    assert.doesNotMatch(outcome, /error_max_budget_usd|出错/);
+  });
+
+  test("a round is not started when too little budget is left", async () => {
+    startSidecar(["第一轮回答"]);
+    const codex = await mcpClient(client, CODEX, relay.url);
+    const asking = codex.callTool({ name: "send_request", arguments: { to: "我的 Claude", topic: "额度很少", message: "问题" } });
+    const pending = await until(async () =>
+      (await client.listThreads({ status: "pending", to: CLAUDE })).find((t) => t.topic === "额度很少"),
+    );
+    await client.approve(pending.id, { budgetUsd: 0.12 });
+    assert.match(textOf(await asking), /完整转给主人/);
+    const second = textOf(
+      await codex.callTool({ name: "send_message", arguments: { thread_id: pending.id, message: "追问" } }),
+    );
+    assert.match(second, /花费额度用完了/);
+    assert.equal(runner.calls.length, 1, "the second round never ran");
   });
 
   test("the hook stays quiet inside headless runs", async () => {

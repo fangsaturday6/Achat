@@ -202,9 +202,15 @@ export class RelayService {
   }
 
   fail(id: string, reason: string): ThreadDetail {
+    return this.end(id, `接收方出错：${reason}`);
+  }
+
+  // Ends a thread for a reason that is not an error, such as the budget
+  // running out, with the note shown to both sides as is.
+  end(id: string, note: string): ThreadDetail {
     const thread = this.requireThread(id);
     if (isTerminal(thread.status)) return this.getThread(id);
-    return this.finish(id, "closed", `接收方出错：${reason}`);
+    return this.finish(id, "closed", note);
   }
 
   private finish(id: string, status: ThreadStatus, note: string): ThreadDetail {

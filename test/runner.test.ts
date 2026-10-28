@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ClaudeRunner } from "../src/sidecar/runners.js";
+import { BudgetExceededError, ClaudeRunner } from "../src/sidecar/runners.js";
 
 // A stand-in for the claude CLI that records how it was called.
 function fakeClaude(dir: string, reply: object): string {
@@ -66,6 +66,9 @@ test("reports claude errors", async () => {
   const dir = mkdtempSync(join(tmpdir(), "achat-runner-"));
   process.env.ACHAT_CLAUDE_PROJECTS = dir;
   const bin = fakeClaude(dir, { type: "result", subtype: "error_max_budget_usd", is_error: true });
-  await assert.rejects(new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0.1 }), /error_max_budget_usd/);
+  await assert.rejects(
+    new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0.1 }),
+    (err: unknown) => err instanceof BudgetExceededError,
+  );
   delete process.env.ACHAT_CLAUDE_PROJECTS;
 });

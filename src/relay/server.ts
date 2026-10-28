@@ -186,6 +186,8 @@ export async function startRelay(opts: RelayOptions): Promise<RunningRelay> {
             return send(res, 200, service.close(id, str(body, "by")));
           case "fail":
             return send(res, 200, service.fail(id, str(body, "reason")));
+          case "end":
+            return send(res, 200, service.end(id, str(body, "note")));
           case "messages":
             return send(
               res,

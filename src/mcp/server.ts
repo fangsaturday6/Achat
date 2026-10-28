@@ -82,6 +82,9 @@ export function createMcpServer(opts: McpOptions): McpServer {
     if (reply) {
       const lines = [`${other}的回复（${meta}）：`, "", reply.body, ""];
       if (reply.redactions > 0) lines.push(`（已自动过滤 ${reply.redactions} 处敏感信息）`);
+      lines.push(
+        "请把上面的回复完整转给主人：步骤、提示词、命令、路径照原文给出，不要压缩成摘要；你的理解或建议放在原文后面另外说。",
+      );
       if (detail.status === "active") {
         lines.push(`要继续追问，用 send_message（thread_id: ${detail.id}）；问完了用 close_thread。`);
       } else {

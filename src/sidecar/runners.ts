@@ -23,6 +23,9 @@ export interface AgentRunner {
   run(input: RunInput): Promise<RunOutput>;
 }
 
+// The run hit the dollar cap it was given, so no answer was produced.
+export class BudgetExceededError extends Error {}
+
 export function claudeProjectsDir(): string {
   return process.env.ACHAT_CLAUDE_PROJECTS ?? join(homedir(), ".claude", "projects");
 }
@@ -93,6 +96,10 @@ export class ClaudeRunner implements AgentRunner {
         }
         if (!parsed || parsed.is_error || code !== 0 || !parsed.result) {
           const reason = parsed?.result || parsed?.subtype || stderr.trim().split("\n").at(-1) || `退出码 ${code}`;
+          if (/max_budget/i.test(`${parsed?.subtype ?? ""} ${reason}`)) {
+            reject(new BudgetExceededError(reason));
+            return;
+          }
           reject(
             new Error(
               /not logged in|\/login/i.test(reason)
