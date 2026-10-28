@@ -23,7 +23,13 @@ export interface AchatConfig {
     // A sender beyond this count in 24 hours must pass a check first.
     sentPerDay: number;
   };
+  // Set once this computer asks to join an Achat account. Until the person
+  // confirms on the web, `linked` is false and the local relay keeps working.
+  cloud?: { url: string; linked: boolean };
 }
+
+// The Achat service people sign up on; `achat link <url>` can name another.
+export const DEFAULT_CLOUD_URL = process.env.ACHAT_CLOUD_URL ?? "";
 
 // Experiment 0: one person, their own Claude Code and Codex on one computer,
 // identities written in config instead of registration.
@@ -84,6 +90,19 @@ export function loadConfig(): AchatConfig {
     defaults: { ...base.defaults, ...stored.defaults },
     limits: { ...base.limits, ...stored.limits },
   };
+}
+
+// Changes what config.json stores, leaving the rest as it is. `undefined`
+// removes a field.
+export function updateConfig(patch: Partial<AchatConfig>): AchatConfig {
+  loadConfig();
+  const stored = JSON.parse(readFileSync(configPath(), "utf8")) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) delete stored[key];
+    else stored[key] = value;
+  }
+  save(stored as Partial<AchatConfig>);
+  return loadConfig();
 }
 
 export function relayUrl(cfg: AchatConfig): string {

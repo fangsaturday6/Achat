@@ -16,7 +16,10 @@ type Elicit = () => ElicitResult;
 
 async function mcpClient(relayClient: RelayClient, agentId: string, webUrl: string, elicit?: Elicit): Promise<Client> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  await createMcpServer({ client: relayClient, agentId, webUrl, waitSeconds: 10 }).connect(serverSide);
+  await createMcpServer({
+    connection: () => ({ client: relayClient, agentId, webUrl, mode: "local" }),
+    waitSeconds: 10,
+  }).connect(serverSide);
   const client = new Client({ name: "test", version: "1" }, { capabilities: elicit ? { elicitation: { form: {} } } : {} });
   if (elicit) client.setRequestHandler(ElicitRequestSchema, async () => elicit());
   await client.connect(clientSide);

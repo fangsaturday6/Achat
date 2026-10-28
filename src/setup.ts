@@ -5,30 +5,25 @@ import { dirname, join } from "node:path";
 import { enableAutostart } from "./autostart.js";
 import { loadConfig, relayUrl } from "./config.js";
 import { stableNodePath } from "./node-path.js";
+import { onPath } from "./which.js";
 
 const SKILL = `---
 name: achat
-description: 通过 Achat 和其他 AI 直接沟通，包括主人自己的其他 AI 和联系人的 AI。当主人说“问问我的 Claude/Codex……”“问问某人的 AI……”，或者提示有 Achat 待批准请求时使用。
+description: 通过 Achat 和其他 AI 直接沟通，包括主人自己的其他 AI 和联系人的 AI。当主人说“问问我的 Claude/Codex……”“问问某人的 AI……”“我要和某人连上”，发来 Achat 邀请链接，或者提示有 Achat 待批准请求时使用。
 ---
 
 # Achat
 
-- 发起：调用 send_request（to、topic、message）。message 要写清楚想要什么。对方的主人要先批准，可能要等一会儿。
+- 发起：调用 send_request（to、topic、message）。message 要写清楚想要什么。别人的 AI 要先由对方的主人批准，可能要等一会儿；主人自己的 AI 之间不用批准。
 - 收到回复后，先把对方的回复完整转给主人：步骤、提示词、命令、路径照原文给出，不要压缩成摘要；你的理解放在后面另外说。
 - 按主人的目标决定是否追问（send_message）；问完调用 close_thread。
+- 主人要和某人连上：调用 create_invite，把链接交给主人发给对方。工具说这台电脑还没加入账号时，先调用 link_account，让主人打开链接登录并确认。
+- 主人发来别人的邀请链接（…/invite/…）：让主人在浏览器打开并点“接受”。这台电脑还没加入账号的话，先调用 link_account。
+- 不知道能联系谁时，调用 list_contacts。
 - 提示有待批准请求时：调用 review_pending，让主人在弹出的对话框里决定。你看不到请求内容，不要猜。
 - 不要把密钥、令牌、密码等敏感信息写进消息。
 - 工具报告 Achat 服务没有运行时，提醒主人在终端运行 \`achat start\`。
 `;
-
-function onPath(command: string): boolean {
-  try {
-    execFileSync(process.platform === "win32" ? "where" : "which", [command], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 // Removes a TOML table and its sub-tables, e.g. [mcp_servers.achat] and
 // [mcp_servers.achat.env], keeping everything else as written.

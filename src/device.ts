@@ -11,7 +11,7 @@ import {
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { platform } from "node:os";
 import { join } from "node:path";
-import { achatHome } from "./config.js";
+import { achatHome, type AgentClient } from "./config.js";
 
 // Each computer has its own Ed25519 key, like an SSH key. The cloud stores the
 // public half when the person adds the computer to their account; every
@@ -26,6 +26,12 @@ export interface DeviceKey {
 
 export function deviceIdFor(publicKey: string): string {
   return "d_" + createHash("sha256").update(Buffer.from(publicKey, "base64")).digest("base64url").slice(0, 16);
+}
+
+// An AI's id on the cloud is fixed by the computer it runs on, so the
+// computer can work out its own AIs' ids from its key.
+export function agentIdFor(deviceId: string, client: AgentClient): string {
+  return `${deviceId}/${client}`;
 }
 
 // Shown on the computer and on the confirmation page, so the person can tell
@@ -49,26 +55,33 @@ export interface KeyStore {
   remove(): void;
 }
 
-// The login keychain on macOS. Only this system user can read it.
+// The login keychain on macOS. Only this system user can read it. Reading
+// starts a process, so the key is kept in memory after the first read.
 export class KeychainStore implements KeyStore {
   private args = ["-s", "Achat", "-a", "device-key"];
+  private loaded: string | null | undefined;
 
   load(): string | null {
+    if (this.loaded !== undefined) return this.loaded;
     try {
-      return execFileSync("security", ["find-generic-password", ...this.args, "-w"], {
+      this.loaded = execFileSync("security", ["find-generic-password", ...this.args, "-w"], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "ignore"],
       }).trim();
     } catch {
+      // Not cached: the key may be created later by another process.
       return null;
     }
+    return this.loaded;
   }
 
   save(pkcs8: string): void {
     execFileSync("security", ["add-generic-password", "-U", ...this.args, "-w", pkcs8], { stdio: "ignore" });
+    this.loaded = pkcs8;
   }
 
   remove(): void {
+    this.loaded = undefined;
     try {
       execFileSync("security", ["delete-generic-password", ...this.args], { stdio: "ignore" });
     } catch {
@@ -78,8 +91,13 @@ export class KeychainStore implements KeyStore {
 }
 
 // A file readable only by this system user, for systems without a keychain.
+// Without a path it lives in ACHAT_HOME as it is when used.
 export class FileKeyStore implements KeyStore {
-  constructor(private path = join(achatHome(), "device.key")) {}
+  constructor(private fixedPath?: string) {}
+
+  private get path(): string {
+    return this.fixedPath ?? join(achatHome(), "device.key");
+  }
 
   load(): string | null {
     return existsSync(this.path) ? readFileSync(this.path, "utf8").trim() : null;
@@ -95,19 +113,24 @@ export class FileKeyStore implements KeyStore {
   }
 }
 
+let defaultStore: KeyStore | null = null;
+
 export function defaultKeyStore(): KeyStore {
-  return platform() === "darwin" && process.env.ACHAT_KEYSTORE !== "file" ? new KeychainStore() : new FileKeyStore();
+  defaultStore ??=
+    platform() === "darwin" && process.env.ACHAT_KEYSTORE !== "file" ? new KeychainStore() : new FileKeyStore();
+  return defaultStore;
 }
 
-const cache = new WeakMap<KeyStore, DeviceKey>();
+const parsed = new Map<string, DeviceKey>();
 
 export function loadDeviceKey(store: KeyStore = defaultKeyStore()): DeviceKey | null {
-  const cached = cache.get(store);
-  if (cached) return cached;
   const pkcs8 = store.load();
   if (!pkcs8) return null;
-  const key = fromPkcs8(pkcs8);
-  cache.set(store, key);
+  let key = parsed.get(pkcs8);
+  if (!key) {
+    key = fromPkcs8(pkcs8);
+    parsed.set(pkcs8, key);
+  }
   return key;
 }
 
@@ -120,7 +143,6 @@ export function ensureDeviceKey(store: KeyStore = defaultKeyStore()): DeviceKey 
 }
 
 export function forgetDeviceKey(store: KeyStore = defaultKeyStore()): void {
-  cache.delete(store);
   store.remove();
 }
 

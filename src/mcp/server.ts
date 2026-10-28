@@ -1,16 +1,29 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { RelayClient, RelayClientError } from "../client.js";
+import { RelayClient, RelayClientError, type DeviceLinkTicket } from "../client.js";
 import type { AgentConfig } from "../config.js";
 import { isTerminal, STATUS_LABELS, type ThreadDetail } from "../types.js";
 
-export interface McpOptions {
+export interface McpConnection {
   client: RelayClient;
   agentId: string;
   webUrl: string;
+  mode: "local" | "cloud";
+}
+
+export interface McpOptions {
+  // Read on every tool call, so a computer that joins an account switches
+  // over without restarting the AI client.
+  connection: () => McpConnection;
+  // Starts adding this computer to an account; see link_account.
+  link?: (server?: string) => Promise<DeviceLinkTicket>;
   // How long a tool call waits for the other side before handing back a
   // thread id to check later.
   waitSeconds?: number;
+}
+
+function normalize(name: string): string {
+  return name.replace(/\s+/g, "").toLowerCase();
 }
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
@@ -24,31 +37,31 @@ function money(n: number): string {
 }
 
 export function createMcpServer(opts: McpOptions): McpServer {
-  const { client, agentId } = opts;
   const waitMs = (opts.waitSeconds ?? 540) * 1000;
   const server = new McpServer({ name: "achat", version: "0.0.1" });
 
-  let agentsCache: AgentConfig[] | null = null;
-  const agents = async (): Promise<AgentConfig[]> => (agentsCache ??= await client.agents());
-  const nameOf = async (id: string | null): Promise<string> =>
-    id ? ((await agents()).find((a) => a.id === id)?.name ?? id) : "Achat";
+  async function nameOf(c: McpConnection, id: string | null): Promise<string> {
+    if (!id) return "Achat";
+    return (await c.client.agents()).find((a) => a.id === id)?.name ?? id;
+  }
 
-  async function resolveContact(to: string): Promise<AgentConfig> {
-    const list = (await agents()).filter((a) => a.id !== agentId);
-    const key = to.trim().toLowerCase();
-    const match =
-      list.find((a) => a.id.toLowerCase() === key) ??
-      list.find((a) => a.name.toLowerCase() === key) ??
-      list.find((a) => a.name.toLowerCase().includes(key) || key.includes(a.client));
-    if (!match) {
-      throw new Error(`找不到联系人「${to}」。可以联系的有：${list.map((a) => `${a.name}（${a.id}）`).join("、")}`);
-    }
-    return match;
+  async function resolveContact(c: McpConnection, to: string): Promise<AgentConfig> {
+    const list = (await c.client.agents()).filter((a) => a.id !== c.agentId);
+    const key = normalize(to);
+    const exact = list.find((a) => a.id.toLowerCase() === key || normalize(a.name) === key);
+    if (exact) return exact;
+    const close = list.filter((a) => normalize(a.name).includes(key) || key.includes(normalize(a.name)));
+    if (close.length === 1) return close[0];
+    const options = (close.length ? close : list).map((a) => `${a.name}（${a.id}）`).join("、");
+    if (close.length > 1) throw new Error(`「${to}」能对上好几个：${options}。请用完整的名字或 id`);
+    if (!list.length) throw new Error("还没有可以联系的 AI。调用 create_invite 生成邀请链接，让主人发给对方");
+    throw new Error(`找不到联系人「${to}」。可以联系的有：${options}`);
   }
 
   // Waits until the other side has answered after `afterSeq` or the thread
   // ends, reporting progress so clients keep long calls alive.
   async function waitForReply(
+    client: RelayClient,
     start: ThreadDetail,
     afterSeq: number,
     extra: { signal: AbortSignal; sendNotification: (n: any) => Promise<void>; _meta?: { progressToken?: string | number } },
@@ -74,8 +87,8 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }
   }
 
-  async function describeOutcome(detail: ThreadDetail, afterSeq: number): Promise<string> {
-    const other = await nameOf(detail.to);
+  async function describeOutcome(c: McpConnection, detail: ThreadDetail, afterSeq: number): Promise<string> {
+    const other = await nameOf(c, detail.to);
     const reply = detail.messages.filter((m) => m.seq > afterSeq && m.sender === detail.to).at(-1);
     const ended = detail.messages.filter((m) => m.seq > afterSeq && m.kind === "system").at(-1);
     const meta = `协作 ${detail.id}，第 ${detail.roundsUsed}/${detail.scope.maxRounds} 轮，已花费 ${money(detail.costUsd)}`;
@@ -127,8 +140,13 @@ export function createMcpServer(opts: McpOptions): McpServer {
       inputSchema: {},
     },
     guard(async () => {
-      const list = (await agents()).filter((a) => a.id !== agentId);
-      return text(list.map((a) => `${a.name}（${a.id}）`).join("\n") || "还没有联系人。");
+      const c = opts.connection();
+      const list = (await c.client.agents()).filter((a) => a.id !== c.agentId);
+      const hint =
+        c.mode === "cloud"
+          ? "要联系别人的 AI，调用 create_invite 生成邀请链接，让主人发给对方。"
+          : "要联系别人的 AI，先调用 link_account 把这台电脑加入主人的 Achat 账号。";
+      return text([...list.map((a) => `${a.name}（${a.id}）`), "", hint].join("\n").trim());
     }),
   );
 
@@ -146,11 +164,12 @@ export function createMcpServer(opts: McpOptions): McpServer {
       },
     },
     guard(async ({ to, topic, message }: { to: string; topic: string; message: string }, extra) => {
-      const contact = await resolveContact(to);
-      const created = await client.createRequest({ from: agentId, to: contact.id, topic, message });
-      const afterSeq = created.messages.at(-1)!.seq;
-      const done = await waitForReply(created, afterSeq, extra);
-      return text(await describeOutcome(done, afterSeq));
+      const c = opts.connection();
+      const contact = await resolveContact(c, to);
+      const created = await c.client.createRequest({ from: c.agentId, to: contact.id, topic, message });
+      const afterSeq = created.messages.find((m) => m.kind === "request")!.seq;
+      const done = await waitForReply(c.client, created, afterSeq, extra);
+      return text(await describeOutcome(c, done, afterSeq));
     }),
   );
 
@@ -165,10 +184,11 @@ export function createMcpServer(opts: McpOptions): McpServer {
       },
     },
     guard(async ({ thread_id, message }: { thread_id: string; message: string }, extra) => {
-      const posted = await client.postMessage(thread_id, { from: agentId, body: message });
-      const afterSeq = posted.messages.filter((m) => m.sender === agentId).at(-1)!.seq;
-      const done = await waitForReply(posted, afterSeq, extra);
-      return text(await describeOutcome(done, afterSeq));
+      const c = opts.connection();
+      const posted = await c.client.postMessage(thread_id, { from: c.agentId, body: message });
+      const afterSeq = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!.seq;
+      const done = await waitForReply(c.client, posted, afterSeq, extra);
+      return text(await describeOutcome(c, done, afterSeq));
     }),
   );
 
@@ -180,13 +200,14 @@ export function createMcpServer(opts: McpOptions): McpServer {
       inputSchema: { thread_id: z.string().describe("协作 id") },
     },
     guard(async ({ thread_id }: { thread_id: string }) => {
-      const t = await client.getThread(thread_id);
+      const c = opts.connection();
+      const t = await c.client.getThread(thread_id);
       const lines = [
         `协作 ${t.id}：${t.topic}（${STATUS_LABELS[t.status]}，第 ${t.roundsUsed}/${t.scope.maxRounds} 轮，已花费 ${money(t.costUsd)}）`,
         "",
       ];
       for (const m of t.messages) {
-        lines.push(m.kind === "system" ? `— ${m.body}` : `${await nameOf(m.sender)}：${m.body}`);
+        lines.push(m.kind === "system" ? `— ${m.body}` : `${await nameOf(c, m.sender)}：${m.body}`);
       }
       return text(lines.join("\n"));
     }),
@@ -200,7 +221,8 @@ export function createMcpServer(opts: McpOptions): McpServer {
       inputSchema: { thread_id: z.string().describe("协作 id") },
     },
     guard(async ({ thread_id }: { thread_id: string }) => {
-      await client.close(thread_id, agentId);
+      const c = opts.connection();
+      await c.client.close(thread_id, c.agentId);
       return text(`协作 ${thread_id} 已结束。`);
     }),
   );
@@ -215,10 +237,12 @@ export function createMcpServer(opts: McpOptions): McpServer {
       inputSchema: {},
     },
     guard(async () => {
-      const pending = await client.listThreads({ to: agentId, status: "pending", surfaced: true });
+      const c = opts.connection();
+      const client = c.client;
+      const pending = await client.listThreads({ to: c.agentId, status: "pending", surfaced: true });
       if (!pending.length) return text("没有待批准的请求。");
       if (!server.server.getClientCapabilities()?.elicitation) {
-        return text(`有 ${pending.length} 个待批准的请求。这个客户端不能弹出对话框，请让主人打开 ${opts.webUrl} 批准。`);
+        return text(`有 ${pending.length} 个待批准的请求。这个客户端不能弹出对话框，请让主人打开 ${c.webUrl} 批准。`);
       }
       let approved = 0;
       let declined = 0;
@@ -229,11 +253,11 @@ export function createMcpServer(opts: McpOptions): McpServer {
         const result = await server.server.elicitInput({
           mode: "form",
           message: [
-            `${await nameOf(t.from)} · ${t.topic}`,
+            `${await nameOf(c, t.from)} · ${t.topic}`,
             "",
             request?.body ?? "",
             "",
-            `同意后，${await nameOf(t.to)}只读本机对话记录来回答。提交表示同意，拒绝表示不接受，取消则留到以后处理。`,
+            `同意后，${await nameOf(c, t.to)}只读本机对话记录来回答。提交表示同意，拒绝表示不接受，取消则留到以后处理。`,
           ].join("\n"),
           requestedSchema: {
             type: "object",
@@ -270,8 +294,60 @@ export function createMcpServer(opts: McpOptions): McpServer {
         }
       }
       const parts = [`已同意 ${approved} 个`, `拒绝 ${declined} 个`];
-      if (left) parts.push(`还有 ${left} 个留在 ${opts.webUrl}`);
+      if (left) parts.push(`还有 ${left} 个留在 ${c.webUrl}`);
       return text(`${parts.join("，")}。同意的请求会在后台回答，不占用当前会话。`);
+    }),
+  );
+
+  server.registerTool(
+    "create_invite",
+    {
+      title: "生成邀请链接",
+      description:
+        "生成一个邀请链接，让主人发给对方（微信、邮件都行）。对方打开并接受后，双方的 AI 就能通过 Achat 直接联系。" +
+        "当主人说“我要和某人连上”“邀请某人”时使用。链接 7 天内有效，只能用一次。",
+      inputSchema: {},
+    },
+    guard(async () => {
+      const c = opts.connection();
+      if (c.mode !== "cloud") {
+        return text("这台电脑还没加入 Achat 账号，不能邀请别人。先调用 link_account，让主人登录并确认添加这台电脑。");
+      }
+      const invite = await c.client.createInvite();
+      return text(
+        [
+          `邀请链接：${invite.url}`,
+          "",
+          "请把链接发给对方。对方还没装 Achat 的话，打开链接后会看到安装说明。链接 7 天内有效，只能用一次。",
+        ].join("\n"),
+      );
+    }),
+  );
+
+  server.registerTool(
+    "link_account",
+    {
+      title: "把这台电脑加入 Achat 账号",
+      description:
+        "把这台电脑加入主人的 Achat 账号。和自己的其他 AI 沟通不需要；要邀请别人、或接受别人的邀请之前需要。" +
+        "返回一个链接，主人在浏览器里打开、用邮箱登录并确认后生效。",
+      inputSchema: {
+        server: z.string().optional().describe("Achat 服务的地址，例如 https://achat.example.com；主人没提就不填"),
+      },
+    },
+    guard(async ({ server: url }: { server?: string }) => {
+      const c = opts.connection();
+      if (c.mode === "cloud") return text(`这台电脑已经加入了 Achat 账号，可以直接用 create_invite 邀请别人。网页：${c.webUrl}`);
+      if (!opts.link) return text("这个环境不能添加电脑，请让主人在终端运行 achat link。", true);
+      const ticket = await opts.link(url);
+      return text(
+        [
+          `请主人在浏览器打开：${ticket.url}`,
+          "",
+          `用邮箱登录后，确认页面上的配对码是 ${ticket.code}，一致再点确认。链接 10 分钟内有效。`,
+          "确认后 Achat 会自动切换到账号模式，不用重启。",
+        ].join("\n"),
+      );
     }),
   );
 

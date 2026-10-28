@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { AgentClient, AgentConfig } from "../config.js";
+import { agentIdFor } from "../device.js";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS accounts (
@@ -110,12 +111,6 @@ export function hashSecret(value: string): string {
 
 export function newId(prefix: string, bytes = 8): string {
   return prefix + randomBytes(bytes).toString("base64url");
-}
-
-// An AI's id is fixed by the computer it runs on, so the computer can work
-// out its own AIs' ids from its key.
-export function agentIdFor(deviceId: string, client: AgentClient): string {
-  return `${deviceId}/${client}`;
 }
 
 const CLIENT_LABEL: Record<AgentClient, string> = { claude: "Claude", codex: "Codex" };

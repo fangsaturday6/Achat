@@ -2,7 +2,7 @@
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RelayClient } from "./client.js";
-import { dbPath, loadConfig, relayUrl } from "./config.js";
+import { loadConfig, relayUrl } from "./config.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(here, "..");
@@ -23,83 +23,92 @@ const HELP = `用法：achat <命令>
 
   setup [--dry-run] [--no-autostart]
                                     为这台电脑上的 Claude Code 和 Codex 配好 Achat，并设为开机自启
-  start [--wait]                    启动消息中转服务、接待进程和查看网页；--wait 在端口被占用时等它空出来
+  start [--wait]                    启动 Achat；--wait 在端口被占用时等它空出来
   autostart on|off                  打开或关闭开机自启
   status                            列出最近的协作
+  link [地址]                       把这台电脑加入你的 Achat 账号（要和别人的 AI 联系时才需要）
+  unlink                            让这台电脑退出 Achat 账号，并删除本机钥匙
+  invite                            生成一个邀请链接，发给要连上的人
+  serve                             运行云端的 Achat 服务（部署在服务器上，见 deploy/）
   mcp                               以 MCP 服务运行（由 AI 客户端调用，ACHAT_AGENT 指定身份）
   hook user-prompt --agent <id>     Claude Code 的待批准提醒 hook
 `;
 
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
+  if (command === "serve") {
+    const { serve } = await import("./cloud/serve.js");
+    await serve(join(packageRoot, "web"));
+    return;
+  }
   const cfg = loadConfig();
-  const client = new RelayClient(relayUrl(cfg), cfg.token);
+  // The local relay, or in account mode the small local server that answers
+  // health checks for the background service.
+  const local = new RelayClient(relayUrl(cfg), cfg.token);
+  const { connect } = await import("./connection.js");
 
   switch (command) {
     case "start": {
-      const { startRelay } = await import("./relay/server.js");
-      const { Sidecar } = await import("./sidecar/sidecar.js");
-      const { ClaudeRunner, CodexRunner } = await import("./sidecar/runners.js");
-      const { desktopNotify } = await import("./sidecar/notify.js");
-      const open = () => startRelay({ config: cfg, dbPath: dbPath(), webDir: join(packageRoot, "web") });
-      let relay: Awaited<ReturnType<typeof open>>;
-      for (let waiting = false; ; waiting = true) {
-        try {
-          relay = await open();
-          break;
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== "EADDRINUSE") throw err;
-          if (!args.includes("--wait")) {
-            console.error(`Achat 已经在运行：${relayUrl(cfg)}`);
-            process.exit(1);
-          }
-          // The background service waits here while a terminal copy holds the port.
-          if (!waiting) console.log(`端口 ${cfg.port} 被占用，等它空出来再启动……`);
-          await new Promise((r) => setTimeout(r, 5000));
-        }
-      }
-      const runners = Object.fromEntries(
-        cfg.agents.map((a) => [a.id, a.client === "claude" ? new ClaudeRunner() : new CodexRunner()]),
-      );
-      const sidecar = new Sidecar({
-        client: new RelayClient(relay.url, cfg.token),
-        agents: cfg.agents,
-        runners,
-        notify: desktopNotify,
-        webUrl: relay.url,
-      });
-      sidecar.start();
-      console.log(`Achat 已启动：${relay.url}`);
-      console.log(`接收方：${cfg.agents.filter((a) => runners[a.id]).map((a) => a.name).join("、") || "无"}`);
-      const shutdown = async (): Promise<void> => {
-        sidecar.stop();
-        await relay.close();
-        process.exit(0);
-      };
-      process.on("SIGINT", shutdown);
-      process.on("SIGTERM", shutdown);
+      const { runDaemon } = await import("./daemon.js");
+      await runDaemon({ webDir: join(packageRoot, "web"), wait: args.includes("--wait") });
       return;
     }
     case "mcp": {
-      const agentId = process.env.ACHAT_AGENT ?? flag(args, "--agent");
-      if (!agentId || !cfg.agents.some((a) => a.id === agentId)) {
+      const localId = process.env.ACHAT_AGENT ?? flag(args, "--agent");
+      if (!localId || !cfg.agents.some((a) => a.id === localId)) {
         console.error(`ACHAT_AGENT 需要是这些之一：${cfg.agents.map((a) => a.id).join(", ")}`);
         process.exit(1);
       }
       const { createMcpServer } = await import("./mcp/server.js");
+      const { startLink } = await import("./link.js");
       const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
-      const server = createMcpServer({ client, agentId, webUrl: relayUrl(cfg) });
+      const server = createMcpServer({
+        connection: () => {
+          const conn = connect(loadConfig());
+          return { client: conn.client, agentId: conn.agentId(localId), webUrl: conn.webUrl, mode: conn.mode };
+        },
+        link: (url) => startLink(url),
+      });
       await server.connect(new StdioServerTransport());
       return;
     }
     case "hook": {
       if (args[0] !== "user-prompt") throw new Error("未知的 hook");
-      const agentId = flag(args, "--agent");
-      if (!agentId) throw new Error("缺少 --agent");
+      const localId = flag(args, "--agent");
+      if (!localId) throw new Error("缺少 --agent");
       await readStdin();
       const { userPromptHook } = await import("./hook.js");
-      const out = await userPromptHook(client, agentId);
+      const conn = connect(cfg);
+      const out = await userPromptHook(conn.client, conn.agentId(localId));
       if (out) process.stdout.write(out);
+      return;
+    }
+    case "link": {
+      const { checkLink, startLink } = await import("./link.js");
+      const ticket = await startLink(args[0]);
+      console.log(`在浏览器打开这个链接，用邮箱登录后确认添加这台电脑（10 分钟内有效）：\n\n  ${ticket.url}\n`);
+      console.log(`确认前核对：页面上的配对码应该是 ${ticket.code}\n`);
+      const deadline = Date.parse(ticket.expiresAt);
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const name = await checkLink();
+        if (name) {
+          console.log(`✓ 这台电脑已加入 ${name} 的 Achat 账号。后台的 Achat 会自动切换，不用重启。`);
+          return;
+        }
+      }
+      throw new Error("链接已过期，重新运行 achat link");
+    }
+    case "unlink": {
+      const { unlink } = await import("./link.js");
+      console.log(await unlink());
+      return;
+    }
+    case "invite": {
+      const conn = connect(cfg);
+      if (conn.mode !== "cloud") throw new Error("这台电脑还没加入 Achat 账号。先运行 achat link");
+      const invite = await conn.client.createInvite();
+      console.log(`邀请链接（7 天内有效，只能用一次）：\n\n  ${invite.url}\n\n把它发给要连上的人。`);
       return;
     }
     case "setup": {
@@ -111,7 +120,7 @@ async function main(): Promise<void> {
       console.log(result.lines.join("\n"));
       if (result.autostarted) {
         const { takeOver } = await import("./running.js");
-        console.log("\n" + (await takeOver(client, cli, cfg.port, result.autostarted.log)));
+        console.log("\n" + (await takeOver(local, cli, cfg.port, result.autostarted.log)));
       }
       return;
     }
@@ -123,7 +132,7 @@ async function main(): Promise<void> {
         console.log(text);
         if (log) {
           const { takeOver } = await import("./running.js");
-          console.log(await takeOver(client, cli, cfg.port, log));
+          console.log(await takeOver(local, cli, cfg.port, log));
         }
       } else if (args[0] === "off") console.log(disableAutostart(cli));
       else throw new Error("用法：achat autostart on|off");
@@ -131,11 +140,14 @@ async function main(): Promise<void> {
     }
     case "status": {
       const { checkRunning } = await import("./running.js");
-      const running = await checkRunning(client, join(packageRoot, "dist", "cli.js"));
+      const running = await checkRunning(local, join(packageRoot, "dist", "cli.js"));
       if (running.state === "stale") {
         console.log("正在运行的 Achat 是更新前启动的，还在用旧代码。运行 setup 换成新版。\n");
       }
-      const threads = await client.listThreads();
+      const conn = connect(cfg);
+      if (conn.mode === "cloud") console.log(`账号模式：${conn.webUrl}\n`);
+      else if (cfg.cloud) console.log(`正在等你在网页上确认添加这台电脑（${cfg.cloud.url}）\n`);
+      const threads = await conn.client.listThreads();
       const { STATUS_LABELS } = await import("./types.js");
       if (!threads.length) console.log("还没有协作。");
       for (const t of threads) {
