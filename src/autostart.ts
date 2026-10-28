@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, platform, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { achatHome } from "./config.js";
+import { stableNodePath } from "./node-path.js";
 
 const LABEL = "local.achat";
 
@@ -32,7 +33,7 @@ export function autostartPlan(
   cliPath: string,
   opts: { node?: string; os?: NodeJS.Platform; home?: string; path?: string; uid?: number } = {},
 ): AutostartPlan | null {
-  const node = opts.node ?? process.execPath;
+  const node = opts.node ?? stableNodePath();
   const os = opts.os ?? platform();
   const home = opts.home ?? homedir();
   const path = opts.path ?? process.env.PATH ?? "";

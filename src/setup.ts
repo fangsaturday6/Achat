@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { enableAutostart } from "./autostart.js";
 import { loadConfig, relayUrl } from "./config.js";
+import { stableNodePath } from "./node-path.js";
 
 const SKILL = `---
 name: achat
@@ -27,6 +28,20 @@ function onPath(command: string): boolean {
   } catch {
     return false;
   }
+}
+
+// Removes a TOML table and its sub-tables, e.g. [mcp_servers.achat] and
+// [mcp_servers.achat.env], keeping everything else as written.
+export function withoutTables(toml: string, name: string): string {
+  const own = new RegExp(`^\\s*\\[${name.replace(/\./g, "\\.")}(\\.[^\\]]+)?\\]\\s*(#.*)?$`);
+  let skipping = false;
+  return toml
+    .split("\n")
+    .filter((line) => {
+      if (/^\s*\[/.test(line)) skipping = own.test(line);
+      return !skipping;
+    })
+    .join("\n");
 }
 
 function writeFile(path: string, content: string, dryRun: boolean): void {
@@ -58,7 +73,7 @@ export interface SetupOptions {
 export function setup(cliPath: string, { dryRun = false, autostart = true }: SetupOptions = {}): SetupResult {
   const lines: string[] = [];
   const cfg = loadConfig();
-  const node = process.execPath;
+  const node = stableNodePath();
   const home = homedir();
   const found: string[] = [];
 
@@ -101,23 +116,19 @@ export function setup(cliPath: string, { dryRun = false, autostart = true }: Set
     found.push("Codex");
     const tomlPath = join(home, ".codex", "config.toml");
     const current = existsSync(tomlPath) ? readFileSync(tomlPath, "utf8") : "";
-    if (current.includes("[mcp_servers.achat]")) {
-      lines.push(`• Codex：${tomlPath} 里已经有 achat，没有改动`);
-    } else {
-      const block = [
-        "",
-        "[mcp_servers.achat]",
-        `command = ${JSON.stringify(node)}`,
-        `args = [${JSON.stringify(cliPath)}, "mcp"]`,
-        "tool_timeout_sec = 600",
-        "",
-        "[mcp_servers.achat.env]",
-        `ACHAT_AGENT = ${JSON.stringify(codexAgent.id)}`,
-        "",
-      ].join("\n");
-      writeFile(tomlPath, current.replace(/\s*$/, "\n") + block, dryRun);
-      lines.push("✓ Codex：已添加 MCP 工具 achat");
-    }
+    const block = [
+      "[mcp_servers.achat]",
+      `command = ${JSON.stringify(node)}`,
+      `args = [${JSON.stringify(cliPath)}, "mcp"]`,
+      "tool_timeout_sec = 600",
+      "",
+      "[mcp_servers.achat.env]",
+      `ACHAT_AGENT = ${JSON.stringify(codexAgent.id)}`,
+      "",
+    ].join("\n");
+    const others = withoutTables(current, "mcp_servers.achat").replace(/\s*$/, "");
+    writeFile(tomlPath, (others ? others + "\n\n" : "") + block, dryRun);
+    lines.push("✓ Codex：已添加 MCP 工具 achat");
     writeFile(join(home, ".agents", "skills", "achat", "SKILL.md"), SKILL, dryRun);
     lines.push("✓ Codex：已添加 Achat skill");
   }

@@ -72,10 +72,9 @@ npm run build
 - Codex 回答时用的是 ChatGPT 订阅额度，Achat 拿不到美元花费，只按轮数限制。
 - Codex 的只读沙箱不能写文件、不能联网，但能读本机任何文件；只看对话记录靠的是给它的规则。Claude 那边由权限设置限制在对话记录目录里。
 - 发给 Codex 的请求只能在网页上批准，Codex 里没有批准对话框。
-- 安装方式和设计稿里的 `npx achat setup` 不同：npm 包还没发布，先从仓库运行。配置里记的是这个仓库的路径，移动目录后要重新运行 `setup`。
+- 安装方式和设计稿里的 `npx achat setup` 不同：npm 包还没发布，先从仓库运行。配置里记的是这个仓库和 node 的路径，移动目录或换了 node 的安装方式后要重新运行 `setup`（Homebrew 升级 node 不受影响）。
 - 开机自启只支持 macOS 和 Linux。
 - 本机 AI 如果有执行命令的权限，理论上能读到 `~/.achat/config.json` 里的 token，直接调用批准接口。实验 1 改为只有登录后的网页才能批准。
 - 敏感信息过滤基于规则，不能保证完全干净；每条消息上会显示过滤了几处。
 - 点桌面通知直接打开网页，需要先装 terminal-notifier（`brew install terminal-notifier`）；没装时链接记在日志 `~/.achat/achat.log` 里。
-- `codex exec` 的调用方式用本地模拟的模型服务核实过，还没有用真实账号跑过。
 - 加联系人、注册、邀请链接都属于实验 1。
