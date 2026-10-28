@@ -93,7 +93,13 @@ export class ClaudeRunner implements AgentRunner {
         }
         if (!parsed || parsed.is_error || code !== 0 || !parsed.result) {
           const reason = parsed?.result || parsed?.subtype || stderr.trim().split("\n").at(-1) || `退出码 ${code}`;
-          reject(new Error(reason));
+          reject(
+            new Error(
+              /not logged in|\/login/i.test(reason)
+                ? "这台电脑上的 claude 命令还没登录。在终端运行 claude，输入 /login 登录后再试"
+                : reason,
+            ),
+          );
           return;
         }
         resolve({

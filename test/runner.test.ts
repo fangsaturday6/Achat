@@ -54,6 +54,14 @@ test("runs claude read-only, with the prompt on stdin and a budget cap", async (
   delete process.env.ACHAT_CLAUDE_PROJECTS;
 });
 
+test("explains how to log in when claude is not logged in", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "achat-runner-"));
+  process.env.ACHAT_CLAUDE_PROJECTS = dir;
+  const bin = fakeClaude(dir, { type: "result", result: "Not logged in · Please run /login", is_error: true });
+  await assert.rejects(new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0.1 }), /输入 \/login 登录/);
+  delete process.env.ACHAT_CLAUDE_PROJECTS;
+});
+
 test("reports claude errors", async () => {
   const dir = mkdtempSync(join(tmpdir(), "achat-runner-"));
   process.env.ACHAT_CLAUDE_PROJECTS = dir;
