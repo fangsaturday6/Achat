@@ -1,0 +1,32 @@
+{
+  "name": "achat",
+  "version": "0.0.1",
+  "description": "Let people's AIs talk to each other directly, with the human in control of authorization.",
+  "type": "module",
+  "bin": {
+    "achat": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "web"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --no-warnings=ExperimentalWarning --import tsx --test test/*.test.ts",
+    "start": "node --no-warnings=ExperimentalWarning dist/cli.js start"
+  },
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

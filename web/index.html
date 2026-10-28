@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Achat</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app">
+  <nav class="rail" aria-label="主导航">
+    <span class="me" aria-hidden="true">我</span>
+    <a href="#/" id="nav-messages" class="rail-btn" aria-label="消息">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8l-4 3.5V17H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></svg>
+      <span class="badge" id="pending-badge" hidden></span>
+    </a>
+    <a href="#/contacts" id="nav-contacts" class="rail-btn" aria-label="联系人">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.4 3.3-5.5 6.5-5.5s5.9 2.1 6.5 5.5"/><path d="M16 4.6a3.4 3.4 0 0 1 0 6.8"/><path d="M18.5 14.8c1.8.8 3 2.7 3.3 5.2"/></svg>
+    </a>
+  </nav>
+  <section class="list" aria-labelledby="list-title">
+    <div class="list-head"><h2 id="list-title">消息</h2></div>
+    <div id="list"></div>
+  </section>
+  <main class="chat" id="chat"></main>
+</div>
+<script>window.ACHAT_TOKEN = "__ACHAT_TOKEN__";</script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>
