@@ -52,22 +52,17 @@ node dist/cli.js setup
 
 ### 部署服务（一次）
 
-在服务器上以 root 运行（把域名换成你的）：
+内地服务器按 [docs/deploy-aliyun.md](docs/deploy-aliyun.md) 一步步来：
+- 在电脑上运行 `deploy/upload.sh`，把代码、Node.js 和 Caddy 一起传到服务器，再在服务器上运行 `deploy/install.sh` 完成安装；
+- npm 包从国内镜像下载；
+- Caddy 自动申请 HTTPS 证书。
+
+服务器能直接访问 GitHub 的话，也可以在服务器上运行：
 
 ```sh
 git clone -b claude/achat-decisions https://github.com/fangsaturday6/Achat.git /opt/achat
 bash /opt/achat/deploy/install.sh achat.example.com
 ```
-
-脚本会：
-- 装好 Node.js 22；
-- 把 Achat 构建成 systemd 服务；
-- 装 Caddy 自动申请 HTTPS 证书。
-
-再运行一次就是更新。之后：
-
-1. 在 Resend 里验证一个发信域名，把 API Key 和发件人填进 `/etc/achat/achat.env`，再运行 `systemctl restart achat`。没填的话，验证码只打印在 `journalctl -u achat` 里。
-2. 域名的 A 记录指向服务器，阿里云安全组放行 80 和 443。服务器在中国内地的话，域名要先完成 ICP 备案。
 
 ### 每个人（各做一次）
 
