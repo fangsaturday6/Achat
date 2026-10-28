@@ -1,0 +1,7 @@
+achat.example.com {
+	encode gzip
+	reverse_proxy 127.0.0.1:8080 {
+		# Pass the event stream through as it is written.
+		flush_interval -1
+	}
+}

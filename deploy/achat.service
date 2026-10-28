@@ -1,0 +1,21 @@
+[Unit]
+Description=Achat cloud service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=achat
+Group=achat
+WorkingDirectory=/opt/achat
+EnvironmentFile=/etc/achat/achat.env
+ExecStart=/usr/bin/node --no-warnings=ExperimentalWarning /opt/achat/dist/cli.js serve
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/achat
+
+[Install]
+WantedBy=multi-user.target
