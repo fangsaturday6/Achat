@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # 安装或更新 Achat，并把这台电脑加入 __ACHAT_URL__ 上的 Achat 账号。
-# 由 Achat 服务提供：curl -fsSL __ACHAT_URL__/install.sh | bash
+# 由 Achat 服务提供：curl -fsSL __ACHAT_URL__/install.sh | bash -s -- <凭证>
+# 凭证是 Achat 网页“连接你的 AI”给的一次性凭证；带上它，电脑直接加入账号，
+# 不用再打开网页确认。不带时，最后给出一个确认链接。
 # 代码从这台 Achat 服务下载，不经过 GitHub；npm 包默认用国内镜像。
 set -euo pipefail
 
 URL="__ACHAT_URL__"
+TOKEN="${1:-}"
 NODE_VERSION=22.22.0
 APP="${ACHAT_HOME:-$HOME/.achat}/app"
 REGISTRY="${ACHAT_NPM_REGISTRY:-https://registry.npmmirror.com}"
@@ -47,4 +50,8 @@ say "配置这台电脑上的 Claude Code 和 Codex"
 node "$APP/dist/cli.js" setup
 
 say "加入账号"
-node "$APP/dist/cli.js" link "$URL" --no-wait
+if [ -n "$TOKEN" ]; then
+  node "$APP/dist/cli.js" link "$URL" --no-wait --token "$TOKEN"
+else
+  node "$APP/dist/cli.js" link "$URL" --no-wait
+fi

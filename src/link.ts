@@ -26,7 +26,13 @@ export function cloudUrlFor(cfg: AchatConfig, given?: string): string {
 // Asks the cloud to add this computer to an account. The person opens the
 // returned link, logs in and confirms; until then nothing changes locally
 // except that config.json remembers the pending link.
-export async function startLink(url?: string, keys: KeyStore = defaultKeyStore()): Promise<DeviceLinkTicket> {
+// With `enroll`, a one-time credential the person made on the web, the
+// computer joins at once and no page needs confirming.
+export async function startLink(
+  url?: string,
+  keys: KeyStore = defaultKeyStore(),
+  enroll?: string,
+): Promise<DeviceLinkTicket> {
   const cfg = loadConfig();
   if (cfg.cloud?.linked) throw new Error(`这台电脑已经加入了 Achat 账号（${cfg.cloud.url}）。要换账号，先运行 achat unlink`);
   const server = cloudUrlFor(cfg, url);
@@ -37,8 +43,9 @@ export async function startLink(url?: string, keys: KeyStore = defaultKeyStore()
     publicKey: key.publicKey,
     name: computerName(),
     clients,
+    ...(enroll ? { enroll } : {}),
   });
-  updateConfig({ cloud: { url: server, linked: false } });
+  updateConfig({ cloud: { url: server, linked: ticket.status === "approved" } });
   return ticket;
 }
 

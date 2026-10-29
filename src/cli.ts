@@ -26,7 +26,8 @@ const HELP = `用法：achat <命令>
   start [--wait]                    启动 Achat；--wait 在端口被占用时等它空出来
   autostart on|off                  打开或关闭开机自启
   status                            列出最近的协作
-  link [地址] [--no-wait]           把这台电脑加入你的 Achat 账号（要和别人的 AI 联系时才需要）
+  link [地址] [--no-wait] [--token 凭证]
+                                    把这台电脑加入你的 Achat 账号；带上网页给的凭证时直接加入
   unlink                            让这台电脑退出 Achat 账号，并删除本机钥匙
   invite                            生成一个邀请链接，发给要连上的人
   serve                             运行云端的 Achat 服务（部署在服务器上，见 deploy/）
@@ -89,7 +90,16 @@ async function main(): Promise<void> {
         return;
       }
       const { checkLink, startLink } = await import("./link.js");
-      const ticket = await startLink(args.find((a) => !a.startsWith("--")));
+      const enroll = flag(args, "--token");
+      const ticket = await startLink(
+        args.find((a, i) => !a.startsWith("--") && args[i - 1] !== "--token"),
+        undefined,
+        enroll,
+      );
+      if (ticket.status === "approved") {
+        console.log(`✓ 这台电脑已加入 ${ticket.account} 的 Achat 账号。后台的 Achat 会自动切换，不用重启。`);
+        return;
+      }
       console.log(`在浏览器打开这个链接，用邮箱登录后确认添加这台电脑（10 分钟内有效）：\n\n  ${ticket.url}\n`);
       console.log(`确认前核对：页面上的配对码应该是 ${ticket.code}\n`);
       if (args.includes("--no-wait")) {
