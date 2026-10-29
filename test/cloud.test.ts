@@ -29,7 +29,13 @@ describe("cloud", () => {
   test("logging in with an emailed code, with limits on guessing", async () => {
     const browser = new Browser(cloud.url);
     await browser.call("POST", "/api/auth/code", { email: "New@Example.com" });
-    assert.match(mailer.sent.at(-1)!.text, /10 分钟内有效/);
+    const mail = mailer.sent.at(-1)!;
+    const code = mailer.lastCode("new@example.com");
+    assert.match(mail.subject, new RegExp(`^${code} 是你的 Achat 验证码$`), "the code leads the subject, for previews");
+    assert.match(mail.text, /10 分钟内有效/);
+    assert.match(mail.html!, new RegExp(`>${code}<`), "the HTML shows the code on its own, so it copies cleanly");
+    assert.match(mail.html!, /achat\.test/);
+    assert.doesNotMatch(mail.html!, /style="[^"]*:\s*"/, "no double quotes cut a style attribute short");
     await assert.rejects(browser.call("POST", "/api/auth/code", { email: "new@example.com" }), /一分钟后再试/);
     for (let i = 0; i < 5; i++) {
       await assert.rejects(browser.call("POST", "/api/auth/verify", { email: "new@example.com", code: "000000" }), /验证码/);

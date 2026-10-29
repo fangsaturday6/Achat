@@ -2,6 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RelayClient, RelayClientError } from "../src/client.js";
+import type { Email } from "../src/cloud/emails.js";
 import type { Mailer } from "../src/cloud/mailer.js";
 import { startCloud, type RunningCloud } from "../src/cloud/server.js";
 import { defaultConfig, type AchatConfig, type AgentClient } from "../src/config.js";
@@ -54,9 +55,9 @@ export async function until<T>(fn: () => Promise<T | null | undefined | false>, 
 // --- cloud
 
 export class MemoryMailer implements Mailer {
-  sent: { to: string; subject: string; text: string }[] = [];
-  async send(to: string, subject: string, text: string): Promise<void> {
-    this.sent.push({ to, subject, text });
+  sent: Email[] = [];
+  async send(email: Email): Promise<void> {
+    this.sent.push(email);
   }
   lastCode(to: string): string {
     const mail = this.sent.filter((m) => m.to === to).at(-1);

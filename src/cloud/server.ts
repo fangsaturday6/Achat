@@ -8,6 +8,7 @@ import { RelayError, RelayService, type RelaySettings } from "../relay/service.j
 import { Store } from "../relay/store.js";
 import { threadsApi, type Viewer } from "../relay/threads-api.js";
 import { AccountStore, hashSecret, type Account, type Device } from "./accounts.js";
+import { loginCodeEmail } from "./emails.js";
 import type { Mailer } from "./mailer.js";
 
 const MINUTE = 60 * 1000;
@@ -220,11 +221,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
     accounts.saveLoginCode(email, hashSecret(`${email}:${code}`), ms() + CODE_TTL, ms());
     try {
-      await opts.mailer.send(
-        email,
-        `Achat 验证码：${code}`,
-        `你的 Achat 验证码是 ${code}，10 分钟内有效。\n\n如果不是你本人在登录 Achat，忽略这封邮件即可。`,
-      );
+      await opts.mailer.send(loginCodeEmail(email, code, publicUrl));
     } catch (err) {
       console.error("[achat cloud]", err);
       accounts.deleteLoginCode(email);
