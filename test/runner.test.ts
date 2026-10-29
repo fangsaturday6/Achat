@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -38,7 +38,7 @@ test("runs claude read-only, with the prompt on stdin and a budget cap", async (
   assert.equal(first.costUsd, 0.03);
   assert.equal(call.input, "问题");
   assert.equal(call.headless, "1");
-  assert.equal(call.cwd, dir);
+  assert.equal(call.cwd, realpathSync(dir)); // on macOS the temp folder is reached through a symlink
   const args: string[] = call.args;
   assert.equal(args[args.indexOf("--tools") + 1], "Read,Grep,Glob");
   assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk");
@@ -110,7 +110,7 @@ test("runs codex in the read-only sandbox without the person's config", async ()
   assert.deepEqual(first, { text: "答案", sessionId: "thread-1", costUsd: 0 });
   assert.equal(call.input, "问题");
   assert.equal(call.headless, "1");
-  assert.equal(call.cwd, dir);
+  assert.equal(call.cwd, realpathSync(dir));
   const args: string[] = call.args;
   assert.deepEqual(args.slice(0, 2), ["exec", "--json"]);
   for (const a of ["--ignore-user-config", 'sandbox_mode="read-only"', 'web_search="disabled"', "features.multi_agent=false"]) {

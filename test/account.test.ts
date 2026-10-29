@@ -50,7 +50,9 @@ describe("account mode", () => {
       chmodSync(join(bin, "claude"), 0o755);
       process.env.ACHAT_HOME = home;
       process.env.ACHAT_KEYSTORE = "file";
-      process.env.PATH = bin + delimiter + saved.path;
+      // Leave out folders holding a real Codex, so the test passes on computers that have one.
+      const others = (saved.path ?? "").split(delimiter).filter((dir) => dir && !existsSync(join(dir, "codex")));
+      process.env.PATH = [bin, ...others].join(delimiter);
     });
     afterEach(() => {
       for (const [key, value] of [["ACHAT_HOME", saved.home], ["ACHAT_KEYSTORE", saved.keystore], ["PATH", saved.path]]) {
