@@ -3,18 +3,30 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+// AIs that Achat runs on a person's computer, which can answer in the background.
 export type AgentClient = "claude" | "codex";
+// AIs that connect to the cloud with an address and a credential; they can
+// ask others but not answer.
+export type RemoteClient = "doubao" | "workbuddy" | "other";
+export type AiClient = AgentClient | RemoteClient;
 
 export interface AgentConfig {
   id: string;
   name: string;
+  client: AiClient;
+  // False for AIs that cannot answer requests; absent means they can.
+  canReceive?: boolean;
+}
+
+// An AI listed in this computer's config.json.
+export interface LocalAgent extends AgentConfig {
   client: AgentClient;
 }
 
 export interface AchatConfig {
   port: number;
   token: string;
-  agents: AgentConfig[];
+  agents: LocalAgent[];
   defaults: { maxRounds: number; budgetUsd: number };
   limits: {
     // Requests from one contact beyond this count in 24 hours stay on the web
@@ -33,7 +45,7 @@ export const DEFAULT_CLOUD_URL = process.env.ACHAT_CLOUD_URL ?? "";
 
 // Experiment 0: one person, their own Claude Code and Codex on one computer,
 // identities written in config instead of registration.
-export const DEFAULT_AGENTS: AgentConfig[] = [
+export const DEFAULT_AGENTS: LocalAgent[] = [
   { id: "claude@local", name: "我的 Claude", client: "claude" },
   { id: "codex@local", name: "我的 Codex", client: "codex" },
 ];

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import type { AgentClient, AgentConfig } from "../config.js";
+import type { AgentClient, AgentConfig, AiClient, RemoteClient } from "../config.js";
 import { agentIdFor } from "../device.js";
 
 const SCHEMA = `
@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   id TEXT PRIMARY KEY,
   email TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  email_notify INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS login_codes (
   email TEXT PRIMARY KEY,
@@ -44,8 +45,13 @@ CREATE TABLE IF NOT EXISTS device_links (
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
   account_id TEXT NOT NULL REFERENCES accounts(id),
-  device_id TEXT NOT NULL REFERENCES devices(id),
+  -- Set for AIs that run on a computer; null for AIs that connect with a credential.
+  device_id TEXT REFERENCES devices(id),
   client TEXT NOT NULL,
+  label TEXT,
+  token_hash TEXT UNIQUE,
+  last_used_at TEXT,
+  revoked_at TEXT,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS invites (
@@ -61,6 +67,43 @@ CREATE TABLE IF NOT EXISTS contacts (
   created_at TEXT NOT NULL,
   PRIMARY KEY (account_id, contact_id)
 );
+CREATE TABLE IF NOT EXISTS enroll_tokens (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES accounts(id),
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at INTEGER NOT NULL,
+  device_id TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS request_emails (
+  account_id TEXT NOT NULL REFERENCES accounts(id),
+  from_account TEXT NOT NULL,
+  sent_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS request_emails_by_pair ON request_emails (account_id, from_account, sent_at);
+`;
+
+const SCHEMA_VERSION = 2;
+
+// Version 1 had computer AIs only (agents.device_id NOT NULL) and no email
+// preference. Rebuilds the agents table in place, keeping its rows.
+const MIGRATE_FROM_1 = `
+CREATE TABLE agents_v2 (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES accounts(id),
+  device_id TEXT REFERENCES devices(id),
+  client TEXT NOT NULL,
+  label TEXT,
+  token_hash TEXT UNIQUE,
+  last_used_at TEXT,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL
+);
+INSERT INTO agents_v2 (id, account_id, device_id, client, created_at)
+  SELECT id, account_id, device_id, client, created_at FROM agents;
+DROP TABLE agents;
+ALTER TABLE agents_v2 RENAME TO agents;
+ALTER TABLE accounts ADD COLUMN email_notify INTEGER NOT NULL DEFAULT 1;
 `;
 
 export interface Account {
@@ -68,6 +111,8 @@ export interface Account {
   email: string;
   name: string;
   createdAt: string;
+  // Email the person when someone sends one of their AIs a request.
+  emailNotify: boolean;
 }
 
 export interface Device {
@@ -93,10 +138,17 @@ export interface DeviceLink {
 export interface AgentRecord {
   id: string;
   accountId: string;
-  deviceId: string;
-  client: AgentClient;
-  // Whether the computer it runs on is still on the account.
+  // The computer it runs on; null for an AI that connects with a credential.
+  deviceId: string | null;
+  client: AiClient;
+  // A name the person gave it, for "other" AIs.
+  label: string | null;
+  // Not removed, and its computer, if any, still on the account.
   active: boolean;
+  // Only AIs on a computer answer requests, in the background.
+  canReceive: boolean;
+  lastUsedAt: string | null;
+  createdAt: string;
 }
 
 export interface Invite {
@@ -113,16 +165,36 @@ export function newId(prefix: string, bytes = 8): string {
   return prefix + randomBytes(bytes).toString("base64url");
 }
 
-const CLIENT_LABEL: Record<AgentClient, string> = { claude: "Claude", codex: "Codex" };
+export const CLIENT_LABEL: Record<AiClient, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  doubao: "豆包",
+  workbuddy: "WorkBuddy",
+  other: "AI",
+};
 
 type Row = Record<string, string | number | null>;
+
+const AGENT_SELECT =
+  "SELECT agents.*, devices.revoked_at AS device_revoked_at FROM agents LEFT JOIN devices ON devices.id = agents.device_id";
 
 export class AccountStore {
   constructor(
     private db: DatabaseSync,
     private now: () => Date = () => new Date(),
   ) {
+    const version = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+    const existing = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents'").get();
+    if (existing && version < SCHEMA_VERSION) {
+      db.exec("PRAGMA foreign_keys = OFF");
+      try {
+        this.transaction(() => db.exec(MIGRATE_FROM_1));
+      } finally {
+        db.exec("PRAGMA foreign_keys = ON");
+      }
+    }
     db.exec(SCHEMA);
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
   private stamp(): string {
@@ -149,6 +221,11 @@ export class AccountStore {
 
   rename(id: string, name: string): Account {
     this.db.prepare("UPDATE accounts SET name = ? WHERE id = ?").run(name, id);
+    return this.account(id)!;
+  }
+
+  setEmailNotify(id: string, on: boolean): Account {
+    this.db.prepare("UPDATE accounts SET email_notify = ? WHERE id = ?").run(on ? 1 : 0, id);
     return this.account(id)!;
   }
 
@@ -278,11 +355,7 @@ export class AccountStore {
   // --- agents
 
   agent(id: string): AgentRecord | null {
-    const row = this.db
-      .prepare(
-        `SELECT agents.*, devices.revoked_at FROM agents JOIN devices ON devices.id = agents.device_id WHERE agents.id = ?`,
-      )
-      .get(id) as Row | undefined;
+    const row = this.db.prepare(`${AGENT_SELECT} WHERE agents.id = ?`).get(id) as Row | undefined;
     return row ? toAgent(row) : null;
   }
 
@@ -298,22 +371,113 @@ export class AccountStore {
     return (
       this.db
         .prepare(
-          `SELECT agents.*, devices.revoked_at FROM agents JOIN devices ON devices.id = agents.device_id
-           WHERE agents.account_id = ? AND devices.revoked_at IS NULL ORDER BY agents.created_at`,
+          `${AGENT_SELECT} WHERE agents.account_id = ? AND agents.revoked_at IS NULL AND devices.revoked_at IS NULL
+           ORDER BY agents.created_at`,
         )
         .all(accountId) as Row[]
     ).map(toAgent);
   }
 
-  // "我的 Claude" for the viewer's own AIs, "老方的 Codex" for others', with
+  // "我的 Claude" for the viewer's own AIs, "老方的豆包" for others', with
   // the computer's name added when the person has the same AI on two computers.
   agentConfig(agent: AgentRecord, viewerAccountId?: string): AgentConfig {
     const owner = this.account(agent.accountId);
-    const label = CLIENT_LABEL[agent.client];
-    const whose = agent.accountId === viewerAccountId ? "我的 " : `${owner ? this.displayName(owner) : "某人"}的 `;
-    const twins = this.activeAgents(agent.accountId).filter((a) => a.client === agent.client).length;
-    const where = twins > 1 ? `（${this.device(agent.deviceId)?.name ?? agent.deviceId}）` : "";
-    return { id: agent.id, name: `${whose}${label}${where}`, client: agent.client };
+    const label = agent.label ?? CLIENT_LABEL[agent.client];
+    const whose = agent.accountId === viewerAccountId ? "我的" : `${owner ? this.displayName(owner) : "某人"}的`;
+    const space = /^[A-Za-z0-9]/.test(label) ? " " : "";
+    const twins = agent.deviceId
+      ? this.activeAgents(agent.accountId).filter((a) => a.client === agent.client && a.deviceId).length
+      : 1;
+    const where = twins > 1 ? `（${this.device(agent.deviceId!)?.name ?? agent.deviceId}）` : "";
+    return { id: agent.id, name: `${whose}${space}${label}${where}`, client: agent.client, canReceive: agent.canReceive };
+  }
+
+  // --- AIs that connect with a credential (豆包, WorkBuddy, ...)
+
+  // Creates the AI, or gives an existing one of the same kind and name a new
+  // credential, which ends the old one. The credential is returned once.
+  connectRemoteAgent(accountId: string, client: RemoteClient, label: string | null): { agent: AgentRecord; token: string } {
+    const token = "ac_" + randomBytes(24).toString("base64url");
+    const existing = this.activeAgents(accountId).find(
+      (a) => !a.deviceId && a.client === client && (a.label ?? null) === label,
+    );
+    if (existing) {
+      this.db
+        .prepare("UPDATE agents SET token_hash = ?, last_used_at = NULL WHERE id = ?")
+        .run(hashSecret(token), existing.id);
+      return { agent: this.agent(existing.id)!, token };
+    }
+    const id = newId("r_");
+    this.db
+      .prepare(
+        "INSERT INTO agents (id, account_id, device_id, client, label, token_hash, created_at) VALUES (?, ?, NULL, ?, ?, ?, ?)",
+      )
+      .run(id, accountId, client, label, hashSecret(token), this.stamp());
+    return { agent: this.agent(id)!, token };
+  }
+
+  // The AI a credential belongs to, if it is still valid; records the use.
+  agentByToken(token: string): AgentRecord | null {
+    const row = this.db
+      .prepare(`${AGENT_SELECT} WHERE agents.token_hash = ? AND agents.revoked_at IS NULL`)
+      .get(hashSecret(token)) as Row | undefined;
+    if (!row) return null;
+    const agent = toAgent(row);
+    if (!agent.lastUsedAt || this.now().getTime() - Date.parse(agent.lastUsedAt) > 60_000) {
+      this.db.prepare("UPDATE agents SET last_used_at = ? WHERE id = ?").run(this.stamp(), agent.id);
+    }
+    return agent;
+  }
+
+  revokeAgent(id: string): void {
+    this.db.prepare("UPDATE agents SET revoked_at = ?, token_hash = NULL WHERE id = ?").run(this.stamp(), id);
+  }
+
+  // --- one-time credentials that add a computer without a confirmation page
+
+  createEnrollToken(accountId: string, ttlMs: number): { id: string; token: string; expiresAt: number } {
+    const id = newId("e_");
+    const token = "ac_" + randomBytes(24).toString("base64url");
+    const expiresAt = this.now().getTime() + ttlMs;
+    this.db
+      .prepare("INSERT INTO enroll_tokens (id, account_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(id, accountId, hashSecret(token), expiresAt, this.stamp());
+    return { id, token, expiresAt };
+  }
+
+  // A credential that is unused and not expired.
+  enrollToken(token: string): { id: string; accountId: string } | null {
+    const row = this.db
+      .prepare("SELECT * FROM enroll_tokens WHERE token_hash = ? AND device_id IS NULL AND expires_at > ?")
+      .get(hashSecret(token), this.now().getTime()) as Row | undefined;
+    return row ? { id: row.id as string, accountId: row.account_id as string } : null;
+  }
+
+  useEnrollToken(id: string, deviceId: string): void {
+    this.db.prepare("UPDATE enroll_tokens SET device_id = ? WHERE id = ?").run(deviceId, id);
+  }
+
+  enrollStatus(id: string, accountId: string): { deviceId: string | null; expiresAt: number } | null {
+    const row = this.db
+      .prepare("SELECT * FROM enroll_tokens WHERE id = ? AND account_id = ?")
+      .get(id, accountId) as Row | undefined;
+    return row ? { deviceId: (row.device_id as string | null) ?? null, expiresAt: row.expires_at as number } : null;
+  }
+
+  // --- request emails, counted per sender so one contact cannot flood an inbox
+
+  countRequestEmails(accountId: string, fromAccount: string, since: number): number {
+    return (
+      this.db
+        .prepare("SELECT COUNT(*) AS n FROM request_emails WHERE account_id = ? AND from_account = ? AND sent_at >= ?")
+        .get(accountId, fromAccount, since) as { n: number }
+    ).n;
+  }
+
+  logRequestEmail(accountId: string, fromAccount: string): void {
+    this.db
+      .prepare("INSERT INTO request_emails (account_id, from_account, sent_at) VALUES (?, ?, ?)")
+      .run(accountId, fromAccount, this.now().getTime());
   }
 
   // --- invites and contacts
@@ -390,6 +554,7 @@ function toAccount(row: Row): Account {
     email: row.email as string,
     name: row.name as string,
     createdAt: row.created_at as string,
+    emailNotify: row.email_notify !== 0,
   };
 }
 
@@ -406,11 +571,16 @@ function toDevice(row: Row): Device {
 }
 
 function toAgent(row: Row): AgentRecord {
+  const deviceId = (row.device_id as string | null) ?? null;
   return {
     id: row.id as string,
     accountId: row.account_id as string,
-    deviceId: row.device_id as string,
-    client: row.client as AgentClient,
-    active: row.revoked_at === null,
+    deviceId,
+    client: row.client as AiClient,
+    label: (row.label as string | null) ?? null,
+    active: row.revoked_at === null && row.device_revoked_at === null,
+    canReceive: deviceId !== null,
+    lastUsedAt: (row.last_used_at as string | null) ?? null,
+    createdAt: row.created_at as string,
   };
 }

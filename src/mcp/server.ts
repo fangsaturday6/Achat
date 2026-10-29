@@ -15,8 +15,12 @@ export interface McpOptions {
   // Read on every tool call, so a computer that joins an account switches
   // over without restarting the AI client.
   connection: () => McpConnection;
-  // Starts adding this computer to an account; see link_account.
+  // Starts adding this computer to an account; see link_account. Without it
+  // the tool is not offered (AIs that connect by address).
   link?: (server?: string) => Promise<DeviceLinkTicket>;
+  // Offer review_pending, which approves through a dialog. Off for AIs that
+  // connect by address: their credential cannot approve.
+  review?: boolean;
   // How long a tool call waits for the other side before handing back a
   // thread id to check later.
   waitSeconds?: number;
@@ -38,7 +42,14 @@ function money(n: number): string {
 
 export function createMcpServer(opts: McpOptions): McpServer {
   const waitMs = (opts.waitSeconds ?? 540) * 1000;
-  const server = new McpServer({ name: "achat", version: "0.0.1" });
+  const server = new McpServer(
+    { name: "achat", version: "0.0.1" },
+    {
+      instructions:
+        "Achat 让你代表主人直接问别人的 AI，或主人自己的其他 AI。主人想问某人的 AI 时用 send_request；" +
+        "不知道能问谁时先用 list_contacts；要和新的人连上时用 create_invite。收到回复后，把原文完整转给主人。",
+    },
+  );
 
   async function nameOf(c: McpConnection, id: string | null): Promise<string> {
     if (!id) return "Achat";
@@ -46,7 +57,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
   }
 
   async function resolveContact(c: McpConnection, to: string): Promise<AgentConfig> {
-    const list = (await c.client.agents()).filter((a) => a.id !== c.agentId);
+    const list = (await c.client.agents()).filter((a) => a.id !== c.agentId && a.canReceive !== false);
     const key = normalize(to);
     const exact = list.find((a) => a.id.toLowerCase() === key || normalize(a.name) === key);
     if (exact) return exact;
@@ -141,7 +152,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     },
     guard(async () => {
       const c = opts.connection();
-      const list = (await c.client.agents()).filter((a) => a.id !== c.agentId);
+      const list = (await c.client.agents()).filter((a) => a.id !== c.agentId && a.canReceive !== false);
       const hint =
         c.mode === "cloud"
           ? "要联系别人的 AI，调用 create_invite 生成邀请链接，让主人发给对方。"
@@ -227,77 +238,80 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
-    "review_pending",
-    {
-      title: "让主人批准待处理的请求",
-      description:
-        "当提示有 Achat 待批准请求时调用。Achat 会直接向主人弹出对话框，由主人同意或拒绝；" +
-        "你看不到请求内容，只会知道处理结果。",
-      inputSchema: {},
-    },
-    guard(async () => {
-      const c = opts.connection();
-      const client = c.client;
-      const pending = await client.listThreads({ to: c.agentId, status: "pending", surfaced: true });
-      if (!pending.length) return text("没有待批准的请求。");
-      if (!server.server.getClientCapabilities()?.elicitation) {
-        return text(`有 ${pending.length} 个待批准的请求。这个客户端不能弹出对话框，请让主人打开 ${c.webUrl} 批准。`);
-      }
-      let approved = 0;
-      let declined = 0;
-      let left = 0;
-      for (const summary of pending) {
-        const t = await client.getThread(summary.id);
-        const request = t.messages.find((m) => m.kind === "request");
-        const result = await server.server.elicitInput({
-          mode: "form",
-          message: [
-            `${await nameOf(c, t.from)} · ${t.topic}`,
-            "",
-            request?.body ?? "",
-            "",
-            `同意后，${await nameOf(c, t.to)}只读本机对话记录来回答。提交表示同意，拒绝表示不接受，取消则留到以后处理。`,
-          ].join("\n"),
-          requestedSchema: {
-            type: "object",
-            properties: {
-              maxRounds: {
-                type: "integer",
-                title: "最多轮数",
-                minimum: 1,
-                maximum: 20,
-                default: t.scope.maxRounds,
-              },
-              budgetUsd: {
-                type: "number",
-                title: "花费上限（美元）",
-                minimum: 0.1,
-                maximum: 50,
-                default: t.scope.budgetUsd,
+  // Approving through a dialog; AIs connected by address approve on the web instead.
+  if (opts.review !== false) {
+    server.registerTool(
+      "review_pending",
+      {
+        title: "让主人批准待处理的请求",
+        description:
+          "当提示有 Achat 待批准请求时调用。Achat 会直接向主人弹出对话框，由主人同意或拒绝；" +
+          "你看不到请求内容，只会知道处理结果。",
+        inputSchema: {},
+      },
+      guard(async () => {
+        const c = opts.connection();
+        const client = c.client;
+        const pending = await client.listThreads({ to: c.agentId, status: "pending", surfaced: true });
+        if (!pending.length) return text("没有待批准的请求。");
+        if (!server.server.getClientCapabilities()?.elicitation) {
+          return text(`有 ${pending.length} 个待批准的请求。这个客户端不能弹出对话框，请让主人打开 ${c.webUrl} 批准。`);
+        }
+        let approved = 0;
+        let declined = 0;
+        let left = 0;
+        for (const summary of pending) {
+          const t = await client.getThread(summary.id);
+          const request = t.messages.find((m) => m.kind === "request");
+          const result = await server.server.elicitInput({
+            mode: "form",
+            message: [
+              `${await nameOf(c, t.from)} · ${t.topic}`,
+              "",
+              request?.body ?? "",
+              "",
+              `同意后，${await nameOf(c, t.to)}只读本机对话记录来回答。提交表示同意，拒绝表示不接受，取消则留到以后处理。`,
+            ].join("\n"),
+            requestedSchema: {
+              type: "object",
+              properties: {
+                maxRounds: {
+                  type: "integer",
+                  title: "最多轮数",
+                  minimum: 1,
+                  maximum: 20,
+                  default: t.scope.maxRounds,
+                },
+                budgetUsd: {
+                  type: "number",
+                  title: "花费上限（美元）",
+                  minimum: 0.1,
+                  maximum: 50,
+                  default: t.scope.budgetUsd,
+                },
               },
             },
-          },
-        });
-        if (result.action === "accept") {
-          const c = result.content ?? {};
-          await client.approve(t.id, {
-            maxRounds: typeof c.maxRounds === "number" ? c.maxRounds : undefined,
-            budgetUsd: typeof c.budgetUsd === "number" ? c.budgetUsd : undefined,
           });
-          approved += 1;
-        } else if (result.action === "decline") {
-          await client.decline(t.id);
-          declined += 1;
-        } else {
-          left += 1;
+          if (result.action === "accept") {
+            const c = result.content ?? {};
+            await client.approve(t.id, {
+              maxRounds: typeof c.maxRounds === "number" ? c.maxRounds : undefined,
+              budgetUsd: typeof c.budgetUsd === "number" ? c.budgetUsd : undefined,
+            });
+            approved += 1;
+          } else if (result.action === "decline") {
+            await client.decline(t.id);
+            declined += 1;
+          } else {
+            left += 1;
+          }
         }
-      }
-      const parts = [`已同意 ${approved} 个`, `拒绝 ${declined} 个`];
-      if (left) parts.push(`还有 ${left} 个留在 ${c.webUrl}`);
-      return text(`${parts.join("，")}。同意的请求会在后台回答，不占用当前会话。`);
-    }),
-  );
+        const parts = [`已同意 ${approved} 个`, `拒绝 ${declined} 个`];
+        if (left) parts.push(`还有 ${left} 个留在 ${c.webUrl}`);
+        return text(`${parts.join("，")}。同意的请求会在后台回答，不占用当前会话。`);
+      }),
+    );
+  }
 
   server.registerTool(
     "create_invite",
@@ -324,32 +338,35 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
-    "link_account",
-    {
-      title: "把这台电脑加入 Achat 账号",
-      description:
-        "把这台电脑加入主人的 Achat 账号。和自己的其他 AI 沟通不需要；要邀请别人、或接受别人的邀请之前需要。" +
-        "返回一个链接，主人在浏览器里打开、用邮箱登录并确认后生效。",
-      inputSchema: {
-        server: z.string().optional().describe("Achat 服务的地址，例如 https://achat.example.com；主人没提就不填"),
+  // Only an AI running on this computer can add the computer to an account.
+  if (opts.link) {
+    server.registerTool(
+      "link_account",
+      {
+        title: "把这台电脑加入 Achat 账号",
+        description:
+          "把这台电脑加入主人的 Achat 账号。和自己的其他 AI 沟通不需要；要邀请别人、或接受别人的邀请之前需要。" +
+          "返回一个链接，主人在浏览器里打开、用邮箱登录并确认后生效。",
+        inputSchema: {
+          server: z.string().optional().describe("Achat 服务的地址，例如 https://achat.example.com；主人没提就不填"),
+        },
       },
-    },
-    guard(async ({ server: url }: { server?: string }) => {
-      const c = opts.connection();
-      if (c.mode === "cloud") return text(`这台电脑已经加入了 Achat 账号，可以直接用 create_invite 邀请别人。网页：${c.webUrl}`);
-      if (!opts.link) return text("这个环境不能添加电脑，请让主人在终端运行 achat link。", true);
-      const ticket = await opts.link(url);
-      return text(
-        [
-          `请主人在浏览器打开：${ticket.url}`,
-          "",
-          `用邮箱登录后，确认页面上的配对码是 ${ticket.code}，一致再点确认。链接 10 分钟内有效。`,
-          "确认后 Achat 会自动切换到账号模式，不用重启。",
-        ].join("\n"),
-      );
-    }),
-  );
+      guard(async ({ server: url }: { server?: string }) => {
+        const c = opts.connection();
+        if (c.mode === "cloud") return text(`这台电脑已经加入了 Achat 账号，可以直接用 create_invite 邀请别人。网页：${c.webUrl}`);
+        if (!opts.link) return text("这个环境不能添加电脑，请让主人在终端运行 achat link。", true);
+        const ticket = await opts.link(url);
+        return text(
+          [
+            `请主人在浏览器打开：${ticket.url}`,
+            "",
+            `用邮箱登录后，确认页面上的配对码是 ${ticket.code}，一致再点确认。链接 10 分钟内有效。`,
+            "确认后 Achat 会自动切换到账号模式，不用重启。",
+          ].join("\n"),
+        );
+      }),
+    );
+  }
 
   return server;
 }

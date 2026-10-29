@@ -4,14 +4,17 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
-import type { AgentClient, AgentConfig } from "../config.js";
+import type { AgentClient, AgentConfig, RemoteClient } from "../config.js";
 import { checkSignature, deviceIdFor, pairingCode, SIGNATURE_WINDOW_MS } from "../device.js";
 import { parseJson, readBody, send, serveStatic, str } from "../relay/http.js";
 import { RelayError, RelayService, type RelaySettings } from "../relay/service.js";
 import { Store } from "../relay/store.js";
 import { threadsApi, type Viewer } from "../relay/threads-api.js";
-import { AccountStore, hashSecret, type Account, type Device } from "./accounts.js";
-import { loginCodeEmail } from "./emails.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { RelayClient } from "../client.js";
+import { createMcpServer } from "../mcp/server.js";
+import { AccountStore, CLIENT_LABEL, hashSecret, type Account, type AgentRecord, type Device } from "./accounts.js";
+import { loginCodeEmail, requestEmail } from "./emails.js";
 import type { Mailer } from "./mailer.js";
 
 const MINUTE = 60 * 1000;
@@ -27,7 +30,13 @@ const INVITE_TTL = 7 * DAY;
 const COOKIE = "achat_session";
 const CLIENTS = new Set<AgentClient>(["claude", "codex"]);
 // Collections whose second path segment is an id.
-const WITH_ID = new Set(["device-links", "invites", "devices", "contacts"]);
+const WITH_ID = new Set(["device-links", "invites", "devices", "contacts", "connect", "agents"]);
+const REMOTE_CLIENTS = new Set<RemoteClient>(["doubao", "workbuddy", "other"]);
+// Request emails one sender can cause per receiver per day.
+const REQUEST_EMAILS_PER_DAY = 3;
+// How long the remote MCP tools wait for a reply; clients of remote servers
+// tend to give up on calls much sooner than local ones.
+const REMOTE_WAIT_SECONDS = 50;
 
 export const CLOUD_DEFAULTS: RelaySettings = {
   defaults: { maxRounds: 5, budgetUsd: 5 },
@@ -60,7 +69,12 @@ export interface RunningCloud {
   close(): Promise<void>;
 }
 
-type Principal = { kind: "web"; account: Account; token: string } | { kind: "device"; account: Account; device: Device };
+// Who is calling: a person on the web, one of their computers (signed
+// requests), or an AI that connects by address (its credential).
+type Principal =
+  | { kind: "web"; account: Account; token: string }
+  | { kind: "device"; account: Account; device: Device }
+  | { kind: "agent"; account: Account; agent: AgentRecord };
 
 // Counts events per key in a sliding window, in memory.
 class Limiter {
@@ -151,7 +165,17 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     if (!firstUse(signature!)) throw new RelayError(401, "这个请求已经用过了");
   }
 
+  // The AI an "Authorization: Bearer" credential belongs to.
+  function bearerAgent(req: IncomingMessage): AgentRecord | null | undefined {
+    const header = req.headers.authorization;
+    if (typeof header !== "string" || !header.startsWith("Bearer ")) return undefined;
+    return accounts.agentByToken(header.slice(7).trim());
+  }
+
   async function authenticate(req: IncomingMessage, url: URL, raw: Buffer): Promise<Principal | null> {
+    const bearer = bearerAgent(req);
+    if (bearer === null) throw new RelayError(401, "这个 AI 的连接凭证无效或已作废。到 Achat 网页的“我”里重新连接");
+    if (bearer) return { kind: "agent", account: accounts.account(bearer.accountId)!, agent: bearer };
     const deviceId = req.headers["x-achat-device"];
     if (typeof deviceId === "string") {
       const device = accounts.device(deviceId);
@@ -186,18 +210,24 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
       visible: accounts.agentIds(accountId),
       sees: (agent) => accounts.agent(agent)?.accountId === accountId,
       actsAs: (agent) => {
+        if (p.kind === "agent") return agent === p.agent.id;
         if (p.kind !== "device") return false;
         const a = accounts.agent(agent);
         return !!a && a.active && a.deviceId === p.device.id;
       },
-      approves: true,
+      // A credential pasted into another app cannot approve; the person does,
+      // on the web or in a dialog on their computer.
+      approves: p.kind !== "agent",
       agents: () => [
         ...accounts.activeAgents(accountId).map((a) => accounts.agentConfig(a, accountId)),
         ...contactsOf(accountId).flatMap((c) => c.agents),
       ],
       reach: (_from, to) => {
         const target = accounts.agent(to);
-        if (!target || !target.active) throw new RelayError(404, "找不到这个 AI，可能对方已经移除了那台电脑");
+        if (!target || !target.active) throw new RelayError(404, "找不到这个 AI，可能对方已经移除了它");
+        if (!target.canReceive) {
+          throw new RelayError(409, `${accounts.agentConfig(target, accountId).name}还不能接收请求，只有 Claude Code 和 Codex 能在后台回答`);
+        }
         if (target.accountId === accountId) return true;
         if (!accounts.isContact(accountId, target.accountId)) {
           throw new RelayError(403, "你们还不是联系人。先发一个邀请链接给对方");
@@ -274,12 +304,24 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     const deviceId = deviceIdFor(publicKey);
     if (req.headers["x-achat-device"] !== deviceId) throw new RelayError(400, "签名和公钥不一致");
     verifySigned(req, url, raw, publicKey);
+    // A credential made on the web by the logged-in person stands in for the
+    // confirmation page.
+    const enroll = typeof body.enroll === "string" ? accounts.enrollToken(body.enroll) : undefined;
+    if (enroll === null) throw new RelayError(400, "这条连接命令已经用过或过期了，回到 Achat 网页重新生成");
     const link = accounts.createDeviceLink({ deviceId, name, publicKey, clients, expiresAt: ms() + LINK_TTL });
+    let account: string | undefined;
+    if (enroll) {
+      approveLink(enroll.accountId, link.id);
+      accounts.useEnrollToken(enroll.id, deviceId);
+      account = accounts.displayName(accounts.account(enroll.accountId)!);
+    }
     send(res, 201, {
       id: link.id,
       url: `${publicUrl}/link/${link.id}`,
       code: pairingCode(deviceId),
       expiresAt: new Date(link.expiresAt).toISOString(),
+      status: enroll ? "approved" : "pending",
+      ...(account ? { account } : {}),
     });
   }
 
@@ -310,6 +352,84 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     }
     const device = accounts.approveDeviceLink(link, accountId);
     return { device: { id: device.id, name: device.name } };
+  }
+
+  // Gives the person what to paste into the AI they picked: for Claude Code and
+  // Codex a sentence with a one-time install command, for the others an
+  // address and a credential.
+  function connect(account: Account, body: Record<string, unknown>): Record<string, unknown> {
+    const client = str(body, "client");
+    if (CLIENTS.has(client as AgentClient)) {
+      limit(`connect:${account.id}`, 30, HOUR);
+      const { id, token, expiresAt } = accounts.createEnrollToken(account.id, LINK_TTL);
+      const command = `curl -fsSL ${publicUrl}/install.sh | bash -s -- ${token}`;
+      return {
+        id,
+        kind: "install",
+        client,
+        command,
+        sentence: `帮我连上 Achat：运行 ${command}`,
+        expiresAt: new Date(expiresAt).toISOString(),
+      };
+    }
+    if (!REMOTE_CLIENTS.has(client as RemoteClient)) throw new RelayError(400, "不认识的 AI");
+    const label = client === "other" ? (typeof body.label === "string" ? body.label.trim().slice(0, 20) : "") || null : null;
+    const { agent, token } = accounts.connectRemoteAgent(account.id, client as RemoteClient, label);
+    return {
+      id: agent.id,
+      kind: "mcp",
+      client,
+      name: accounts.agentConfig(agent, account.id).name,
+      url: `${publicUrl}/mcp`,
+      token,
+      header: `Authorization: Bearer ${token}`,
+    };
+  }
+
+  function connectStatus(accountId: string, id: string): Record<string, unknown> {
+    if (id.startsWith("e_")) {
+      const enroll = accounts.enrollStatus(id, accountId);
+      if (!enroll) throw new RelayError(404, "找不到这次连接");
+      if (enroll.deviceId) {
+        const device = accounts.device(enroll.deviceId);
+        const ais = accounts
+          .activeAgents(accountId)
+          .filter((a) => a.deviceId === enroll.deviceId)
+          .map((a) => CLIENT_LABEL[a.client]);
+        return { status: "connected", device: device?.name ?? "", ais };
+      }
+      return { status: enroll.expiresAt < ms() ? "expired" : "waiting" };
+    }
+    const agent = accounts.agent(id);
+    if (!agent || agent.accountId !== accountId || !agent.active) throw new RelayError(404, "找不到这次连接");
+    return { status: agent.lastUsedAt ? "connected" : "waiting", name: accounts.agentConfig(agent, accountId).name };
+  }
+
+  // What the 我 page and the first-use checklist show.
+  function myself(account: Account): Record<string, unknown> {
+    const ais = accounts.activeAgents(account.id);
+    const devices = accounts.devices(account.id);
+    const threads = service.listThreads({ agents: accounts.agentIds(account.id) });
+    return {
+      account: publicAccount(account, true),
+      needsName: !account.name,
+      emailNotify: account.emailNotify,
+      devices: devices.map((d) => ({
+        id: d.id,
+        name: d.name,
+        createdAt: d.createdAt,
+        lastSeenAt: d.lastSeenAt,
+        ais: ais.filter((a) => a.deviceId === d.id).map((a) => CLIENT_LABEL[a.client]),
+      })),
+      remoteAis: ais
+        .filter((a) => !a.deviceId)
+        .map((a) => ({ id: a.id, name: accounts.agentConfig(a, account.id).name, client: a.client, lastUsedAt: a.lastUsedAt })),
+      checklist: {
+        connected: ais.length > 0,
+        invited: accounts.contacts(account.id).length > 0,
+        collaborated: threads.some((t) => t.roundsUsed > 0),
+      },
+    };
   }
 
   function invitePreview(code: string): Record<string, unknown> {
@@ -367,22 +487,36 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
             device: { id: me.device.id, name: me.device.name },
           });
         }
-        return send(res, 200, {
-          account: publicAccount(me.account, true),
-          needsName: !me.account.name,
-          devices: accounts.devices(me.account.id).map((d) => ({
-            id: d.id,
-            name: d.name,
-            createdAt: d.createdAt,
-            lastSeenAt: d.lastSeenAt,
-          })),
-        });
+        if (me.kind === "agent") {
+          return send(res, 200, {
+            account: publicAccount(me.account, false),
+            agent: accounts.agentConfig(me.agent, me.account.id),
+          });
+        }
+        return send(res, 200, myself(me.account));
       }
       case "POST /me": {
         const web = requireWeb(p);
-        const name = str(parseJson(raw), "name").trim();
-        if (!name || name.length > 20) throw new RelayError(400, "名字需要在 1 到 20 个字之间");
-        return send(res, 200, { account: publicAccount(accounts.rename(web.account.id, name), true) });
+        const body = parseJson(raw);
+        if (typeof body.emailNotify === "boolean") accounts.setEmailNotify(web.account.id, body.emailNotify);
+        if (body.name !== undefined) {
+          const name = str(body, "name").trim();
+          if (!name || name.length > 20) throw new RelayError(400, "名字需要在 1 到 20 个字之间");
+          accounts.rename(web.account.id, name);
+        }
+        return send(res, 200, myself(accounts.account(web.account.id)!));
+      }
+      case "POST /connect":
+        return send(res, 201, connect(requireWeb(p).account, parseJson(raw)));
+      case "GET /connect/:id":
+        return send(res, 200, connectStatus(requireWeb(p).account.id, parts[1]));
+      case "DELETE /agents/:id": {
+        const web = requireWeb(p);
+        const agent = accounts.agent(parts[1]);
+        if (!agent || agent.accountId !== web.account.id) throw new RelayError(404, "找不到这个 AI");
+        if (agent.deviceId) throw new RelayError(400, "这个 AI 跟着电脑走，移除那台电脑即可");
+        accounts.revokeAgent(agent.id);
+        return send(res, 200, { ok: true });
       }
       case "GET /device-links/:id":
         return send(res, 200, linkStatus(requireWeb(p).account.id, parts[1]));
@@ -391,7 +525,8 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
       case "DELETE /devices/:id": {
         const me = requireAny(p);
         const device = accounts.device(parts[1]);
-        const allowed = me.kind === "web" ? device?.accountId === me.account.id : device?.id === me.device.id;
+        const allowed =
+          me.kind === "web" ? device?.accountId === me.account.id : me.kind === "device" && device?.id === me.device.id;
         if (!device || !allowed) throw new RelayError(404, "找不到这台电脑");
         accounts.revokeDevice(device.id);
         return send(res, 200, { ok: true });
@@ -442,9 +577,74 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     });
   }
 
+  // Emails the receiver when someone else's AI asks one of theirs, at most a
+  // few times a day per sender, unless they turned it off.
+  async function emailRequest(threadId: string): Promise<void> {
+    const thread = service.getThread(threadId);
+    const to = accounts.agent(thread.to);
+    const from = accounts.agent(thread.from);
+    if (!to || !from || to.accountId === from.accountId) return;
+    const receiver = accounts.account(to.accountId)!;
+    if (!receiver.emailNotify) return;
+    if (accounts.countRequestEmails(receiver.id, from.accountId, ms() - DAY) >= REQUEST_EMAILS_PER_DAY) return;
+    accounts.logRequestEmail(receiver.id, from.accountId);
+    const question = thread.messages.find((m) => m.kind === "request")?.body ?? "";
+    await opts.mailer.send(
+      requestEmail(receiver.email, {
+        fromName: accounts.agentConfig(from, receiver.id).name,
+        toName: accounts.agentConfig(to, receiver.id).name.replace(/^我的/, "你的"),
+        topic: thread.topic,
+        question,
+        link: `${publicUrl}/#/t/${thread.id}`,
+        settingsLink: `${publicUrl}/#/me`,
+        perDay: REQUEST_EMAILS_PER_DAY,
+      }),
+    );
+  }
+
+  service.onEvent((e) => {
+    if (e.type !== "thread.created" || e.status !== "pending" || e.quiet) return;
+    emailRequest(e.threadId).catch((err) => console.error("[achat cloud] 提醒邮件没有发出去", err));
+  });
+
+  let selfUrl = "";
+
+  // The MCP endpoint for AIs that connect by address. Each call is handled on
+  // its own (no MCP session); the tools act through this service's own API
+  // with the caller's credential, so every rule above applies to them too.
+  async function mcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (req.method !== "POST") {
+      return send(res, 405, { jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null });
+    }
+    const agent = bearerAgent(req);
+    if (!agent) {
+      return send(res, 401, { error: "缺少或无效的 Achat 连接凭证" }, { "www-authenticate": "Bearer" });
+    }
+    const token = String(req.headers.authorization).slice(7).trim();
+    const body = parseJson(await readBody(req));
+    const server = createMcpServer({
+      connection: () => ({
+        client: new RelayClient(selfUrl, { bearer: token }),
+        agentId: agent.id,
+        webUrl: publicUrl,
+        mode: "cloud",
+      }),
+      review: false,
+      waitSeconds: REMOTE_WAIT_SECONDS,
+    });
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on("close", () => {
+      void transport.close();
+      void server.close();
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, body);
+  }
+
   const server: Server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", publicUrl);
+      if (url.pathname === "/mcp") return await mcp(req, res);
       if (url.pathname.startsWith("/api/")) return await api(req, res, url);
       if (req.method !== "GET") return send(res, 405, { error: "method not allowed" });
       if (url.pathname === "/install.sh") return await sendInstallScript(res);
@@ -469,6 +669,8 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     throw err;
   }
   const port = (server.address() as AddressInfo).port;
+  const host = opts.host ?? "127.0.0.1";
+  selfUrl = `http://${host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host}:${port}`;
 
   return {
     url: `http://127.0.0.1:${port}`,

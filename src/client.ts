@@ -23,19 +23,27 @@ export interface DeviceLinkTicket {
   // The pairing code shown on the confirmation page.
   code: string;
   expiresAt: string;
+  // "approved" when an enroll credential added the computer straight away.
+  status?: "pending" | "approved";
+  // The account it joined, when approved.
+  account?: string;
 }
 
+// How a client proves who it is: the local relay's token, this computer's key
+// (each request signed), or the credential of an AI that connects by address.
+export type RelayAuth = string | DeviceKey | { bearer: string };
+
 // Thin HTTP client for the relay API, used by the sidecar, the MCP server and
-// the hook command. It authenticates with the local relay's token, or, for the
-// cloud, by signing each request with this computer's key.
+// the hook command.
 export class RelayClient {
   constructor(
     readonly baseUrl: string,
-    private auth: string | DeviceKey,
+    private auth: RelayAuth,
   ) {}
 
   private headers(method: string, path: string, body: string): Record<string, string> {
     if (typeof this.auth === "string") return { "x-achat-token": this.auth };
+    if ("bearer" in this.auth) return { authorization: `Bearer ${this.auth.bearer}` };
     const url = new URL(this.baseUrl + path);
     return signRequest(this.auth, method, url.pathname + url.search, body);
   }
@@ -73,7 +81,13 @@ export class RelayClient {
 
   // Asks the cloud to add this computer, signed with its new key; a person
   // confirms on the returned page.
-  createDeviceLink(input: { publicKey: string; name: string; clients: AgentClient[] }): Promise<DeviceLinkTicket> {
+  createDeviceLink(input: {
+    publicKey: string;
+    name: string;
+    clients: AgentClient[];
+    // A one-time credential from the web page; the computer is then added at once.
+    enroll?: string;
+  }): Promise<DeviceLinkTicket> {
     return this.call("POST", "/api/device-links", input);
   }
 
