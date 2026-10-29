@@ -67,6 +67,23 @@ describe("cloud", () => {
     assert.match(cookie, /SameSite=Lax/);
   });
 
+  test("people's computers install Achat from the service, not from GitHub", async () => {
+    const script = await (await fetch(`${cloud.url}/install.sh`)).text();
+    assert.match(script, /^#!\/usr\/bin\/env bash/);
+    assert.match(script, /URL="https:\/\/achat\.test"/);
+    assert.doesNotMatch(script, /__ACHAT_URL__|github\.com/);
+    assert.match(script, /link "\$URL" --no-wait/);
+
+    const res = await fetch(`${cloud.url}/download/achat.tgz`);
+    assert.equal(res.headers.get("content-type"), "application/gzip");
+    const { spawnSync } = await import("node:child_process");
+    const listing = spawnSync("tar", ["-tzf", "-"], { input: Buffer.from(await res.arrayBuffer()) }).stdout.toString();
+    for (const file of ["package.json", "package-lock.json", "dist/cli.js", "web/index.html"]) {
+      assert.ok(listing.split("\n").includes(file), file);
+    }
+    assert.ok(!listing.includes("node_modules/"));
+  });
+
   test("cookie requests that change something need the web page's header", async () => {
     await assert.rejects(fang.call("POST", "/api/invites", {}, { "x-achat-web": "" }), /x-achat-web/);
   });

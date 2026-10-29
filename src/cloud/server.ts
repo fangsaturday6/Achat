@@ -1,6 +1,9 @@
+import { spawn } from "node:child_process";
 import { randomInt } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { dirname, join } from "node:path";
 import type { AgentClient, AgentConfig } from "../config.js";
 import { checkSignature, deviceIdFor, pairingCode, SIGNATURE_WINDOW_MS } from "../device.js";
 import { parseJson, readBody, send, serveStatic, str } from "../relay/http.js";
@@ -34,6 +37,9 @@ export const CLOUD_DEFAULTS: RelaySettings = {
 export interface CloudOptions {
   dbPath: string;
   webDir: string;
+  // The Achat package root; people's computers download it from here (see
+  // deploy/client-install.sh). Defaults to the folder above webDir.
+  appDir?: string;
   // Where people reach the service, e.g. https://achat.example.com; used in
   // links and to decide whether cookies need HTTPS.
   publicUrl: string;
@@ -411,11 +417,38 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     throw new RelayError(404, "没有这个接口");
   }
 
+  const appDir = opts.appDir ?? dirname(opts.webDir);
+
+  async function sendInstallScript(res: ServerResponse): Promise<void> {
+    const script = await readFile(join(appDir, "deploy", "client-install.sh"), "utf8");
+    res.writeHead(200, { "content-type": "text/x-shellscript; charset=utf-8", "cache-control": "no-store" });
+    res.end(script.replaceAll("__ACHAT_URL__", publicUrl));
+  }
+
+  // The built app without node_modules; the installer runs npm ci there.
+  function sendApp(res: ServerResponse): void {
+    const tar = spawn("tar", ["-czf", "-", "-C", appDir, "package.json", "package-lock.json", "dist", "web"], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let failed = "";
+    tar.stderr.on("data", (d) => (failed += d));
+    res.writeHead(200, { "content-type": "application/gzip", "cache-control": "no-store" });
+    tar.stdout.pipe(res);
+    tar.on("close", (code) => {
+      if (code !== 0) {
+        console.error("[achat cloud] 打包失败", failed.trim());
+        res.destroy();
+      }
+    });
+  }
+
   const server: Server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", publicUrl);
       if (url.pathname.startsWith("/api/")) return await api(req, res, url);
       if (req.method !== "GET") return send(res, 405, { error: "method not allowed" });
+      if (url.pathname === "/install.sh") return await sendInstallScript(res);
+      if (url.pathname === "/download/achat.tgz") return sendApp(res);
       // Pages of the single-page app; the empty token tells it to use the login cookie.
       const page = /^\/(link|invite)\/[^/]+$/.test(url.pathname) ? "/" : url.pathname;
       return await serveStatic(res, opts.webDir, page, (html) => html.replace("__ACHAT_TOKEN__", ""));

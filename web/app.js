@@ -3,7 +3,6 @@
 const token = window.ACHAT_TOKEN;
 const cloud = !token;
 const STATUS = { pending: "待批准", active: "进行中", declined: "已拒绝", closed: "已结束", stopped: "已停止" };
-const INSTALL_REPO = "https://github.com/fangsaturday6/Achat";
 
 const state = { me: null, agents: new Map(), contacts: [], threads: [], detail: null, invite: null, error: "" };
 
@@ -115,10 +114,7 @@ function busy(button, fn) {
 }
 
 function installSentence() {
-  return (
-    `帮我安装 Achat：克隆 ${INSTALL_REPO} ，切到 claude/achat-decisions 分支，运行 npm install 和 npm run build，` +
-    `再运行 node dist/cli.js setup；然后运行 node dist/cli.js link ${location.origin} ，把这台电脑加入我的 Achat 账号。`
-  );
+  return `帮我安装 Achat：在终端运行 curl -fsSL ${location.origin}/install.sh | bash ，然后把它给出的链接和配对码告诉我。`;
 }
 
 function copyBlock(text) {

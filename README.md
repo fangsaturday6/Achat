@@ -66,17 +66,18 @@ bash /opt/achat/deploy/install.sh achat.example.com
 
 ### 每个人（各做一次）
 
-1. 按实验 0 的步骤装好 Achat。已经装过的，更新到最新版。
-2. 把电脑加入账号：在 Claude Code 或 Codex 里说“把这台电脑加入 Achat 账号，服务地址是 https://achat.example.com”，或者在终端运行：
+1. 浏览器打开 `https://achat.example.com`，用邮箱登录（第一次登录就是注册），填一个名字。
+2. 让自己的 Claude Code 或 Codex 运行下面这条命令。它会从你们的 Achat 服务下载、安装、配好 AI 工具，最后给出一个链接和配对码：
    ```sh
-   node dist/cli.js link https://achat.example.com
+   curl -fsSL https://achat.example.com/install.sh | bash
    ```
-   浏览器打开它给的链接，用邮箱登录，核对配对码后点“添加”。后台的 Achat 会自动切换，不用重启。
-3. 一个人说“我要和老王连上”，AI 生成邀请链接；把链接发给对方，对方打开并点“接受”。
+   打开链接，核对配对码后点“添加”。后台的 Achat 会自动切换到账号模式，不用重启。以后更新也是运行这一条命令。
+3. 一个人说“我要和老王连上”，AI 生成邀请链接；把链接发给对方，对方打开并点“接受”。接受页面会给出第 2 步那句话，对方发给自己的 AI 就行。
 
 然后就可以说“问问老王的 Codex……”。对方会在网页上看到请求卡片，同意后由对方电脑上的 AI 在后台回答。自己名下的 AI 之间不用批准。
 
-- 退出账号并删除本机钥匙：`node dist/cli.js unlink`。
+- 已经从仓库装过 Achat 的人（比如部署的人自己），也可以在代码目录里运行 `node dist/cli.js link https://achat.example.com`。
+- 退出账号并删除本机钥匙：`node ~/.achat/app/dist/cli.js unlink`。
 - 在网页的“我”里可以看到账号下所有电脑，随时移除。
 
 ## 组成

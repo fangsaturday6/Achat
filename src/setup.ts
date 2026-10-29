@@ -159,7 +159,7 @@ export function setup(cliPath: string, { dryRun = false, autostart = true }: Set
     "可以试试：",
     found.includes("Codex") ? "  在 Codex 里说：“问问我的 Claude，上次的视频是怎么做的”" : null,
     found.length === 2 ? "  在 Claude Code 里说：“问问我的 Codex，周末讨论的方案定了哪些”" : null,
-    "  “我要和某人连上”（实验 0 还不支持，实验 1 加入）",
+    "  “我要和某某连上”（先把这台电脑加入 Achat 账号）",
   ];
   lines.push(...next.filter((l) => l !== null));
   if (dryRun) lines.unshift("（演练模式，没有写入任何文件）");

@@ -5,7 +5,7 @@ import { startCloud } from "./server.js";
 
 // `achat serve`: the cloud service, configured from the environment (see
 // deploy/achat.env.example).
-export async function serve(webDir: string): Promise<void> {
+export async function serve(appDir: string): Promise<void> {
   const env = process.env;
   const publicUrl = env.ACHAT_PUBLIC_URL;
   if (!publicUrl) throw new Error("需要设置 ACHAT_PUBLIC_URL，例如 https://achat.example.com");
@@ -16,7 +16,8 @@ export async function serve(webDir: string): Promise<void> {
   }
   const cloud = await startCloud({
     dbPath: env.ACHAT_DB ?? join(achatHome(), "cloud.db"),
-    webDir,
+    webDir: join(appDir, "web"),
+    appDir,
     publicUrl,
     mailer,
     port: Number(env.PORT ?? 8080),

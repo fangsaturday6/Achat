@@ -26,7 +26,7 @@ const HELP = `用法：achat <命令>
   start [--wait]                    启动 Achat；--wait 在端口被占用时等它空出来
   autostart on|off                  打开或关闭开机自启
   status                            列出最近的协作
-  link [地址]                       把这台电脑加入你的 Achat 账号（要和别人的 AI 联系时才需要）
+  link [地址] [--no-wait]           把这台电脑加入你的 Achat 账号（要和别人的 AI 联系时才需要）
   unlink                            让这台电脑退出 Achat 账号，并删除本机钥匙
   invite                            生成一个邀请链接，发给要连上的人
   serve                             运行云端的 Achat 服务（部署在服务器上，见 deploy/）
@@ -38,7 +38,7 @@ async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   if (command === "serve") {
     const { serve } = await import("./cloud/serve.js");
-    await serve(join(packageRoot, "web"));
+    await serve(packageRoot);
     return;
   }
   const cfg = loadConfig();
@@ -84,10 +84,18 @@ async function main(): Promise<void> {
       return;
     }
     case "link": {
+      if (cfg.cloud?.linked) {
+        console.log(`这台电脑已经加入了 Achat 账号（${cfg.cloud.url}）。要换账号，先运行 achat unlink。`);
+        return;
+      }
       const { checkLink, startLink } = await import("./link.js");
-      const ticket = await startLink(args[0]);
+      const ticket = await startLink(args.find((a) => !a.startsWith("--")));
       console.log(`在浏览器打开这个链接，用邮箱登录后确认添加这台电脑（10 分钟内有效）：\n\n  ${ticket.url}\n`);
       console.log(`确认前核对：页面上的配对码应该是 ${ticket.code}\n`);
+      if (args.includes("--no-wait")) {
+        console.log("确认后，后台的 Achat 会自动切换到账号模式，不用重启。");
+        return;
+      }
       const deadline = Date.parse(ticket.expiresAt);
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 3000));
