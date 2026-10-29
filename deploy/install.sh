@@ -97,7 +97,21 @@ say "Achat 服务"
 sed "s#/usr/bin/node#$(command -v node)#" "$APP/deploy/achat.service" > /etc/systemd/system/achat.service
 systemctl daemon-reload
 systemctl enable achat >/dev/null
-systemctl restart achat
+# A new version may upgrade the database when it starts, so stop the old one
+# and keep a copy first (the -wal file holds recent writes).
+systemctl stop achat 2>/dev/null || true
+DB="$(grep -E '^ACHAT_DB=' "$ENV" | cut -d= -f2- || true)"
+DB="${DB:-/var/lib/achat/achat.db}"
+if [ -f "$DB" ]; then
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  for f in "$DB" "$DB-wal" "$DB-shm"; do
+    if [ -f "$f" ]; then cp -p "$f" "$f.bak-$stamp"; fi
+  done
+  echo "数据库已备份：$DB.bak-$stamp"
+  # Keep the last five backups (three files each).
+  ls -1t "$(dirname "$DB")"/*.bak-* 2>/dev/null | tail -n +16 | xargs -r rm -f
+fi
+systemctl start achat
 
 # 80/443 已被别的程序占着（例如 Docker 里的 Caddy、宝塔的 nginx），又不是上次装的 caddy
 # 服务时，不装 Caddy，免得抢端口弄挂那边的网站。由那边加一个站点转发给 Achat。
