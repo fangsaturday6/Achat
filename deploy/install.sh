@@ -99,37 +99,59 @@ systemctl daemon-reload
 systemctl enable achat >/dev/null
 systemctl restart achat
 
-say "Caddy（自动申请 HTTPS 证书）"
-if [ ! -x /usr/local/bin/caddy ] || ! /usr/local/bin/caddy version | grep -q "v$CADDY_VERSION"; then
-  if [ -f "$CACHE/caddy-linux-$GO_ARCH" ]; then
-    install -m 755 "$CACHE/caddy-linux-$GO_ARCH" /usr/local/bin/caddy
-  else
-    tmp="$(mktemp -d)"
-    if fetch "$tmp/caddy.tar.gz" "https://github.com/caddyserver/caddy/releases/download/v$CADDY_VERSION/caddy_${CADDY_VERSION}_linux_$GO_ARCH.tar.gz"; then
-      tar -xzf "$tmp/caddy.tar.gz" -C "$tmp" caddy
+# 80/443 已被别的程序占着（例如 Docker 里的 Caddy、宝塔的 nginx），又不是上次装的 caddy
+# 服务时，不装 Caddy，免得抢端口弄挂那边的网站。由那边加一个站点转发给 Achat。
+port_taken() { ss -ltnH "( sport = :$1 )" 2>/dev/null | grep -q .; }
+OWN_PROXY=1
+if ! systemctl is-active --quiet caddy && { port_taken 80 || port_taken 443; }; then
+  OWN_PROXY=0
+  say "Caddy：80/443 已被别的程序占用，不安装"
+else
+  say "Caddy（自动申请 HTTPS 证书）"
+  if [ ! -x /usr/local/bin/caddy ] || ! /usr/local/bin/caddy version | grep -q "v$CADDY_VERSION"; then
+    if [ -f "$CACHE/caddy-linux-$GO_ARCH" ]; then
+      install -m 755 "$CACHE/caddy-linux-$GO_ARCH" /usr/local/bin/caddy
     else
-      fetch "$tmp/caddy" "https://caddyserver.com/api/download?os=linux&arch=$GO_ARCH" || { echo "下载不了 Caddy。请在电脑上运行 deploy/upload.sh，它会把 Caddy 一起传上来"; exit 1; }
+      tmp="$(mktemp -d)"
+      if fetch "$tmp/caddy.tar.gz" "https://github.com/caddyserver/caddy/releases/download/v$CADDY_VERSION/caddy_${CADDY_VERSION}_linux_$GO_ARCH.tar.gz"; then
+        tar -xzf "$tmp/caddy.tar.gz" -C "$tmp" caddy
+      else
+        fetch "$tmp/caddy" "https://caddyserver.com/api/download?os=linux&arch=$GO_ARCH" || { echo "下载不了 Caddy。请在电脑上运行 deploy/upload.sh，它会把 Caddy 一起传上来"; exit 1; }
+      fi
+      install -m 755 "$tmp/caddy" /usr/local/bin/caddy
+      rm -rf "$tmp"
     fi
-    install -m 755 "$tmp/caddy" /usr/local/bin/caddy
-    rm -rf "$tmp"
   fi
+  id caddy >/dev/null 2>&1 || useradd --system --home-dir /var/lib/caddy --create-home --shell /usr/sbin/nologin caddy
+  mkdir -p /etc/caddy
+  sed "s#achat.example.com#$DOMAIN#" "$APP/deploy/Caddyfile" > /etc/caddy/Caddyfile
+  cp "$APP/deploy/caddy.service" /etc/systemd/system/caddy.service
+  systemctl daemon-reload
+  systemctl enable caddy >/dev/null
+  systemctl restart caddy
 fi
-id caddy >/dev/null 2>&1 || useradd --system --home-dir /var/lib/caddy --create-home --shell /usr/sbin/nologin caddy
-mkdir -p /etc/caddy
-sed "s#achat.example.com#$DOMAIN#" "$APP/deploy/Caddyfile" > /etc/caddy/Caddyfile
-cp "$APP/deploy/caddy.service" /etc/systemd/system/caddy.service
-systemctl daemon-reload
-systemctl enable caddy >/dev/null
-systemctl restart caddy
 
 say "检查"
+env_value() { sed -n "s/^$1=//p" "$ENV" | tail -n 1; }
+host="$(env_value HOST)"; port="$(env_value PORT)"; port="${port:-8080}"
+case "$host" in ""|0.0.0.0) host=127.0.0.1 ;; esac
 sleep 2
-if curl -fsS http://127.0.0.1:8080/api/health >/dev/null; then
+if curl -fsS "http://$host:$port/api/health" >/dev/null; then
   echo "Achat 在服务器上正常运行"
 else
   echo "Achat 没有启动起来，最近的日志："
   journalctl -u achat -n 20 --no-pager || true
   exit 1
+fi
+if [ "$OWN_PROXY" = 0 ]; then
+  cat <<DONE
+
+装好了，但没装 Caddy。请在占着 80/443 的那个程序里给 $DOMAIN 加一个站点，转发到
+http://$host:$port 。那个程序在 Docker 里时，先把 $ENV 里的 HOST 改成 Docker 网络的
+网关地址，再 systemctl restart achat。详见 docs/deploy-aliyun.md。
+日志：journalctl -u achat -f
+DONE
+  exit 0
 fi
 cat <<DONE
 

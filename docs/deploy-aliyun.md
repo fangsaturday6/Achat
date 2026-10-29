@@ -68,10 +68,31 @@ RESEND_API_KEY='re_...' ACHAT_MAIL_FROM='Achat <login@example.com>' bash deploy/
 - 在电脑上构建 Achat，下载 Linux 版的 Node.js 和 Caddy；
 - 把它们和代码一起传到服务器的 `/opt/achat`；
 - 在服务器上运行 `deploy/install.sh`，npm 包从国内镜像下载；
-- 装好 systemd 服务和 Caddy；
+- 装好 systemd 服务和 Caddy（80/443 已被别的程序占着时不装，见下一节）；
 - 把 Resend 设置写进 `/etc/achat/achat.env`。
 
 最后一段输出“Achat 在服务器上正常运行”就成功了。以后更新代码，重复这一步即可；已有的设置和数据不会被覆盖。
+
+### 服务器上已经有网站占着 80/443
+
+部署前先看一眼：`ssh root@IP 'ss -ltnp | grep -E ":(80|443|8080) "'`。80/443 被别的程序（例如 Docker 里的 Caddy、宝塔的 nginx）占着时，`install.sh` 不装 Caddy，免得把那边的网站弄挂，只装 Achat 服务。这时要让那个程序把 `achat.example.com` 转给 Achat：
+
+1. 那个程序在 Docker 里时，容器访问不到宿主机的 127.0.0.1。查出它所在网络的网关，例如 `docker network inspect 网络名 --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'` 得到 `172.20.0.1`；把 `/etc/achat/achat.env` 里的 `HOST=127.0.0.1` 改成它，再 `systemctl restart achat`。以后重新部署不会改回去。
+2. 在那个程序的配置里加一个站点。Caddy 的写法如下（`flush_interval -1` 让消息实时送达；nginx 对应的是 `proxy_buffering off;`）：
+   ```
+   achat.example.com {
+   	encode gzip
+   	reverse_proxy 172.20.0.1:8080 {
+   		flush_interval -1
+   	}
+   }
+   ```
+   改之前先备份。Docker 挂进容器的是单个 Caddyfile 时，要原地写入（`cat 新文件 > Caddyfile`），不能用 `sed -i` 或编辑器另存：那样会换掉文件，容器里看到的还是旧的。改完先 `docker exec 容器名 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`，再把 `validate` 换成 `reload` 生效，不用重启容器。
+3. 那个网站的配置文件在它自己的代码仓库里、部署时会被换掉的话，上一步加的站点迟早被冲掉（Caddy 下次重启才暴露）。这时别把站点写进那个文件：
+   - 在它的 Caddyfile 末尾加一行 `import /etc/caddy/sites/*.caddy`；Caddy 在 Docker 里时，再给它加一个只读挂载 `/etc/caddy/sites:/etc/caddy/sites:ro`。这两处提交到那个项目的仓库，以后它照常部署。
+   - 把上面的站点块存成服务器上的 `/etc/caddy/sites/achat.caddy`。这个目录不在那个项目里，它部署时碰不到。
+   - 先用临时容器校验：`docker run --rm -v 新Caddyfile:/etc/caddy/Caddyfile:ro -v /etc/caddy/sites:/etc/caddy/sites:ro 同一个镜像 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`。
+   - 新加了挂载，要重建一次 Caddy 容器：`docker compose ... up -d --no-deps caddy`。80/443 会断一两秒；证书在它的数据目录里，不会重新申请。以后改 `achat.caddy` 只要 `caddy reload`。
 
 ## 6. 检查
 
