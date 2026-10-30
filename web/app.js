@@ -1243,14 +1243,14 @@ async function renderConnect(client) {
   } else {
     const field = (label, value, copy) =>
       h("div", {}, h("span", { class: "label" }, label), h("span", { class: `value${copy ? " mono" : ""}` }, value), copy ? copyButton(value, false) : null);
-    // 豆包 calls them plugins, under 插件 · 技能; its form takes the header's
+    // 豆包 adds them as custom connectors from 插件 · 技能; its form takes the header's
     // name and value in separate fields.
     const fields =
       client === "doubao"
-        ? [field("名称", "Achat"), field("传输类型", "HTTP"), field("服务器 URL", offer.url, true), field("请求头名称", "Authorization"), field("请求头的值", `Bearer ${offer.token}`, true)]
+        ? [field("服务器名称", "Achat"), field("传输类型", "HTTP"), field("服务器 URL", offer.url, true), field("请求头名称", "Authorization"), field("请求头的值", `Bearer ${offer.token}`, true)]
         : [field("名称", "Achat"), field("传输类型", "Streamable HTTP"), field("服务器地址", offer.url, true), field("请求头", offer.header, true)];
     connectPage(
-      h("h1", {}, client === "doubao" ? "在豆包里新建自定义插件" : cjk("在", name, "的 MCP 设置里添加")),
+      h("h1", {}, client === "doubao" ? "在豆包里新建自定义连接器" : cjk("在", name, "的 MCP 设置里添加")),
       client === "doubao" ? h("span", { class: "muted under" }, "插件 · 技能 → 插件 → 右上角 ＋") : null,
       h("div", { class: "fields" }, ...fields),
       h("div", { class: "row-between" }, wait),
