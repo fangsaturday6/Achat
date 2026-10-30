@@ -10,6 +10,7 @@ import { parseJson, readBody, send, serveStatic, str } from "../relay/http.js";
 import { RelayError, RelayService, type RelaySettings } from "../relay/service.js";
 import { Store } from "../relay/store.js";
 import { threadsApi, type Viewer } from "../relay/threads-api.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { RelayClient } from "../client.js";
 import { createMcpServer } from "../mcp/server.js";
@@ -719,20 +720,8 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
 
   let selfUrl = "";
 
-  // The MCP endpoint for AIs that connect by address. Each call is handled on
-  // its own (no MCP session); the tools act through this service's own API
-  // with the caller's credential, so every rule above applies to them too.
-  async function mcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (req.method !== "POST") {
-      return send(res, 405, { jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null });
-    }
-    const agent = bearerAgent(req);
-    if (!agent) {
-      return send(res, 401, { error: "缺少或无效的 Achat 连接凭证" }, { "www-authenticate": "Bearer" });
-    }
-    const token = String(req.headers.authorization).slice(7).trim();
-    const body = parseJson(await readBody(req));
-    const server = createMcpServer({
+  function mcpServerFor(agent: AgentRecord, token: string) {
+    return createMcpServer({
       connection: () => ({
         client: new RelayClient(selfUrl, { bearer: token }),
         agentId: agent.id,
@@ -742,6 +731,47 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
       review: false,
       waitSeconds: REMOTE_WAIT_SECONDS,
     });
+  }
+
+  // Event streams of AIs on the older HTTP+SSE transport, by session.
+  const sseSessions = new Map<string, { transport: SSEServerTransport; agentId: string }>();
+
+  // The MCP endpoint for AIs that connect by address. Each call is handled on
+  // its own (no MCP session); the tools act through this service's own API
+  // with the caller's credential, so every rule above applies to them too.
+  // Apps whose "HTTP" means the older HTTP+SSE transport open an event stream
+  // with GET at the same address and post to /mcp/messages; that works too.
+  async function mcp(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    const agent = bearerAgent(req);
+    if (!agent) {
+      return send(res, 401, { error: "缺少或无效的 Achat 连接凭证" }, { "www-authenticate": "Bearer" });
+    }
+    const token = String(req.headers.authorization).slice(7).trim();
+    if (url.pathname === "/mcp/messages") {
+      const session = sseSessions.get(url.searchParams.get("sessionId") ?? "");
+      if (!session || session.agentId !== agent.id) return send(res, 404, { error: "连接已断开，请重新连接" });
+      return await session.transport.handlePostMessage(req, res, parseJson(await readBody(req)));
+    }
+    // Clients of the current transport only GET after initializing, and then
+    // send their protocol version; this service has no stream for them.
+    if (req.method === "GET" && !req.headers["mcp-protocol-version"]) {
+      const transport = new SSEServerTransport("/mcp/messages", res);
+      const server = mcpServerFor(agent, token);
+      sseSessions.set(transport.sessionId, { transport, agentId: agent.id });
+      // Comments keep proxies from closing a quiet stream.
+      const ping = setInterval(() => res.write(": ping\n\n"), 25_000);
+      res.on("close", () => {
+        clearInterval(ping);
+        sseSessions.delete(transport.sessionId);
+        void server.close();
+      });
+      return await server.connect(transport);
+    }
+    if (req.method !== "POST") {
+      return send(res, 405, { jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed." }, id: null });
+    }
+    const body = parseJson(await readBody(req));
+    const server = mcpServerFor(agent, token);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => {
       void transport.close();
@@ -754,7 +784,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
   const server: Server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", publicUrl);
-      if (url.pathname === "/mcp") return await mcp(req, res);
+      if (url.pathname === "/mcp" || url.pathname === "/mcp/messages") return await mcp(req, res, url);
       if (url.pathname.startsWith("/api/")) return await api(req, res, url);
       if (req.method !== "GET") return send(res, 405, { error: "method not allowed" });
       if (url.pathname === "/install.sh") return await sendInstallScript(res);

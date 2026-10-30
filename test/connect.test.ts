@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { RelayClient } from "../src/client.js";
 import { AccountStore } from "../src/cloud/accounts.js";
@@ -21,6 +22,13 @@ async function remoteAi(cloud: RunningCloud, token: string): Promise<Client> {
       requestInit: { headers: { authorization: `Bearer ${token}` } },
     }),
   );
+  return client;
+}
+
+// The same, on the older HTTP+SSE transport some apps still use.
+async function sseAi(cloud: RunningCloud, token: string): Promise<Client> {
+  const client = new Client({ name: "doubao", version: "1" });
+  await client.connect(new SSEClientTransport(new URL(`${cloud.url}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
   return client;
 }
 
@@ -102,6 +110,15 @@ describe("connecting AIs", () => {
       // Its own Claude answers without approval.
       const reply = await call(doubao, "send_request", { to: "我的 Claude", topic: "视频", message: "怎么做的？" });
       assert.match(reply, /分镜、出图、剪辑三步/);
+
+      // An app on the older transport reaches the same tools at the same address.
+      const old = await sseAi(cloud, offer.token);
+      try {
+        assert.match(await call(old, "list_contacts"), /老王的 Codex/);
+      } finally {
+        await old.close();
+      }
+      await assert.rejects(sseAi(cloud, "ac_wrong"), /401/);
     } finally {
       sidecar.stop();
       await doubao.close();
