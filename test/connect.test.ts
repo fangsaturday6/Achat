@@ -194,7 +194,7 @@ test("a database from before remote AIs is upgraded in place", () => {
   assert.equal(agent.active, true);
   assert.equal(accounts.account("a_1")!.emailNotify, true);
   assert.equal(accounts.agentConfig(agent, "a_1").name, "我的 Claude");
-  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 2);
+  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
   const { agent: doubao } = accounts.connectRemoteAgent("a_1", "doubao", null);
   assert.equal(doubao.deviceId, null);
   new AccountStore(db); // opening again changes nothing

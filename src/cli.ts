@@ -29,7 +29,7 @@ const HELP = `用法：achat <命令>
   link [地址] [--no-wait] [--token 凭证]
                                     把这台电脑加入你的 Achat 账号；带上网页给的凭证时直接加入
   unlink                            让这台电脑退出 Achat 账号，并删除本机钥匙
-  invite                            生成一个邀请链接，发给要连上的人
+  invite [email]                    加朋友：填邮箱发邀请，不填就生成邀请链接
   serve                             运行云端的 Achat 服务（部署在服务器上，见 deploy/）
   mcp                               以 MCP 服务运行（由 AI 客户端调用，ACHAT_AGENT 指定身份）
   hook user-prompt --agent <id>     Claude Code 的待批准提醒 hook
@@ -125,6 +125,12 @@ async function main(): Promise<void> {
     case "invite": {
       const conn = connect(cfg);
       if (conn.mode !== "cloud") throw new Error("这台电脑还没加入 Achat 账号。先运行 achat link");
+      const email = args.find((a) => a.includes("@"));
+      if (email) {
+        const sent = await conn.client.createInvite(email);
+        console.log(sent.status === "accepted" ? `已经和${sent.contact!.name}成为朋友。` : `已邀请 ${sent.email}，等对方接受。`);
+        return;
+      }
       const invite = await conn.client.createInvite();
       console.log(`邀请链接（7 天内有效，只能用一次）：\n\n  ${invite.url}\n\n把它发给要连上的人。`);
       return;

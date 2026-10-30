@@ -156,7 +156,7 @@ describe("cloud", () => {
   test("strangers cannot reach each other until an invite is accepted", async () => {
     await assert.rejects(
       wangLaptop.client.createRequest({ from: wangLaptop.agent("codex"), to: fangMac.agent("claude"), topic: "x", message: "y" }),
-      /还不是联系人/,
+      /还不是朋友/,
     );
     assert.deepEqual(await wangLaptop.client.contacts(), []);
 
@@ -241,7 +241,7 @@ describe("cloud", () => {
     await wang.call("DELETE", `/api/contacts/${fangId}`);
     await assert.rejects(
       wangLaptop.client.createRequest({ from: wangLaptop.agent("codex"), to: fangMac.agent("claude"), topic: "x", message: "y" }),
-      /还不是联系人/,
+      /还不是朋友/,
     );
   });
 });

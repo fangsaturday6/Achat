@@ -47,7 +47,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     {
       instructions:
         "Achat 让你代表主人直接问别人的 AI，或主人自己的其他 AI。主人想问某人的 AI 时用 send_request；" +
-        "不知道能问谁时先用 list_contacts；要和新的人连上时用 create_invite。收到回复后，把原文完整转给主人。",
+        "不知道能问谁时先用 list_contacts；要加新的朋友时用 create_invite（有邮箱就填邮箱）。收到回复后，把原文完整转给主人。",
     },
   );
 
@@ -65,7 +65,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     if (close.length === 1) return close[0];
     const options = (close.length ? close : list).map((a) => `${a.name}（${a.id}）`).join("、");
     if (close.length > 1) throw new Error(`「${to}」能对上好几个：${options}。请用完整的名字或 id`);
-    if (!list.length) throw new Error("还没有可以联系的 AI。调用 create_invite 生成邀请链接，让主人发给对方");
+    if (!list.length) throw new Error("还没有可以联系的 AI。先用 create_invite 加对方为朋友（有邮箱就填邮箱）");
     throw new Error(`找不到联系人「${to}」。可以联系的有：${options}`);
   }
 
@@ -153,11 +153,17 @@ export function createMcpServer(opts: McpOptions): McpServer {
     guard(async () => {
       const c = opts.connection();
       const list = (await c.client.agents()).filter((a) => a.id !== c.agentId && a.canReceive !== false);
-      const hint =
-        c.mode === "cloud"
-          ? "要联系别人的 AI，调用 create_invite 生成邀请链接，让主人发给对方。"
-          : "要联系别人的 AI，先调用 link_account 把这台电脑加入主人的 Achat 账号。";
-      return text([...list.map((a) => `${a.name}（${a.id}）`), "", hint].join("\n").trim());
+      const lines = list.map((a) => `${a.name}（${a.id}）`);
+      if (c.mode === "cloud") {
+        const asking = (await c.client.newFriends()).filter((f) => f.direction === "in" && f.status === "pending");
+        if (asking.length) {
+          lines.push("", `${asking.map((f) => f.name).join("、")}想加主人为朋友，要主人在 Achat 网页的“新的朋友”里接受：${c.webUrl}/#/contacts/new`);
+        }
+        lines.push("", "要加新的朋友，用 create_invite（有对方邮箱就填 email）。");
+      } else {
+        lines.push("", "要联系别人的 AI，先调用 link_account 把这台电脑加入主人的 Achat 账号。");
+      }
+      return text(lines.join("\n").trim());
     }),
   );
 
@@ -316,24 +322,34 @@ export function createMcpServer(opts: McpOptions): McpServer {
   server.registerTool(
     "create_invite",
     {
-      title: "生成邀请链接",
+      title: "添加朋友",
       description:
-        "生成一个邀请链接，让主人发给对方（微信、邮件都行）。对方打开并接受后，双方的 AI 就能通过 Achat 直接联系。" +
-        "当主人说“我要和某人连上”“邀请某人”时使用。链接 7 天内有效，只能用一次。",
-      inputSchema: {},
+        "加一个人为 Achat 朋友，成为朋友后双方的 AI 才能互相问。当主人说“加某人”“邀请某人”“我要和某人连上”时使用。" +
+        "有对方的邮箱就填 email：对方已经在用 Achat 会收到好友请求，还没用会收到邀请邮件。" +
+        "没有邮箱就不填，生成一个邀请链接让主人用微信等发给对方。接受只能由对方本人在网页上点。",
+      inputSchema: {
+        email: z.string().optional().describe("对方的邮箱，例如 lin@example.com；不知道就不填"),
+      },
     },
-    guard(async () => {
+    guard(async ({ email }: { email?: string }) => {
       const c = opts.connection();
       if (c.mode !== "cloud") {
         return text("这台电脑还没加入 Achat 账号，不能邀请别人。先调用 link_account，让主人登录并确认添加这台电脑。");
       }
+      if (email) {
+        const sent = await c.client.createInvite(email);
+        if (sent.status === "accepted") {
+          return text(`${sent.contact!.name}之前已经想加主人为朋友，现在你们已经是朋友了，可以直接用 send_request 问${sent.contact!.name}的 AI。`);
+        }
+        return text(
+          sent.joined
+            ? `已给 ${sent.email} 发了好友请求。对方在 Achat 上点“接受”后，你们的 AI 就能互相问；进展在网页的“新的朋友”里：${c.webUrl}/#/contacts/new`
+            : `已给 ${sent.email} 发了邀请邮件。对方注册并接受后就是朋友；进展在网页的“新的朋友”里：${c.webUrl}/#/contacts/new`,
+        );
+      }
       const invite = await c.client.createInvite();
       return text(
-        [
-          `邀请链接：${invite.url}`,
-          "",
-          "请把链接发给对方。对方还没装 Achat 的话，打开链接后会看到安装说明。链接 7 天内有效，只能用一次。",
-        ].join("\n"),
+        [`邀请链接：${invite.url}`, "", "请主人用微信等发给对方。对方打开后注册并点“接受”。链接 7 天内有效，只能用一次。"].join("\n"),
       );
     }),
   );

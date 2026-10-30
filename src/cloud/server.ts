@@ -13,8 +13,8 @@ import { threadsApi, type Viewer } from "../relay/threads-api.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { RelayClient } from "../client.js";
 import { createMcpServer } from "../mcp/server.js";
-import { AccountStore, CLIENT_LABEL, hashSecret, type Account, type AgentRecord, type Device } from "./accounts.js";
-import { loginCodeEmail, requestEmail } from "./emails.js";
+import { AccountStore, CLIENT_LABEL, hashSecret, type Account, type AgentRecord, type Device, type Invite } from "./accounts.js";
+import { acceptedEmail, inviteEmail, loginCodeEmail, requestEmail } from "./emails.js";
 import type { Mailer } from "./mailer.js";
 
 const MINUTE = 60 * 1000;
@@ -230,7 +230,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
         }
         if (target.accountId === accountId) return true;
         if (!accounts.isContact(accountId, target.accountId)) {
-          throw new RelayError(403, "你们还不是联系人。先发一个邀请链接给对方");
+          throw new RelayError(403, "你们还不是朋友。先用 create_invite 加对方为朋友");
         }
         return false;
       },
@@ -424,6 +424,8 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
       remoteAis: ais
         .filter((a) => !a.deviceId)
         .map((a) => ({ id: a.id, name: accounts.agentConfig(a, account.id).name, client: a.client, lastUsedAt: a.lastUsedAt })),
+      // Friend requests waiting for this person; the badge on 通讯录.
+      newFriends: newFriends(account).filter((f) => f.direction === "in" && f.status === "pending").length,
       checklist: {
         connected: ais.length > 0,
         invited: accounts.contacts(account.id).length > 0,
@@ -440,15 +442,106 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     return { from: { id: from.id, name: accounts.displayName(from) }, status };
   }
 
-  function acceptInvite(accountId: string, code: string): Record<string, unknown> {
-    const invite = accounts.invite(code);
+  function inviteStatus(invite: Invite): "pending" | "accepted" | "expired" {
+    return invite.usedBy ? "accepted" : invite.expiresAt < ms() ? "expired" : "pending";
+  }
+
+  // 新的朋友: requests to this person and the invites they sent, newest
+  // first, with requests still waiting on them at the top. Unused links are
+  // left out; they turn up here once someone accepts.
+  function newFriends(account: Account): Record<string, unknown>[] {
+    const seen = new Set<string>();
+    const incoming = accounts
+      .invitesTo(account.id, account.email)
+      .filter((i) => i.accountId !== account.id)
+      .flatMap((i) => {
+        const status = inviteStatus(i);
+        if (status === "expired" || seen.has(i.accountId)) return [];
+        if (status === "accepted" && i.usedBy !== account.id) return [];
+        if (status === "pending" && accounts.isContact(account.id, i.accountId)) return [];
+        seen.add(i.accountId);
+        const from = accounts.account(i.accountId)!;
+        return [{ id: i.id, direction: "in", name: accounts.displayName(from), email: from.email, status, at: i.createdAt }];
+      });
+    const outgoing = accounts.invitesFrom(account.id).map((i) => {
+      const status = inviteStatus(i);
+      const friend = i.usedBy ? accounts.account(i.usedBy) : null;
+      return {
+        id: i.id,
+        direction: "out",
+        name: friend ? accounts.displayName(friend) : i.email!,
+        email: friend?.email ?? i.email,
+        status,
+        at: i.createdAt,
+      };
+    });
+    const waiting = (f: { direction: string; status: string }) => f.direction === "in" && f.status === "pending";
+    return [...incoming, ...outgoing].sort((a, b) => Number(waiting(b)) - Number(waiting(a)) || b.at.localeCompare(a.at));
+  }
+
+  // Invites someone by email. A person already on Achat sees it under 新的朋友;
+  // someone new gets an email asking them to join. Each email is invited at
+  // most once a day; sending again renews the same invite.
+  async function inviteByEmail(account: Account, value: string): Promise<Record<string, unknown>> {
+    const email = normalizeEmail(value);
+    if (email === account.email) throw new RelayError(400, "不能添加自己");
+    const target = accounts.accountByEmail(email);
+    if (target && accounts.isContact(account.id, target.id)) {
+      throw new RelayError(409, `${accounts.displayName(target)}已经是你的朋友了`);
+    }
+    // They asked first: accepting their request beats asking back.
+    const theirs = target && accounts.openInvite(target.id, account.email);
+    if (theirs && theirs.expiresAt > ms()) {
+      return { status: "accepted", contact: await accept(theirs, account) };
+    }
+    const open = accounts.openInvite(account.id, email);
+    if (open?.emailedAt && ms() - open.emailedAt < DAY) throw new RelayError(429, `今天已经邀请过 ${email} 了`);
+    limit(`invite:${account.id}`, 20, DAY);
+    const { invite, code } = open ? accounts.renewInvite(open.id, INVITE_TTL) : accounts.createInvite(account.id, INVITE_TTL, email);
+    if (!target || target.emailNotify) {
+      try {
+        await opts.mailer.send(
+          inviteEmail(email, { fromName: accounts.displayName(account), link: `${publicUrl}/invite/${code}`, joined: !!target }),
+        );
+      } catch (err) {
+        console.error("[achat cloud]", err);
+        if (!open) accounts.deleteInvite(invite.id);
+        throw new RelayError(502, "邀请邮件没有发出去，稍后再试");
+      }
+    }
+    accounts.markInviteEmailed(invite.id);
+    return { status: "pending", id: invite.id, email, joined: !!target };
+  }
+
+  // Accepts an invite by its link code, or by id from 新的朋友, which only
+  // works for the email it was sent to.
+  async function acceptInvite(account: Account, key: string): Promise<Record<string, unknown>> {
+    const byId = accounts.inviteById(key);
+    const invite = byId && byId.email === account.email ? byId : accounts.invite(key);
     if (!invite) throw new RelayError(404, "找不到这个邀请");
+    if (invite.accountId === account.id) throw new RelayError(400, "这是你自己发出的邀请");
     if (invite.usedBy) throw new RelayError(409, "这个邀请已经被用过了，请对方重新发一个");
     if (invite.expiresAt < ms()) throw new RelayError(410, "这个邀请已经过期，请对方重新发一个");
-    if (invite.accountId === accountId) throw new RelayError(400, "这是你自己发出的邀请");
-    accounts.acceptInvite(code, accountId, invite.accountId);
-    const from = accounts.account(invite.accountId)!;
-    return { contact: { id: from.id, name: accounts.displayName(from) } };
+    return { contact: await accept(invite, account) };
+  }
+
+  async function accept(invite: Invite, account: Account): Promise<{ id: string; name: string }> {
+    accounts.acceptInvite(invite, account);
+    const inviter = accounts.account(invite.accountId)!;
+    if (inviter.emailNotify) {
+      opts.mailer
+        .send(acceptedEmail(inviter.email, { name: accounts.displayName(account), link: `${publicUrl}/#/contacts/${account.id}` }))
+        .catch((err) => console.error("[achat cloud] 接受邀请的邮件没有发出去", err));
+    }
+    return { id: inviter.id, name: accounts.displayName(inviter) };
+  }
+
+  // An invite this account sent by email and nobody has used yet.
+  function ownOpenInvite(account: Account, id: string): Invite & { email: string } {
+    const invite = accounts.inviteById(id);
+    if (!invite || invite.accountId !== account.id || !invite.email) throw new RelayError(404, "找不到这个邀请");
+    if (invite.usedBy) throw new RelayError(409, "对方已经接受了");
+    return invite as Invite & { email: string };
   }
 
   async function api(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
@@ -531,14 +624,27 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
         accounts.revokeDevice(device.id);
         return send(res, 200, { ok: true });
       }
+      case "GET /invites":
+        return send(res, 200, newFriends(requireAny(p).account));
       case "POST /invites": {
         const me = requireAny(p);
+        const body = parseJson(raw);
+        if (body.email !== undefined) return send(res, 201, await inviteByEmail(me.account, str(body, "email")));
         limit(`invite:${me.account.id}`, 20, DAY);
-        const { code, expiresAt } = accounts.createInvite(me.account.id, INVITE_TTL);
-        return send(res, 201, { url: `${publicUrl}/invite/${code}`, expiresAt: new Date(expiresAt).toISOString() });
+        const { invite, code } = accounts.createInvite(me.account.id, INVITE_TTL);
+        return send(res, 201, { url: `${publicUrl}/invite/${code}`, expiresAt: new Date(invite.expiresAt).toISOString() });
       }
       case "POST /invites/:id/accept":
-        return send(res, 200, acceptInvite(requireWeb(p).account.id, parts[1]));
+        return send(res, 200, await acceptInvite(requireWeb(p).account, parts[1]));
+      case "POST /invites/:id/resend": {
+        const web = requireWeb(p);
+        return send(res, 200, await inviteByEmail(web.account, ownOpenInvite(web.account, parts[1]).email));
+      }
+      case "DELETE /invites/:id": {
+        const web = requireWeb(p);
+        accounts.deleteInvite(ownOpenInvite(web.account, parts[1]).id);
+        return send(res, 200, { ok: true });
+      }
       case "GET /contacts":
         return send(res, 200, contactsOf(requireAny(p).account.id));
       case "DELETE /contacts/:id": {
@@ -597,7 +703,6 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
         question,
         link: `${publicUrl}/#/t/${thread.id}`,
         settingsLink: `${publicUrl}/#/me`,
-        perDay: REQUEST_EMAILS_PER_DAY,
       }),
     );
   }

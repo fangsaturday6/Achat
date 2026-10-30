@@ -56,11 +56,18 @@ CREATE TABLE IF NOT EXISTS agents (
 );
 CREATE TABLE IF NOT EXISTS invites (
   code_hash TEXT PRIMARY KEY,
+  id TEXT,
   account_id TEXT NOT NULL REFERENCES accounts(id),
+  -- Set when the invite went to an email; whoever has that email sees it
+  -- under 新的朋友.
+  email TEXT,
   expires_at INTEGER NOT NULL,
   used_by TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  emailed_at INTEGER
 );
+CREATE UNIQUE INDEX IF NOT EXISTS invites_by_id ON invites (id);
+CREATE INDEX IF NOT EXISTS invites_by_email ON invites (email);
 CREATE TABLE IF NOT EXISTS contacts (
   account_id TEXT NOT NULL REFERENCES accounts(id),
   contact_id TEXT NOT NULL REFERENCES accounts(id),
@@ -83,7 +90,7 @@ CREATE TABLE IF NOT EXISTS request_emails (
 CREATE INDEX IF NOT EXISTS request_emails_by_pair ON request_emails (account_id, from_account, sent_at);
 `;
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 // Version 1 had computer AIs only (agents.device_id NOT NULL) and no email
 // preference. Rebuilds the agents table in place, keeping its rows.
@@ -104,6 +111,14 @@ INSERT INTO agents_v2 (id, account_id, device_id, client, created_at)
 DROP TABLE agents;
 ALTER TABLE agents_v2 RENAME TO agents;
 ALTER TABLE accounts ADD COLUMN email_notify INTEGER NOT NULL DEFAULT 1;
+`;
+
+// Version 2 invites were links only, known by the hash of their code.
+const MIGRATE_FROM_2 = `
+ALTER TABLE invites ADD COLUMN id TEXT;
+ALTER TABLE invites ADD COLUMN email TEXT;
+ALTER TABLE invites ADD COLUMN emailed_at INTEGER;
+UPDATE invites SET id = 'i_' || lower(hex(randomblob(8))) WHERE id IS NULL;
 `;
 
 export interface Account {
@@ -152,9 +167,15 @@ export interface AgentRecord {
 }
 
 export interface Invite {
+  id: string;
+  // Who invited.
   accountId: string;
+  // Set when it was sent to an email rather than handed over as a link.
+  email: string | null;
   expiresAt: number;
   usedBy: string | null;
+  createdAt: string;
+  emailedAt: number | null;
 }
 
 export function hashSecret(value: string): string {
@@ -184,11 +205,14 @@ export class AccountStore {
     private now: () => Date = () => new Date(),
   ) {
     const version = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-    const existing = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agents'").get();
-    if (existing && version < SCHEMA_VERSION) {
+    const has = (table: string) => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+    if (has("agents") && version < SCHEMA_VERSION) {
       db.exec("PRAGMA foreign_keys = OFF");
       try {
-        this.transaction(() => db.exec(MIGRATE_FROM_1));
+        this.transaction(() => {
+          if (version < 2) db.exec(MIGRATE_FROM_1);
+          if (has("invites")) db.exec(MIGRATE_FROM_2);
+        });
       } finally {
         db.exec("PRAGMA foreign_keys = ON");
       }
@@ -482,34 +506,90 @@ export class AccountStore {
 
   // --- invites and contacts
 
-  createInvite(accountId: string, ttlMs: number): { code: string; expiresAt: number } {
+  createInvite(accountId: string, ttlMs: number, email: string | null = null): { invite: Invite; code: string } {
     const code = randomBytes(16).toString("base64url");
-    const expiresAt = this.now().getTime() + ttlMs;
+    const id = newId("i_");
     this.db
-      .prepare("INSERT INTO invites (code_hash, account_id, expires_at, created_at) VALUES (?, ?, ?, ?)")
-      .run(hashSecret(code), accountId, expiresAt, this.stamp());
-    return { code, expiresAt };
+      .prepare("INSERT INTO invites (code_hash, id, account_id, email, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(hashSecret(code), id, accountId, email, this.now().getTime() + ttlMs, this.stamp());
+    return { invite: this.inviteById(id)!, code };
+  }
+
+  // Gives an unused invite a new code and expiry, so it can be sent again;
+  // the old link stops working.
+  renewInvite(id: string, ttlMs: number): { invite: Invite; code: string } {
+    const code = randomBytes(16).toString("base64url");
+    this.db
+      .prepare("UPDATE invites SET code_hash = ?, expires_at = ? WHERE id = ? AND used_by IS NULL")
+      .run(hashSecret(code), this.now().getTime() + ttlMs, id);
+    return { invite: this.inviteById(id)!, code };
+  }
+
+  markInviteEmailed(id: string): void {
+    this.db.prepare("UPDATE invites SET emailed_at = ? WHERE id = ?").run(this.now().getTime(), id);
+  }
+
+  deleteInvite(id: string): void {
+    this.db.prepare("DELETE FROM invites WHERE id = ? AND used_by IS NULL").run(id);
   }
 
   invite(code: string): Invite | null {
     const row = this.db.prepare("SELECT * FROM invites WHERE code_hash = ?").get(hashSecret(code)) as Row | undefined;
-    if (!row) return null;
-    return {
-      accountId: row.account_id as string,
-      expiresAt: row.expires_at as number,
-      usedBy: (row.used_by as string | null) ?? null,
-    };
+    return row ? toInvite(row) : null;
   }
 
-  acceptInvite(code: string, accountId: string, inviterId: string): void {
+  inviteById(id: string): Invite | null {
+    const row = this.db.prepare("SELECT * FROM invites WHERE id = ?").get(id) as Row | undefined;
+    return row ? toInvite(row) : null;
+  }
+
+  // The unused invite from this account to this email, if any.
+  openInvite(accountId: string, email: string): Invite | null {
+    const row = this.db
+      .prepare("SELECT * FROM invites WHERE account_id = ? AND email = ? AND used_by IS NULL ORDER BY created_at DESC")
+      .get(accountId, email) as Row | undefined;
+    return row ? toInvite(row) : null;
+  }
+
+  // Invites this account sent by email, and any invite someone accepted.
+  invitesFrom(accountId: string): Invite[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM invites WHERE account_id = ? AND (email IS NOT NULL OR used_by IS NOT NULL)
+           ORDER BY created_at DESC LIMIT 100`,
+        )
+        .all(accountId) as Row[]
+    ).map(toInvite);
+  }
+
+  // Invites sent to this email, and links this account accepted.
+  invitesTo(accountId: string, email: string): Invite[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM invites WHERE email = ? OR used_by = ? ORDER BY created_at DESC LIMIT 100")
+        .all(email, accountId) as Row[]
+    ).map(toInvite);
+  }
+
+  // Makes the two people friends. Other open invites between them are used
+  // up too, so neither side keeps waiting on a second one.
+  acceptInvite(invite: Invite, account: Account): void {
     const now = this.stamp();
+    const inviter = this.account(invite.accountId)!;
     this.transaction(() => {
-      this.db.prepare("UPDATE invites SET used_by = ? WHERE code_hash = ?").run(accountId, hashSecret(code));
+      this.db.prepare("UPDATE invites SET used_by = ? WHERE id = ?").run(account.id, invite.id);
+      this.db
+        .prepare(
+          `UPDATE invites SET used_by = ? WHERE used_by IS NULL
+           AND ((account_id = ? AND email = ?) OR (account_id = ? AND email = ?))`,
+        )
+        .run(account.id, inviter.id, account.email, account.id, inviter.email);
       const add = this.db.prepare(
         "INSERT INTO contacts (account_id, contact_id, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
       );
-      add.run(accountId, inviterId, now);
-      add.run(inviterId, accountId, now);
+      add.run(account.id, inviter.id, now);
+      add.run(inviter.id, account.id, now);
     });
   }
 
@@ -555,6 +635,18 @@ function toAccount(row: Row): Account {
     name: row.name as string,
     createdAt: row.created_at as string,
     emailNotify: row.email_notify !== 0,
+  };
+}
+
+function toInvite(row: Row): Invite {
+  return {
+    id: row.id as string,
+    accountId: row.account_id as string,
+    email: (row.email as string | null) ?? null,
+    expiresAt: row.expires_at as number,
+    usedBy: (row.used_by as string | null) ?? null,
+    createdAt: row.created_at as string,
+    emailedAt: (row.emailed_at as number | null) ?? null,
   };
 }
 

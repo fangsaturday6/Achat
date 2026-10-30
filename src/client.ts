@@ -17,6 +17,26 @@ export interface Contact {
   agents: AgentConfig[];
 }
 
+// A row under 新的朋友: a request to me ("in") or an invite I sent ("out").
+export interface NewFriend {
+  id: string;
+  direction: "in" | "out";
+  name: string;
+  email: string | null;
+  status: "pending" | "accepted" | "expired";
+  at: string;
+}
+
+// What inviting by email did: sent it, or found the other person had already
+// asked and made you friends.
+export interface EmailInvite {
+  status: "pending" | "accepted";
+  email?: string;
+  // The email belongs to someone already on Achat.
+  joined?: boolean;
+  contact?: { id: string; name: string };
+}
+
 export interface DeviceLinkTicket {
   id: string;
   url: string;
@@ -75,8 +95,14 @@ export class RelayClient {
     return this.call("GET", "/api/contacts");
   }
 
-  createInvite(): Promise<{ url: string; expiresAt: string }> {
-    return this.call("POST", "/api/invites", {});
+  createInvite(): Promise<{ url: string; expiresAt: string }>;
+  createInvite(email: string): Promise<EmailInvite>;
+  createInvite(email?: string): Promise<{ url: string; expiresAt: string } | EmailInvite> {
+    return this.call("POST", "/api/invites", email === undefined ? {} : { email });
+  }
+
+  newFriends(): Promise<NewFriend[]> {
+    return this.call("GET", "/api/invites");
   }
 
   // Asks the cloud to add this computer, signed with its new key; a person
