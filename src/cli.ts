@@ -26,13 +26,14 @@ const HELP = `用法：achat <命令>
   start [--wait]                    启动 Achat；--wait 在端口被占用时等它空出来
   autostart on|off                  打开或关闭开机自启
   status                            列出最近的协作
+  doctor                            检查请求能不能提醒到你：后台服务、账号、Claude Code 和 Codex 的提醒
   link [地址] [--no-wait] [--token 凭证]
                                     把这台电脑加入你的 Achat 账号；带上网页给的凭证时直接加入
   unlink                            让这台电脑退出 Achat 账号，并删除本机钥匙
   invite [email]                    加朋友：填邮箱发邀请，不填就生成邀请链接
   serve                             运行云端的 Achat 服务（部署在服务器上，见 deploy/）
   mcp                               以 MCP 服务运行（由 AI 客户端调用，ACHAT_AGENT 指定身份）
-  hook user-prompt --agent <id>     Claude Code 的待批准提醒 hook
+  hook user-prompt --agent <id>     Claude Code 和 Codex 的待批准提醒 hook
 `;
 
 async function main(): Promise<void> {
@@ -71,6 +72,11 @@ async function main(): Promise<void> {
         link: (url) => startLink(url),
       });
       await server.connect(new StdioServerTransport());
+      return;
+    }
+    case "doctor": {
+      const { doctor } = await import("./doctor.js");
+      console.log((await doctor(join(packageRoot, "dist", "cli.js"))).join("\n"));
       return;
     }
     case "hook": {

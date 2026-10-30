@@ -17,7 +17,7 @@ description: 通过 Achat 和其他 AI 直接沟通，包括主人自己的其�
 - 发起：调用 send_request（to、topic、message）。message 要写清楚想要什么。别人的 AI 要先由对方的主人批准，可能要等一会儿；主人自己的 AI 之间不用批准。
 - 收到回复后，先把对方的回复完整转给主人：步骤、提示词、命令、路径照原文给出，不要压缩成摘要；你的理解放在后面另外说。
 - 按主人的目标决定是否追问（send_message）；问完调用 close_thread。
-- 主人要和某人连上：调用 create_invite，把链接交给主人发给对方。工具说这台电脑还没加入账号时，先调用 link_account，让主人打开链接登录并确认。
+- 主人要加某人为朋友：调用 create_invite，知道对方邮箱就填 email，不知道就把生成的链接交给主人发给对方。工具说这台电脑还没加入账号时，先调用 link_account，让主人打开链接登录并确认。
 - 主人发来别人的邀请链接（…/invite/…）：让主人在浏览器打开并点“接受”。这台电脑还没加入账号的话，先调用 link_account。
 - 不知道能联系谁时，调用 list_contacts。
 - 提示有待批准请求时：调用 review_pending，让主人在弹出的对话框里决定。你看不到请求内容，不要猜。
@@ -45,9 +45,41 @@ function writeFile(path: string, content: string, dryRun: boolean): void {
   writeFileSync(path, content);
 }
 
-interface ClaudeSettings {
+// Claude Code's settings.json and Codex's hooks.json share this shape.
+interface HookSettings {
   hooks?: Record<string, { matcher?: string; hooks: { type: string; command: string; timeout?: number }[] }[]>;
   [key: string]: unknown;
+}
+
+// Adds the pending-request reminder to a hooks file, replacing any earlier
+// Achat reminder, including one from an install in another folder.
+export function withReminderHook(settings: HookSettings, command: string): HookSettings {
+  const hooks = { ...(settings.hooks ?? {}) };
+  const others = (hooks.UserPromptSubmit ?? []).filter((entry) => !entry.hooks.some((h) => h.command.includes("hook user-prompt --agent")));
+  hooks.UserPromptSubmit = [...others, { hooks: [{ type: "command", command, timeout: 10 }] }];
+  return { ...settings, hooks };
+}
+
+// Sets `key = value` in a TOML table, adding the table at the end if needed.
+export function withTomlKey(toml: string, table: string, key: string, value: string): string {
+  const lines = toml.split("\n");
+  const header = new RegExp(`^\\s*\\[${table.replace(/\./g, "\\.")}\\]\\s*(#.*)?$`);
+  const start = lines.findIndex((l) => header.test(l));
+  if (start < 0) {
+    const body = toml.replace(/\s*$/, "");
+    return `${body ? body + "\n\n" : ""}[${table}]\n${key} = ${value}\n`;
+  }
+  let end = lines.findIndex((l, i) => i > start && /^\s*\[/.test(l));
+  if (end < 0) end = lines.length;
+  const keyLine = new RegExp(`^\\s*${key}\\s*=`);
+  const at = lines.slice(start + 1, end).findIndex((l) => keyLine.test(l));
+  if (at >= 0) lines[start + 1 + at] = `${key} = ${value}`;
+  else lines.splice(start + 1, 0, `${key} = ${value}`);
+  return lines.join("\n");
+}
+
+function readJson(path: string): HookSettings {
+  return existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as HookSettings) : {};
 }
 
 export interface SetupResult {
@@ -90,15 +122,7 @@ export function setup(cliPath: string, { dryRun = false, autostart = true }: Set
     lines.push("✓ Claude Code：已添加 MCP 工具 achat");
 
     const settingsPath = join(home, ".claude", "settings.json");
-    const settings: ClaudeSettings = existsSync(settingsPath)
-      ? (JSON.parse(readFileSync(settingsPath, "utf8")) as ClaudeSettings)
-      : {};
-    settings.hooks ??= {};
-    const command = `"${node}" "${cliPath}" hook user-prompt --agent ${claudeAgent.id}`;
-    const others = (settings.hooks.UserPromptSubmit ?? []).filter(
-      (entry) => !entry.hooks.some((h) => h.command.includes("hook user-prompt") && h.command.includes(cliPath)),
-    );
-    settings.hooks.UserPromptSubmit = [...others, { hooks: [{ type: "command", command, timeout: 10 }] }];
+    const settings = withReminderHook(readJson(settingsPath), `"${node}" "${cliPath}" hook user-prompt --agent ${claudeAgent.id}`);
     writeFile(settingsPath, JSON.stringify(settings, null, 2) + "\n", dryRun);
     lines.push("✓ Claude Code：已添加待批准提醒 hook");
 
@@ -121,9 +145,14 @@ export function setup(cliPath: string, { dryRun = false, autostart = true }: Set
       `ACHAT_AGENT = ${JSON.stringify(codexAgent.id)}`,
       "",
     ].join("\n");
-    const others = withoutTables(current, "mcp_servers.achat").replace(/\s*$/, "");
+    // Codex loads hooks.json only with the hooks feature on.
+    const others = withTomlKey(withoutTables(current, "mcp_servers.achat"), "features", "hooks", "true").replace(/\s*$/, "");
     writeFile(tomlPath, (others ? others + "\n\n" : "") + block, dryRun);
     lines.push("✓ Codex：已添加 MCP 工具 achat");
+    const hooksPath = join(home, ".codex", "hooks.json");
+    const hooks = withReminderHook(readJson(hooksPath), `"${node}" "${cliPath}" hook user-prompt --agent ${codexAgent.id}`);
+    writeFile(hooksPath, JSON.stringify(hooks, null, 2) + "\n", dryRun);
+    lines.push("✓ Codex：已添加待批准提醒 hook");
     writeFile(join(home, ".agents", "skills", "achat", "SKILL.md"), SKILL, dryRun);
     lines.push("✓ Codex：已添加 Achat skill");
   }
