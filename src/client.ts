@@ -14,6 +14,7 @@ export class RelayClientError extends Error {
 export interface Contact {
   id: string;
   name: string;
+  email?: string;
   agents: AgentConfig[];
 }
 

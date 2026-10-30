@@ -200,6 +200,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     return accounts.contacts(accountId).map((c) => ({
       id: c.id,
       name: accounts.displayName(c),
+      email: c.email,
       agents: accounts.activeAgents(c.id).map((a) => accounts.agentConfig(a, accountId)),
     }));
   }
@@ -341,7 +342,8 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     };
   }
 
-  function approveLink(accountId: string, linkId: string): Record<string, unknown> {
+  // `name` renames the computer as it is added.
+  function approveLink(accountId: string, linkId: string, name?: string): Record<string, unknown> {
     const link = accounts.deviceLink(linkId);
     if (!link) throw new RelayError(404, "找不到这个链接");
     if (link.approvedBy) throw new RelayError(409, "这台电脑已经添加过了");
@@ -350,7 +352,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     if (existing && existing.accountId !== accountId) {
       throw new RelayError(409, "这台电脑的钥匙登记在另一个账号下。先在那台电脑上运行 achat unlink，再重新添加");
     }
-    const device = accounts.approveDeviceLink(link, accountId);
+    const device = accounts.approveDeviceLink({ ...link, name: name?.trim().slice(0, 60) || link.name }, accountId);
     return { device: { id: device.id, name: device.name } };
   }
 
@@ -613,8 +615,11 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
       }
       case "GET /device-links/:id":
         return send(res, 200, linkStatus(requireWeb(p).account.id, parts[1]));
-      case "POST /device-links/:id/approve":
-        return send(res, 200, approveLink(requireWeb(p).account.id, parts[1]));
+      case "POST /device-links/:id/approve": {
+        const body = parseJson(raw);
+        const name = typeof body.name === "string" ? body.name : undefined;
+        return send(res, 200, approveLink(requireWeb(p).account.id, parts[1], name));
+      }
       case "DELETE /devices/:id": {
         const me = requireAny(p);
         const device = accounts.device(parts[1]);
