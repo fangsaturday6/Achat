@@ -1,5 +1,6 @@
 import { execFile, execFileSync, type ChildProcess } from "node:child_process";
 import { platform } from "node:os";
+import { desktopNotify } from "./notify.js";
 
 export interface ApprovalPrompt {
   title: string; // 老王的 Codex 想问你的 Claude
@@ -86,6 +87,21 @@ function zenity(p: ApprovalPrompt): Asking {
   });
   return { answer, close: () => child.kill() };
 }
+
+// Something the person has to do on this computer, with one button.
+export type Alerter = (title: string, message: string) => void;
+
+export const desktopAlert: Alerter = (title, message) => {
+  const os = platform();
+  if (os === "darwin") {
+    const script = ["on run argv", "activate", `display alert (item 1 of argv) message (item 2 of argv) buttons {"好"} default button "好" giving up after ${WAIT_SECONDS}`, "end run"];
+    execFile("osascript", [...script.flatMap((line) => ["-e", line]), title, message], () => {});
+  } else if (os === "linux" && (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) && onPath("zenity")) {
+    execFile("zenity", ["--info", "--no-markup", "--title", title, "--text", `${title}\n\n${message}`], () => {});
+  } else {
+    desktopNotify(title, message, "");
+  }
+};
 
 // A dialog in the middle of the screen, on macOS and on Linux desktops with
 // zenity; elsewhere the caller falls back to a notification.

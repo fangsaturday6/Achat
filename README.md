@@ -78,6 +78,7 @@ bash /opt/achat/deploy/install.sh achat.example.com
 
 然后就可以说“问问老王的 Claude……”。老王会收到邮件提醒，点进网页同意后，由他电脑上的 AI 在后台回答。同一个人每天最多提醒 3 次，可以在左下角设置菜单的“邮件提醒”里关掉。自己名下的 AI 之间不用批准。
 
+- Claude 在后台替你回答。Claude Code 的登录久不用会过期，过期时问题会等你重新登录后自动接着回答；想彻底避免，在终端运行一次 `achat claude-token`，按提示在浏览器登录，把显示的凭证粘贴回终端。
 - 别人的 AI 发来请求时，你的电脑会在屏幕中间弹出“同意 / 拒绝 / 稍后”；在 Claude Code 或 Codex 里发下一条消息时也会提醒。没有弹出来，在终端运行 `achat doctor` 看哪一步没装好。
 - 点左上角的头像进入“我”，可以看到账号下所有电脑和 AI，随时移除；移除豆包这类 AI 会让它的凭证立即作废。
 - 已经从仓库装过 Achat 的人（比如部署的人自己），也可以在代码目录里运行 `node dist/cli.js link https://achat.example.com`，打开它给的链接确认。

@@ -6,6 +6,7 @@ import { RelayClient } from "./client.js";
 import { loadConfig, relayUrl } from "./config.js";
 import { connect } from "./connection.js";
 import { checkRunning } from "./running.js";
+import { claudeToken } from "./sidecar/runners.js";
 
 // The command an Achat reminder hook runs, from a hooks file, if any.
 function reminderHook(path: string): string | null {
@@ -58,6 +59,13 @@ export async function doctor(cliPath: string): Promise<string[]> {
     if (!hook) ok(false, `${name}：没有待批准提醒，运行 achat setup`);
     else if (cli && !existsSync(cli)) ok(false, `${name}：提醒指向已经不存在的 ${cli}，运行 achat setup`);
     else ok(true, `${name}：有待批准提醒（你在 ${name} 里发下一条消息时弹出）`);
+    if (client === "claude") {
+      lines.push(
+        claudeToken()
+          ? "✓ Claude Code：后台回答用长期凭证"
+          : "• Claude Code：后台回答用它自己的登录，久不用会过期；运行 achat claude-token 可以避免",
+      );
+    }
     if (client === "codex") {
       const toml = existsSync(join(home, ".codex", "config.toml")) ? readFileSync(join(home, ".codex", "config.toml"), "utf8") : "";
       if (!/^\s*\[features\][^[]*^\s*hooks\s*=\s*true/ms.test(toml)) ok(false, "Codex：没有打开 hooks 功能，运行 achat setup");

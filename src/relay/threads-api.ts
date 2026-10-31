@@ -162,6 +162,10 @@ export async function threadsApi(
       if (!viewer.actsAs(thread.to)) forbid("只有接收方可以报告出错");
       send(res, 200, service.fail(id, str(body, "reason")));
       return true;
+    case "note":
+      if (!viewer.actsAs(thread.to)) forbid("只有接收方可以留言");
+      send(res, 200, service.note(id, str(body, "body")));
+      return true;
     case "end":
       if (!viewer.actsAs(thread.to)) forbid("只有接收方可以结束");
       send(res, 200, service.end(id, str(body, "note")));

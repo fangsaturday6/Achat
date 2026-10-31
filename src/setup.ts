@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { enableAutostart } from "./autostart.js";
 import { loadConfig, relayUrl } from "./config.js";
 import { stableNodePath } from "./node-path.js";
+import { claudeToken } from "./sidecar/runners.js";
 import { onPath } from "./which.js";
 
 const SKILL = `---
@@ -128,6 +129,7 @@ export function setup(cliPath: string, { dryRun = false, autostart = true }: Set
 
     writeFile(join(home, ".claude", "skills", "achat", "SKILL.md"), SKILL, dryRun);
     lines.push("✓ Claude Code：已添加 Achat skill");
+    if (!claudeToken()) lines.push("• 建议再运行 achat claude-token，让后台回答不受 Claude Code 登录过期影响");
   }
 
   const codexAgent = cfg.agents.find((a) => a.client === "codex");

@@ -3,12 +3,16 @@ import type { AgentClient, AgentConfig } from "../config.js";
 import { redact } from "../redact.js";
 import { cjk } from "../text.js";
 import type { Message, RelayEvent, ThreadDetail } from "../types.js";
-import type { Asker, Asking } from "./dialog.js";
+import type { Alerter, Asker, Asking } from "./dialog.js";
 import type { Notifier } from "./notify.js";
-import { BudgetExceededError, type AgentRunner, type RunOutput } from "./runners.js";
+import { BudgetExceededError, LoginExpiredError, type AgentRunner, type RunOutput } from "./runners.js";
 
 // Below this, a round cannot do anything useful, so the thread ends instead.
 const MIN_ROUND_BUDGET_USD = 0.1;
+// How long a thread waits for the person to log in again before giving up.
+const LOGIN_WAIT_MS = 24 * 60 * 60 * 1000;
+const CLIENT_NAME = { claude: "Claude", codex: "Codex" } as const;
+const RELOGIN = { claude: "打开 Claude Code 发一句话就能恢复", codex: "在终端运行 codex login 就能恢复" } as const;
 
 export interface SidecarOptions {
   client: RelayClient;
@@ -20,7 +24,11 @@ export interface SidecarOptions {
   // Puts a new request in front of the person as a dialog; where it cannot,
   // or without one, a notification says the request is waiting.
   ask?: Asker;
+  // Tells the person something they must do on this computer, such as log in again.
+  alert?: Alerter;
   notify: Notifier;
+  // How often a thread waiting for a login tries again.
+  loginRetryMs?: number;
   webUrl: string;
   log?: (line: string) => void;
 }
@@ -70,6 +78,11 @@ export class Sidecar {
   private showing: { id: string; asking: Asking | null } | null = null;
   // Shown once already; "稍后" means the web page, not the same dialog again.
   private shown = new Set<string>();
+  // Threads waiting for a login on this computer, since when, and the
+  // clients the person was already told about.
+  private waitingLogin = new Map<string, number>();
+  private alerted = new Set<string>();
+  private timers = new Set<ReturnType<typeof setTimeout>>();
 
   constructor(private opts: SidecarOptions) {
     this.agentsById = new Map(opts.agents.map((a) => [a.id, a]));
@@ -102,6 +115,8 @@ export class Sidecar {
   stop(): void {
     this.unsubscribe?.();
     this.unsubscribe = null;
+    for (const timer of this.timers) clearTimeout(timer);
+    this.timers.clear();
   }
 
   // Picks up requests and rounds that arrived while the sidecar was not running.
@@ -173,6 +188,31 @@ export class Sidecar {
     }
   }
 
+  // The AI's login ran out: the thread waits and tries again every minute,
+  // the asker is told why, and the person once that they need to log in.
+  private async waitForLogin(threadId: string, err: LoginExpiredError): Promise<void> {
+    const name = CLIENT_NAME[err.client];
+    const since = this.waitingLogin.get(threadId);
+    if (since === undefined) {
+      this.waitingLogin.set(threadId, Date.now());
+      await this.opts.client.note(threadId, `回答的 ${name} 需要重新登录，登录后会自动接着回答`).catch(() => {});
+      if (!this.alerted.has(err.client)) {
+        this.alerted.add(err.client);
+        this.opts.alert?.(`你的 ${name} 需要重新登录`, `${RELOGIN[err.client]}，等着的问题会自动接着回答。`);
+      }
+    } else if (Date.now() - since > LOGIN_WAIT_MS) {
+      this.waitingLogin.delete(threadId);
+      await this.opts.client.fail(threadId, `${name} 一天都没有重新登录，这次没有回答`).catch(() => {});
+      return;
+    }
+    this.log(`${threadId} 等 ${name} 重新登录：${err.message}`);
+    const timer = setTimeout(() => {
+      this.timers.delete(timer);
+      void this.answer(threadId);
+    }, this.opts.loginRetryMs ?? 60_000);
+    this.timers.add(timer);
+  }
+
   async answer(threadId: string): Promise<void> {
     if (this.inFlight.has(threadId)) {
       this.again.add(threadId);
@@ -222,7 +262,13 @@ export class Sidecar {
         redactions: filtered.count,
         sessionId: out.sessionId,
       });
+      this.waitingLogin.delete(threadId);
+      this.alerted.delete(owner.client);
     } catch (err) {
+      if (err instanceof LoginExpiredError) {
+        await this.waitForLogin(threadId, err);
+        return;
+      }
       const reason = (err as Error).message || "未知错误";
       this.log(`${threadId} 出错：${reason}`);
       await this.opts.client.fail(threadId, reason).catch(() => {});

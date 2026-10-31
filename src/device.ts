@@ -48,8 +48,10 @@ function fromPkcs8(pkcs8: string): DeviceKey {
   return { deviceId: deviceIdFor(publicKey), publicKey, privateKey };
 }
 
+// Where a secret of this computer is kept: the device key, or the long-lived
+// Claude credential for background answers.
 export interface KeyStore {
-  // The private key as PKCS#8 DER, base64; null when there is none.
+  // The secret (for the device key, PKCS#8 DER in base64); null when there is none.
   load(): string | null;
   save(pkcs8: string): void;
   remove(): void;
@@ -58,8 +60,12 @@ export interface KeyStore {
 // The login keychain on macOS. Only this system user can read it. Reading
 // starts a process, so the key is kept in memory after the first read.
 export class KeychainStore implements KeyStore {
-  private args = ["-s", "Achat", "-a", "device-key"];
+  private args: string[];
   private loaded: string | null | undefined;
+
+  constructor(account = "device-key") {
+    this.args = ["-s", "Achat", "-a", account];
+  }
 
   load(): string | null {
     if (this.loaded !== undefined) return this.loaded;
@@ -93,10 +99,13 @@ export class KeychainStore implements KeyStore {
 // A file readable only by this system user, for systems without a keychain.
 // Without a path it lives in ACHAT_HOME as it is when used.
 export class FileKeyStore implements KeyStore {
-  constructor(private fixedPath?: string) {}
+  constructor(
+    private fixedPath?: string,
+    private name = "device.key",
+  ) {}
 
   private get path(): string {
-    return this.fixedPath ?? join(achatHome(), "device.key");
+    return this.fixedPath ?? join(achatHome(), this.name);
   }
 
   load(): string | null {
@@ -113,11 +122,20 @@ export class FileKeyStore implements KeyStore {
   }
 }
 
+function keychainHere(): boolean {
+  return platform() === "darwin" && process.env.ACHAT_KEYSTORE !== "file";
+}
+
+// A fresh store for another secret, read each time it is used, so a value
+// saved by another Achat process is picked up.
+export function secretStore(name: string): KeyStore {
+  return keychainHere() ? new KeychainStore(name) : new FileKeyStore(undefined, name);
+}
+
 let defaultStore: KeyStore | null = null;
 
 export function defaultKeyStore(): KeyStore {
-  defaultStore ??=
-    platform() === "darwin" && process.env.ACHAT_KEYSTORE !== "file" ? new KeychainStore() : new FileKeyStore();
+  defaultStore ??= keychainHere() ? new KeychainStore() : new FileKeyStore();
   return defaultStore;
 }
 

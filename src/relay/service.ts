@@ -237,6 +237,16 @@ export class RelayService {
     return this.finish(id, "closed", `${this.agentName(by)}结束了这次协作`);
   }
 
+  // A note from the receiving side that leaves the thread as it is, such as
+  // its AI waiting for a login.
+  note(id: string, body: string): ThreadDetail {
+    const thread = this.requireThread(id);
+    if (isTerminal(thread.status)) return this.getThread(id);
+    const msg = this.store.addMessage(id, { sender: null, kind: "system", body }, this.stamp());
+    this.emit("message.created", thread, msg);
+    return this.getThread(id);
+  }
+
   fail(id: string, reason: string): ThreadDetail {
     return this.end(id, `接收方出错：${reason}`);
   }

@@ -124,8 +124,13 @@ export function createMcpServer(opts: McpOptions): McpServer {
         return `这次协作已经结束：${ended?.body ?? STATUS_LABELS[detail.status]}。`;
       case "pending":
         return `请求已发出，正在等${other}的主人批准（协作 ${detail.id}）。稍后用 check_thread 查看。`;
-      default:
-        return `${other}还在回复（协作 ${detail.id}）。稍后用 check_thread 查看。`;
+      default: {
+        // Why it is taking long, such as the other AI waiting for a login.
+        const news = detail.messages.filter((m) => m.seq > afterSeq && m.kind === "system" && !/^(已同意|同一个人的 AI)/.test(m.body)).at(-1);
+        return news
+          ? `${other}还没回复：${news.body}（协作 ${detail.id}）。稍后用 check_thread 查看。`
+          : `${other}还在回复（协作 ${detail.id}）。稍后用 check_thread 查看。`;
+      }
     }
   }
 

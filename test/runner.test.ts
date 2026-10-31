@@ -3,7 +3,8 @@ import { chmodSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } fro
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { BudgetExceededError, ClaudeRunner, CodexRunner } from "../src/sidecar/runners.js";
+import { secretStore } from "../src/device.js";
+import { BudgetExceededError, ClaudeRunner, CodexRunner, LoginExpiredError } from "../src/sidecar/runners.js";
 
 // A stand-in for the claude CLI that records how it was called.
 function fakeClaude(dir: string, reply: object): string {
@@ -14,7 +15,7 @@ function fakeClaude(dir: string, reply: object): string {
 const fs = require("node:fs");
 let input = "";
 process.stdin.on("data", (d) => (input += d)).on("end", () => {
-  fs.writeFileSync(${JSON.stringify(join(dir, "call.json"))}, JSON.stringify({ args: process.argv.slice(2), input, headless: process.env.ACHAT_HEADLESS, cwd: process.cwd() }));
+  fs.writeFileSync(${JSON.stringify(join(dir, "call.json"))}, JSON.stringify({ args: process.argv.slice(2), input, headless: process.env.ACHAT_HEADLESS, token: process.env.CLAUDE_CODE_OAUTH_TOKEN, cwd: process.cwd() }));
   const args = process.argv.slice(2);
   const flag = args.includes("--resume") ? "--resume" : "--session-id";
   const sid = args[args.indexOf(flag) + 1];
@@ -54,12 +55,42 @@ test("runs claude read-only, with the prompt on stdin and a budget cap", async (
   delete process.env.ACHAT_CLAUDE_PROJECTS;
 });
 
-test("explains how to log in when claude is not logged in", async () => {
+test("a missing or expired claude login is told apart from other errors", async () => {
   const dir = mkdtempSync(join(tmpdir(), "achat-runner-"));
   process.env.ACHAT_CLAUDE_PROJECTS = dir;
-  const bin = fakeClaude(dir, { type: "result", result: "Not logged in · Please run /login", is_error: true });
-  await assert.rejects(new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0.1 }), /输入 \/login 登录/);
+  for (const result of [
+    "Not logged in · Please run /login",
+    "Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.",
+  ]) {
+    const bin = fakeClaude(dir, { type: "result", result, is_error: true });
+    await assert.rejects(
+      new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0.1 }),
+      (err: unknown) => err instanceof LoginExpiredError && err.client === "claude",
+    );
+  }
   delete process.env.ACHAT_CLAUDE_PROJECTS;
+});
+
+test("background answers use the long-lived credential from achat claude-token", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "achat-runner-"));
+  const saved = { home: process.env.ACHAT_HOME, keystore: process.env.ACHAT_KEYSTORE };
+  process.env.ACHAT_HOME = dir;
+  process.env.ACHAT_KEYSTORE = "file";
+  process.env.ACHAT_CLAUDE_PROJECTS = dir;
+  try {
+    const bin = fakeClaude(dir, { type: "result", result: "答案", is_error: false });
+    await new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0.1 });
+    assert.equal(JSON.parse(readFileSync(join(dir, "call.json"), "utf8")).token, undefined);
+    secretStore("claude-token").save("sk-ant-oat01-example");
+    await new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0.1 });
+    assert.equal(JSON.parse(readFileSync(join(dir, "call.json"), "utf8")).token, "sk-ant-oat01-example");
+  } finally {
+    for (const [key, value] of [["ACHAT_HOME", saved.home], ["ACHAT_KEYSTORE", saved.keystore]]) {
+      if (value === undefined) delete process.env[key!];
+      else process.env[key!] = value;
+    }
+    delete process.env.ACHAT_CLAUDE_PROJECTS;
+  }
 });
 
 test("reports claude errors", async () => {
@@ -82,7 +113,7 @@ function fakeCodex(dir: string, events: object[]): string {
 const fs = require("node:fs");
 let input = "";
 process.stdin.on("data", (d) => (input += d)).on("end", () => {
-  fs.writeFileSync(${JSON.stringify(join(dir, "call.json"))}, JSON.stringify({ args: process.argv.slice(2), input, headless: process.env.ACHAT_HEADLESS, cwd: process.cwd() }));
+  fs.writeFileSync(${JSON.stringify(join(dir, "call.json"))}, JSON.stringify({ args: process.argv.slice(2), input, headless: process.env.ACHAT_HEADLESS, token: process.env.CLAUDE_CODE_OAUTH_TOKEN, cwd: process.cwd() }));
   for (const e of ${JSON.stringify(events)}) process.stdout.write(JSON.stringify(e) + "\\n");
 });
 `,
@@ -127,7 +158,7 @@ test("runs codex in the read-only sandbox without the person's config", async ()
   delete process.env.ACHAT_CODEX_SESSIONS;
 });
 
-test("explains how to log in when codex is not logged in", async () => {
+test("a codex that is not logged in is told apart from other errors", async () => {
   const dir = mkdtempSync(join(tmpdir(), "achat-runner-"));
   process.env.ACHAT_CODEX_SESSIONS = dir;
   const bin = fakeCodex(dir, [
@@ -135,7 +166,10 @@ test("explains how to log in when codex is not logged in", async () => {
     { type: "error", message: "Reconnecting... 1/5 (unexpected status 401 Unauthorized)" },
     { type: "turn.failed", error: { message: "unexpected status 401 Unauthorized: Missing bearer" } },
   ]);
-  await assert.rejects(new CodexRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 5 }), /codex login/);
+  await assert.rejects(
+    new CodexRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 5 }),
+    (err: unknown) => err instanceof LoginExpiredError && err.client === "codex",
+  );
   delete process.env.ACHAT_CODEX_SESSIONS;
 });
 

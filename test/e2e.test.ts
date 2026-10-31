@@ -9,7 +9,7 @@ import { userPromptHook } from "../src/hook.js";
 import { createMcpServer } from "../src/mcp/server.js";
 import type { RunningRelay } from "../src/relay/server.js";
 import type { Answer, ApprovalPrompt } from "../src/sidecar/dialog.js";
-import { BudgetExceededError } from "../src/sidecar/runners.js";
+import { BudgetExceededError, LoginExpiredError } from "../src/sidecar/runners.js";
 import { Sidecar } from "../src/sidecar/sidecar.js";
 import { CLAUDE, CODEX, ScriptedRunner, startTestRelay, until } from "./helpers.js";
 
@@ -257,6 +257,46 @@ test("a dialog on the computer approves or declines, one at a time, and goes awa
     assert.equal(asked.length, 3);
   } finally {
     sidecar?.stop();
+    await relay.close();
+  }
+});
+
+test("when Claude's login runs out the thread waits, both sides are told, and the answer comes once it is back", async () => {
+  const { relay, client, config } = await startTestRelay();
+  const expired = new LoginExpiredError("claude", "API Error: 401 OAuth access token has expired");
+  const runner = new ScriptedRunner([expired, expired, "恢复后的回答"]);
+  const alerts: string[] = [];
+  const sidecar = new Sidecar({
+    client,
+    agents: config.agents,
+    runners: { [CLAUDE]: runner },
+    alert: (title, message) => alerts.push(`${title}｜${message}`),
+    notify: () => {},
+    webUrl: relay.url,
+    loginRetryMs: 30,
+    log: () => {},
+  });
+  sidecar.start();
+  try {
+    const codex = await mcpClient(client, CODEX, relay.url);
+    const t = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "登录过期", message: "问题" });
+    await client.approve(t.id);
+    await until(async () => runner.calls.length === 3, 5000);
+    const done = await until(async () => {
+      const d = await client.getThread(t.id);
+      return d.messages.some((m) => m.body === "恢复后的回答") && d;
+    });
+    assert.equal(done.status, "active", "the thread waited instead of failing");
+    assert.deepEqual(
+      done.messages.filter((m) => m.kind === "system").map((m) => m.body).slice(-1),
+      ["回答的 Claude 需要重新登录，登录后会自动接着回答"],
+      "the asker is told once, not on every retry",
+    );
+    assert.deepEqual(alerts, ["你的 Claude 需要重新登录｜打开 Claude Code 发一句话就能恢复，等着的问题会自动接着回答。"]);
+    const checked = textOf(await codex.callTool({ name: "check_thread", arguments: { thread_id: t.id } }));
+    assert.match(checked, /需要重新登录/);
+  } finally {
+    sidecar.stop();
     await relay.close();
   }
 });

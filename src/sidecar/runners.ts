@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { secretStore } from "../device.js";
 
 export interface RunInput {
   prompt: string;
@@ -27,6 +28,24 @@ export interface AgentRunner {
 // The run hit the dollar cap it was given, so no answer was produced.
 export class BudgetExceededError extends Error {}
 
+// The CLI is not logged in, or its login ran out. The person fixes it on this
+// computer; until then the thread waits instead of failing.
+export class LoginExpiredError extends Error {
+  constructor(
+    readonly client: "claude" | "codex",
+    reason: string,
+  ) {
+    super(reason);
+  }
+}
+
+const LOGIN_TROUBLE = /not logged in|\/login|log ?in again|oauth|access token|refresh token|failed to authenticate|authentication_error|invalid (api key|bearer token)|unauthori[sz]ed|\b401\b/i;
+
+// The long-lived credential from `achat claude-token`, if the person made one.
+export function claudeToken(): string | null {
+  return secretStore("claude-token").load();
+}
+
 export function claudeProjectsDir(): string {
   return process.env.ACHAT_CLAUDE_PROJECTS ?? join(homedir(), ".claude", "projects");
 }
@@ -42,12 +61,12 @@ interface ProcessResult {
 function runProcess(
   command: string,
   args: string[],
-  opts: { cwd: string; input: string; timeoutMs: number; name: string },
+  opts: { cwd: string; input: string; timeoutMs: number; name: string; env?: Record<string, string> },
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: opts.cwd,
-      env: { ...process.env, ACHAT_HEADLESS: "1" },
+      env: { ...process.env, ...opts.env, ACHAT_HEADLESS: "1" },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
@@ -115,11 +134,15 @@ export class ClaudeRunner implements AgentRunner {
       input.systemPrompt,
       ...(input.sessionId ? ["--resume", input.sessionId] : ["--session-id", sessionId]),
     ];
+    // A long-lived credential, if set up, so answers do not stop when the
+    // Claude Code login runs out between uses.
+    const token = claudeToken();
     const { stdout, stderr, code } = await runProcess(this.command, args, {
       cwd: dir,
       input: input.prompt,
       timeoutMs: this.timeoutMs,
       name: "claude",
+      env: token ? { CLAUDE_CODE_OAUTH_TOKEN: token } : undefined,
     });
 
     let parsed: ClaudeJsonResult | null = null;
@@ -131,11 +154,8 @@ export class ClaudeRunner implements AgentRunner {
     if (!parsed || parsed.is_error || code !== 0 || !parsed.result) {
       const reason = parsed?.result || parsed?.subtype || lastLine(stderr) || `退出码 ${code}`;
       if (/max_budget/i.test(`${parsed?.subtype ?? ""} ${reason}`)) throw new BudgetExceededError(reason);
-      throw new Error(
-        /not logged in|\/login/i.test(reason)
-          ? "这台电脑上的 claude 命令还没登录。在终端运行 claude，输入 /login 登录后再试"
-          : reason,
-      );
+      if (LOGIN_TROUBLE.test(reason)) throw new LoginExpiredError("claude", reason);
+      throw new Error(reason);
     }
     return { text: parsed.result, sessionId: parsed.session_id ?? sessionId, costUsd: parsed.total_cost_usd ?? 0 };
   }
@@ -205,9 +225,7 @@ export class CodexRunner implements AgentRunner {
     }
     if (!completed || !text || !sessionId) {
       const reason = failure || lastLine(stderr) || `退出码 ${code}`;
-      if (/401|unauthorized|not logged in|codex login/i.test(reason)) {
-        throw new Error("这台电脑上的 codex 命令还没登录。在终端运行 codex login 登录后再试");
-      }
+      if (LOGIN_TROUBLE.test(reason) || /codex login/i.test(reason)) throw new LoginExpiredError("codex", reason);
       if (/unexpected argument|unrecognized/i.test(reason)) {
         throw new Error("这台电脑上的 codex 版本太旧。在终端运行 npm install -g @openai/codex 更新后再试");
       }

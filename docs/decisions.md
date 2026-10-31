@@ -61,6 +61,7 @@
   3. Achat 通过 MCP elicitation 请 Claude Code 弹出对话框，显示请求卡片和"同意 / 拒绝"。
   4. 你点的结果直接交给 Achat，Claude 最后只看到"已批准"或"已拒绝"。
 - **请求一到，电脑上弹出系统对话框**（2026 年 10 月 31 日加）：不管开没开 AI，屏幕正中都会弹出“同意 / 拒绝 / 稍后”，默认按钮是“稍后”。一次一个；在网页或 Claude 里处理了就自动关掉；电脑开机前到的请求，开机后也会弹。macOS 用系统自带的对话框，Linux 用 zenity，其他系统退回桌面通知。Codex 也装上了和 Claude Code 一样的提醒 hook（它的 hooks 还是实验功能）。
+- **回答的 AI 登录过期**（2026 年 10 月 31 日加）：后台的 `claude -p` 或 `codex exec` 报登录问题时，协作不算失败，而是等着：每分钟重试一次，最多等一天。对方看到一句“回答的 Claude 需要重新登录，登录后会自动接着回答”；你的电脑弹一次“你的 Claude 需要重新登录”。为了少遇到这种情况，`achat claude-token` 用 `claude setup-token` 生成一个长期凭证存进钥匙串，后台回答时通过 `CLAUDE_CODE_OAUTH_TOKEN` 使用，不受 Claude Code 登录过期影响。
 - **没开 Claude，或对话框没弹出来时，在 Achat 网页上批准**：对话框没弹出来（比如 VS Code 插件会直接拒绝 elicitation）算作"还没处理"，不算拒绝，请求继续留在网页上。排查用 `achat doctor`。
 - 以后可以用 Claude Code 的 Channels 把提醒立刻推进正在运行的会话，不用等你下次发消息。
 
