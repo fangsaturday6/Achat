@@ -39,6 +39,10 @@ const state = {
   friends: [],
   query: "",
   error: "",
+  // People whose conversations are listed under them in 消息.
+  expanded: new Set(),
+  // The conversation last opened, so its person is expanded once, not on every redraw.
+  opened: null,
 };
 
 class ApiError extends Error {
@@ -352,7 +356,7 @@ function renderRail(view) {
     if (view === name) el.setAttribute("aria-current", "page");
     else el.removeAttribute("aria-current");
   }
-  setBadge("messages-badge", state.threads.filter((t) => t.status === "pending" && isMine(t.to)).length, ["消息", "个待批准"]);
+  setBadge("messages-badge", state.threads.filter(needsYou).length, ["消息", "个对话等你看"]);
   setBadge("contacts-badge", state.me?.newFriends ?? 0, ["通讯录", "个新的朋友"]);
   document.getElementById("nav-avatar").replaceChildren(avatar(myName(), 34));
   const settings = document.getElementById("nav-settings");
@@ -426,22 +430,98 @@ function renderList(r) {
   renderListBody(r);
 }
 
+// --- 消息: one row per person, their conversations underneath
+
+// A conversation that has something new for the person, or waits on their approval.
+function needsYou(t) {
+  return t.unread || (t.status === "pending" && isMine(t.to));
+}
+
+// Whose conversation it is: the other person's account, or "me" between one's own AIs.
+function personOf(t) {
+  if (isMine(t.from) && isMine(t.to)) return "me";
+  const other = otherSide(t);
+  return state.agents.get(other)?.owner ?? ownerOf(agentName(other));
+}
+
+function people() {
+  const byPerson = new Map();
+  const threads = [...state.threads].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  for (const t of threads) {
+    const key = personOf(t);
+    if (!byPerson.has(key)) {
+      const name = key === "me" ? "我的 AI" : state.contacts.find((c) => c.id === key)?.name ?? ownerOf(agentName(otherSide(t)));
+      byPerson.set(key, { key, name, avatarName: key === "me" ? myName() : name, threads: [] });
+    }
+    byPerson.get(key).threads.push(t);
+  }
+  return [...byPerson.values()];
+}
+
+function preview(t) {
+  const last = t.lastMessage;
+  const text = t.status === "pending" || !last || last.kind === "system" ? t.topic : last.body;
+  return [t.status === "pending" && isMine(t.to) ? h("span", { class: "tag-pending" }, "[待批准] ") : null, text];
+}
+
+function withCount(pic, count) {
+  if (!count) return pic;
+  return h("span", { class: "avatar-wrap" }, pic, h("span", { class: "badge", "aria-hidden": "true" }, String(count)));
+}
+
+function renderPeople(r) {
+  const rows = [];
+  for (const p of people()) {
+    const threads = p.threads.filter((t) => matches(p.name, t.topic, agentName(t.from), agentName(t.to)));
+    if (!threads.length) continue;
+    const open = state.expanded.has(p.key) || !!state.query;
+    const count = p.threads.filter(needsYou).length;
+    const latest = p.threads[0];
+    const toggle = h(
+      "button",
+      { type: "button", class: "item", "aria-expanded": String(open), "aria-label": count ? `${p.name}，${count} 个对话等你看` : p.name },
+      withCount(avatar(p.avatarName, 40), count),
+      h(
+        "span",
+        { class: "item-text" },
+        h("span", { class: "item-row" }, h("span", { class: "item-name" }, p.name), h("span", { class: "item-time" }, shortTime(latest.updatedAt))),
+        open ? null : h("span", { class: "item-sub" }, preview(latest)),
+      ),
+    );
+    toggle.addEventListener("click", () => {
+      if (open) {
+        state.expanded.delete(p.key);
+        return renderListBody(r);
+      }
+      state.expanded.add(p.key);
+      if (p.threads.some((t) => t.id === r.id)) renderListBody(r);
+      else location.hash = `#/t/${latest.id}`;
+    });
+    rows.push(toggle);
+    if (!open) continue;
+    for (const t of threads) {
+      const status =
+        t.status === "pending" && isMine(t.to)
+          ? h("span", { class: "convo-status tag-pending" }, "待批准")
+          : h("span", { class: "convo-status" }, t.status === "pending" ? "等待批准" : t.status === "active" ? "进行中" : shortTime(t.updatedAt));
+      rows.push(
+        h(
+          "a",
+          { class: "convo", href: `#/t/${t.id}`, "aria-current": r.id === t.id ? "true" : null },
+          h("span", { class: `dot${t.unread ? " on" : ""}`, "aria-label": t.unread ? "未读" : null }),
+          h("span", { class: "convo-topic" }, t.topic),
+          status,
+        ),
+      );
+    }
+  }
+  return rows;
+}
+
 function renderListBody(r) {
   const body = document.getElementById("list-body");
   if (r.view === "messages") {
-    body.replaceChildren(
-      ...state.threads
-        .filter((t) => matches(agentName(t.from), agentName(t.to), t.topic))
-        .map((t) => {
-          const other = otherSide(t);
-          const last = t.lastMessage;
-          const preview = t.status === "pending" || !last || last.kind === "system" ? t.topic : last.body;
-          return item(`#/t/${t.id}`, r.id === t.id, avatar(agentName(other), 40), agentName(other), {
-            time: shortTime(t.updatedAt),
-            sub: [t.status === "pending" ? h("span", { class: "tag-pending" }, "[待批准] ") : null, preview],
-          });
-        }),
-    );
+    body.replaceChildren(...renderPeople(r));
     return;
   }
   if (r.view === "contacts") {
@@ -509,6 +589,7 @@ async function act(fn) {
 // --- a conversation
 
 function requestCard(t, m) {
+  // The topic is the title above; the card holds the question and its scope.
   const deciding = t.status === "pending" && isMine(t.to);
   const scope = deciding
     ? h(
@@ -522,13 +603,20 @@ function requestCard(t, m) {
     : t.status === "pending"
       ? h("div", { class: "scope" }, `${agentName(t.to)} · 只读 · ${t.scope.maxRounds} 轮 · $${t.scope.budgetUsd.toFixed(2)}`)
       : null;
-  return h("article", { class: "card", "aria-label": `请求：${t.topic}` }, h("h2", {}, t.topic), h("p", {}, m.body), scope);
+  return h("article", { class: "card", "aria-label": `请求：${t.topic}` }, h("p", {}, m.body), scope);
 }
 
 function renderThread(t) {
   const ownPair = isMine(t.from) && isMine(t.to);
   const onRight = (sender) => (ownPair ? sender === t.to : isMine(sender));
-  const row = (sender, content) => h("div", { class: `msg${onRight(sender) ? " right" : ""}` }, avatar(agentName(sender), 34), content);
+  // One person can have several AIs, so each message says which one wrote it.
+  const row = (sender, content) =>
+    h(
+      "div",
+      { class: `msg${onRight(sender) ? " right" : ""}` },
+      avatar(agentName(sender), 34),
+      h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, agentName(sender)), content),
+    );
   const log = h("div", { class: "log", role: "log", "aria-label": "对话原文" }, h("span", { class: "event" }, shortTime(t.createdAt)));
   for (const m of t.messages) {
     if (m.kind === "request") log.append(row(m.sender, requestCard(t, m)));
@@ -581,7 +669,7 @@ function renderThread(t) {
     state.error ? h("p", { class: "error", role: "alert" }, state.error) : h("span", { class: "muted" }, left ?? ""),
     h("div", { class: "buttons" }, ...buttons),
   );
-  const body = showMain(agentName(otherSide(t)), log, { foot, back: "#/" });
+  const body = showMain(t.topic, log, { foot, back: "#/" });
   body.scrollTop = body.scrollHeight;
 }
 
@@ -803,6 +891,16 @@ async function refresh() {
     if (unknown || r.view !== "messages") await loadPeople();
     if (cloud && r.view === "contacts" && r.id === "new") state.friends = await api("GET", "/api/invites");
     state.detail = r.view === "messages" && r.id ? await api("GET", `/api/threads/${encodeURIComponent(r.id)}`).catch(() => null) : null;
+    const open = state.detail && state.threads.find((t) => t.id === state.detail.id);
+    if (open && state.opened !== open.id) {
+      state.opened = open.id;
+      state.expanded.add(personOf(open));
+    }
+    // Seen once it is on screen; not while the page sits in a background tab.
+    if (open?.unread && document.visibilityState === "visible") {
+      open.unread = false;
+      void api("POST", `/api/threads/${encodeURIComponent(open.id)}/read`, {}).catch(() => {});
+    }
   } catch (err) {
     if (err.status === 401 && cloud) return boot();
     state.error = err.message;

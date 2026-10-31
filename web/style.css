@@ -185,6 +185,17 @@ h1, h2, p { margin: 0; }
 .item-sub { font-size: 12px; line-height: 17px; color: var(--muted); }
 .item-time { flex-shrink: 0; font-size: 12px; line-height: 17px; color: var(--muted); }
 button.item { width: 100%; border: none; background: none; text-align: left; }
+.avatar-wrap { position: relative; display: flex; flex-shrink: 0; }
+.avatar-wrap .badge { top: -6px; right: -6px; }
+.convo {
+  height: 40px; padding: 0 12px 0 40px; display: flex; gap: 8px; align-items: center; color: var(--ink); font-size: 13px;
+}
+.convo:hover { background: var(--list-hover); color: var(--ink); }
+.convo[aria-current="true"] { background: var(--list-active); }
+.convo .dot { width: 8px; height: 8px; flex-shrink: 0; border-radius: 4px; }
+.convo .dot.on { background: var(--red); }
+.convo-topic { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.convo-status { flex-shrink: 0; font-size: 12px; line-height: 17px; color: var(--muted); }
 .item.danger { color: var(--danger); }
 .tag-pending { color: var(--danger); }
 .narrow-only { display: none !important; }
@@ -221,6 +232,10 @@ button.item { width: 100%; border: none; background: none; text-align: left; }
 .bubble-wrap { max-width: 60%; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .msg.right .bubble-wrap { align-items: flex-end; }
 .bubble-wrap .bubble { max-width: 100%; }
+.msg-col { max-width: 60%; min-width: 0; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.msg.right .msg-col { align-items: flex-end; }
+.msg-col > .bubble, .msg-col > .bubble-wrap, .msg-col > .card { max-width: 100%; }
+.msg-name { font-size: 12px; line-height: 17px; color: var(--muted); }
 .card {
   width: 360px; max-width: 60%; padding: 12px 14px; border-radius: 4px; background: var(--panel); display: flex;
   flex-direction: column; gap: 6px;
@@ -378,7 +393,7 @@ button.item { width: 100%; border: none; background: none; text-align: left; }
   .app[data-pane="main"] .list, .app[data-pane="main"] .rail { display: none; }
   .back-btn { display: flex; }
   .main-head, .main-body, .main-foot { padding-left: 12px; padding-right: 12px; }
-  .bubble, .bubble-wrap, .card { max-width: 80%; }
+  .msg-col { max-width: 80%; }
   .hero { padding-top: 48px; gap: 40px; }
   .page-main { padding-top: 40px; }
 }

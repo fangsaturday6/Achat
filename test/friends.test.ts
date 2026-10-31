@@ -6,7 +6,15 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { AccountStore } from "../src/cloud/accounts.js";
 import type { RunningCloud } from "../src/cloud/server.js";
 import { createMcpServer } from "../src/mcp/server.js";
+import { RelayClient } from "../src/client.js";
 import { addComputer, Browser, logIn, startTestCloud, type MemoryMailer } from "./helpers.js";
+
+// An AI connected by address (豆包 and the like), calling the API with its credential.
+async function connectRemote(cloud: RunningCloud, owner: Browser): Promise<{ call: (m: string, p: string, b: unknown) => Promise<unknown> }> {
+  const { token } = await owner.call("POST", "/api/connect", { client: "doubao" });
+  const client = new RelayClient(cloud.url, { bearer: token });
+  return { call: (method, path, body) => (client as any).call(method, path, body) };
+}
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -120,6 +128,39 @@ describe("adding friends", () => {
     const zhou = await logIn(cloud, mailer, "zhou@example.com", "老周");
     await zhou.call("POST", "/api/invites", { email: "wang@example.com" });
     assert.match(await call("list_contacts"), /老周想加主人为朋友.*新的朋友/);
+  });
+});
+
+describe("reading", () => {
+  test("each person has their own read marks, and agents say whose they are", async () => {
+    const { cloud, mailer } = await startTestCloud();
+    try {
+      const fang = await logIn(cloud, mailer, "fang@example.com", "老方");
+      const wang = await logIn(cloud, mailer, "wang@example.com", "老王");
+      await fang.call("POST", "/api/invites", { email: "wang@example.com" });
+      await wang.call("POST", `/api/invites/${mailer.sent.at(-1)!.text.match(/\/invite\/(\S+)/)![1]}/accept`, {});
+      const fangMac = await addComputer(cloud, fang, "Mac", ["claude"]);
+      const wangMac = await addComputer(cloud, wang, "Mac", ["codex"]);
+      const fangAccount = (await fang.call("GET", "/api/me")).account.id;
+      const owners = Object.fromEntries((await wang.call("GET", "/api/agents")).map((a: any) => [a.name, a.owner]));
+      assert.equal(owners["老方的 Claude"], fangAccount);
+
+      const unread = async (who: Browser) => (await who.call("GET", "/api/threads")).map((t: any) => t.unread);
+      const t = await wangMac.client.createRequest({ from: wangMac.agent("codex"), to: fangMac.agent("claude"), topic: "x", message: "问题" });
+      assert.deepEqual(await unread(fang), [true]);
+      assert.deepEqual(await unread(wang), [false], "your own request is not news to you");
+      await fang.call("POST", `/api/threads/${t.id}/read`, {});
+      assert.deepEqual(await unread(fang), [false]);
+
+      await fang.call("POST", `/api/threads/${t.id}/approve`, {});
+      await fangMac.client.postMessage(t.id, { from: fangMac.agent("claude"), body: "答案" });
+      assert.deepEqual(await unread(wang), [true]);
+      assert.deepEqual(await unread(fang), [false], "your own AI's answer is not news either");
+      // A computer's AI cannot mark anything read for the person.
+      await assert.rejects((await connectRemote(cloud, fang)).call("POST", `/api/threads/${t.id}/read`, {}), /只有人可以标记已读/);
+    } finally {
+      await cloud.close();
+    }
   });
 });
 
