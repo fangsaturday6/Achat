@@ -53,6 +53,8 @@ export interface ThreadDetail extends Thread {
 
 export interface ThreadSummary extends Thread {
   lastMessage: Message | null;
+  // Set in lists: a message the caller has not seen yet.
+  unread?: boolean;
 }
 
 export type RelayEventType = "thread.created" | "thread.updated" | "message.created";

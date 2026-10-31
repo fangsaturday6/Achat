@@ -133,6 +133,20 @@ export class RelayService {
       .map((t) => ({ ...t, lastMessage: this.store.lastMessage(t.id) }));
   }
 
+  // Whether the reader has a message they have not seen: one from the other
+  // person's AI, or between their own AIs, an answer.
+  unread(thread: Thread, reader: string, mine: (agent: string) => boolean): boolean {
+    const own = mine(thread.from) && mine(thread.to);
+    return this.store
+      .sendersAfter(thread.id, this.store.readSeq(reader, thread.id))
+      .some((sender) => sender !== null && (own ? sender === thread.to : !mine(sender)));
+  }
+
+  markRead(reader: string, threadId: string): void {
+    const last = this.store.lastMessage(threadId);
+    if (last) this.store.markRead(reader, threadId, last.seq);
+  }
+
   // `autoApprove` starts the thread right away with the default scope, for
   // requests between AIs of the same person.
   createRequest(input: CreateRequestInput, opts: { autoApprove?: boolean } = {}): ThreadDetail {

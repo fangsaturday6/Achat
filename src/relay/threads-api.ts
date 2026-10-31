@@ -10,6 +10,8 @@ const STATUSES = new Set(["pending", "active", "declined", "closed", "stopped"])
 // may do everything; in the cloud a caller is a logged-in person or one of
 // their computers, limited to their own account's threads.
 export interface Viewer {
+  // Whose read marks these are: the account, or the person on this computer.
+  reader: string;
   // Agents whose threads the caller can list; null means every thread.
   visible: string[] | null;
   sees(agent: string): boolean;
@@ -74,16 +76,17 @@ export async function threadsApi(
   if (parts.length === 1 && method === "GET") {
     const status = url.searchParams.get("status");
     if (status && !STATUSES.has(status)) throw new RelayError(400, "未知的状态");
+    const threads = service.listThreads({
+      agents: viewer.visible ?? undefined,
+      agent: url.searchParams.get("agent") ?? undefined,
+      to: url.searchParams.get("to") ?? undefined,
+      status: (status as ThreadStatus | null) ?? undefined,
+      surfaced: url.searchParams.get("surfaced") === "1",
+    });
     send(
       res,
       200,
-      service.listThreads({
-        agents: viewer.visible ?? undefined,
-        agent: url.searchParams.get("agent") ?? undefined,
-        to: url.searchParams.get("to") ?? undefined,
-        status: (status as ThreadStatus | null) ?? undefined,
-        surfaced: url.searchParams.get("surfaced") === "1",
-      }),
+      threads.map((t) => ({ ...t, unread: service.unread(t, viewer.reader, (a) => viewer.sees(a)) })),
     );
     return true;
   }
@@ -136,6 +139,11 @@ export async function threadsApi(
     case "approve":
       if (!viewer.approves || !viewer.sees(thread.to)) forbid("只有接收方的主人可以批准");
       send(res, 200, service.approve(id, { maxRounds: optNum(body, "maxRounds"), budgetUsd: optNum(body, "budgetUsd") }));
+      return true;
+    case "read":
+      if (!viewer.approves) forbid("只有人可以标记已读");
+      service.markRead(viewer.reader, id);
+      send(res, 200, { ok: true });
       return true;
     case "decline":
       if (!viewer.approves || !viewer.sees(thread.to)) forbid("只有接收方的主人可以拒绝");

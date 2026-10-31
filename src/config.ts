@@ -16,6 +16,8 @@ export interface AgentConfig {
   client: AiClient;
   // False for AIs that cannot answer requests; absent means they can.
   canReceive?: boolean;
+  // The account it belongs to, in the cloud; absent on this computer.
+  owner?: string;
 }
 
 // An AI listed in this computer's config.json.

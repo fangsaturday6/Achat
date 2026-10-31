@@ -8,6 +8,7 @@ import type { AchatConfig } from "../src/config.js";
 import { userPromptHook } from "../src/hook.js";
 import { createMcpServer } from "../src/mcp/server.js";
 import type { RunningRelay } from "../src/relay/server.js";
+import type { Answer, ApprovalPrompt } from "../src/sidecar/dialog.js";
 import { BudgetExceededError } from "../src/sidecar/runners.js";
 import { Sidecar } from "../src/sidecar/sidecar.js";
 import { CLAUDE, CODEX, ScriptedRunner, startTestRelay, until } from "./helpers.js";
@@ -204,4 +205,58 @@ describe("experiment 0 end to end", () => {
       delete process.env.ACHAT_HEADLESS;
     }
   });
+});
+
+test("a dialog on the computer approves or declines, one at a time, and goes away when handled on the web", async () => {
+  const { relay, client, config } = await startTestRelay();
+  let sidecar: Sidecar | undefined;
+  try {
+    const asked: ApprovalPrompt[] = [];
+    const answers: ((a: Answer) => void)[] = [];
+    let closed = 0;
+    const runner = new ScriptedRunner(["分镜、出图、剪辑", "网页上同意的也照常回答"]);
+    sidecar = new Sidecar({
+      client,
+      agents: config.agents,
+      runners: { [CLAUDE]: runner },
+      ask: (prompt) => {
+        asked.push(prompt);
+        let resolve!: (a: Answer) => void;
+        const answer = new Promise<Answer>((r) => (resolve = r));
+        answers.push(resolve);
+        return {
+          answer,
+          close: () => {
+            closed += 1;
+            resolve("later");
+          },
+        };
+      },
+      notify: () => assert.fail("a dialog was shown, so no notification"),
+      webUrl: relay.url,
+      log: () => {},
+    });
+    sidecar.start();
+
+    const first = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "对话框同意", message: "怎么做的？" });
+    const second = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "对话框拒绝", message: "问题" });
+    await until(async () => asked.length === 1);
+    assert.deepEqual(asked[0], { title: "我的 Codex 想问你的 Claude", topic: "对话框同意", body: "怎么做的？", scope: "只读 · 5 轮 · $5.00" });
+    answers[0]("approve");
+    await until(async () => (await client.getThread(first.id)).status !== "pending");
+    await until(async () => runner.calls.length === 1);
+
+    await until(async () => asked.length === 2);
+    answers[1]("decline");
+    await until(async () => (await client.getThread(second.id)).status === "declined");
+
+    const third = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "网页上处理", message: "问题" });
+    await until(async () => asked.length === 3);
+    await client.approve(third.id);
+    await until(async () => closed === 1);
+    assert.equal(asked.length, 3);
+  } finally {
+    sidecar?.stop();
+    await relay.close();
+  }
 });

@@ -5,6 +5,7 @@ import { connect, type Connection } from "./connection.js";
 import { agentIdFor } from "./device.js";
 import { checkLink } from "./link.js";
 import { startRelay } from "./relay/server.js";
+import { desktopAsk } from "./sidecar/dialog.js";
 import { desktopNotify } from "./sidecar/notify.js";
 import { ClaudeRunner, CodexRunner, type AgentRunner } from "./sidecar/runners.js";
 import { Sidecar } from "./sidecar/sidecar.js";
@@ -68,6 +69,7 @@ async function startLocal(cfg: AchatConfig, webDir: string, wait: boolean): Prom
     client: new RelayClient(relay.url, cfg.token),
     agents: cfg.agents,
     runners,
+    ask: desktopAsk,
     notify: desktopNotify,
     webUrl: relay.url,
   });
@@ -87,7 +89,7 @@ async function startCloudMode(cfg: AchatConfig, conn: Connection, wait: boolean)
   const pointer = await listen(() => startPointer(cfg, conn.webUrl), cfg.port, wait);
   const deviceId = conn.deviceId!;
   const runners = Object.fromEntries(cfg.agents.map((a) => [agentIdFor(deviceId, a.client), runnerFor(a.client)]));
-  const sidecar = new Sidecar({ client: conn.client, agents: [], runners, notify: desktopNotify, webUrl: conn.webUrl });
+  const sidecar = new Sidecar({ client: conn.client, agents: [], runners, ask: desktopAsk, notify: desktopNotify, webUrl: conn.webUrl });
   sidecar.start();
   console.log(`Achat 已启动（账号模式）：${conn.webUrl}`);
   return {

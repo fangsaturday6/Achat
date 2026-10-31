@@ -209,6 +209,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
   function viewerFor(p: Principal): Viewer {
     const accountId = p.account.id;
     return {
+      reader: accountId,
       visible: accounts.agentIds(accountId),
       sees: (agent) => accounts.agent(agent)?.accountId === accountId,
       actsAs: (agent) => {

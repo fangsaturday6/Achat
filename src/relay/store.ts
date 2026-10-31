@@ -31,6 +31,13 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TEXT NOT NULL,
   UNIQUE (thread_id, seq)
 );
+-- How far each reader (an account, or the person on this computer) has read.
+CREATE TABLE IF NOT EXISTS thread_reads (
+  reader TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  PRIMARY KEY (reader, thread_id)
+);
 CREATE INDEX IF NOT EXISTS threads_to ON threads (to_agent, status);
 CREATE INDEX IF NOT EXISTS threads_from ON threads (from_agent, created_at);
 `;
@@ -224,6 +231,31 @@ export class Store {
         .prepare("SELECT * FROM messages WHERE thread_id = ? AND seq > ? ORDER BY seq")
         .all(threadId, afterSeq) as unknown as MessageRow[]
     ).map(toMessage);
+  }
+
+  readSeq(reader: string, threadId: string): number {
+    const row = this.db.prepare("SELECT seq FROM thread_reads WHERE reader = ? AND thread_id = ?").get(reader, threadId) as
+      | { seq: number }
+      | undefined;
+    return row?.seq ?? 0;
+  }
+
+  markRead(reader: string, threadId: string, seq: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO thread_reads (reader, thread_id, seq) VALUES (?, ?, ?)
+         ON CONFLICT (reader, thread_id) DO UPDATE SET seq = MAX(seq, excluded.seq)`,
+      )
+      .run(reader, threadId, seq);
+  }
+
+  // Who wrote each message after `seq`, leaving out Achat's own notes.
+  sendersAfter(threadId: string, seq: number): (string | null)[] {
+    return (
+      this.db
+        .prepare("SELECT sender FROM messages WHERE thread_id = ? AND seq > ? AND kind != 'system'")
+        .all(threadId, seq) as { sender: string | null }[]
+    ).map((r) => r.sender);
   }
 
   lastMessage(threadId: string): Message | null {

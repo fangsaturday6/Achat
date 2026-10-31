@@ -163,6 +163,10 @@ export class RelayClient {
     return this.call("POST", `/api/threads/${encodeURIComponent(id)}/close`, { by });
   }
 
+  markRead(id: string): Promise<{ ok: boolean }> {
+    return this.call("POST", `/api/threads/${encodeURIComponent(id)}/read`, {});
+  }
+
   fail(id: string, reason: string): Promise<ThreadDetail> {
     return this.call("POST", `/api/threads/${encodeURIComponent(id)}/fail`, { reason });
   }

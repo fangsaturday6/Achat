@@ -1,7 +1,9 @@
 import type { RelayClient } from "../client.js";
 import type { AgentClient, AgentConfig } from "../config.js";
 import { redact } from "../redact.js";
+import { cjk } from "../text.js";
 import type { Message, RelayEvent, ThreadDetail } from "../types.js";
+import type { Asker, Asking } from "./dialog.js";
 import type { Notifier } from "./notify.js";
 import { BudgetExceededError, type AgentRunner, type RunOutput } from "./runners.js";
 
@@ -15,6 +17,9 @@ export interface SidecarOptions {
   // The AIs on this computer, keyed by agent id. The sidecar notifies about
   // and answers requests to these only.
   runners: Record<string, AgentRunner>;
+  // Puts a new request in front of the person as a dialog; where it cannot,
+  // or without one, a notification says the request is waiting.
+  ask?: Asker;
   notify: Notifier;
   webUrl: string;
   log?: (line: string) => void;
@@ -60,6 +65,11 @@ export class Sidecar {
   private again = new Set<string>();
   private unsubscribe: (() => void) | null = null;
   private log: (line: string) => void;
+  // Requests waiting for their dialog, and the one on screen.
+  private queue: string[] = [];
+  private showing: { id: string; asking: Asking | null } | null = null;
+  // Shown once already; "稍后" means the web page, not the same dialog again.
+  private shown = new Set<string>();
 
   constructor(private opts: SidecarOptions) {
     this.agentsById = new Map(opts.agents.map((a) => [a.id, a]));
@@ -94,9 +104,11 @@ export class Sidecar {
     this.unsubscribe = null;
   }
 
-  // Picks up rounds that arrived while the sidecar was not running.
+  // Picks up requests and rounds that arrived while the sidecar was not running.
   private async recover(): Promise<void> {
     try {
+      const pending = await this.opts.client.listThreads({ status: "pending", surfaced: true });
+      for (const t of pending) if (this.mine(t.to)) this.prompt(t.id);
       const active = await this.opts.client.listThreads({ status: "active" });
       for (const t of active) if (this.mine(t.to)) void this.answer(t.id);
     } catch (err) {
@@ -107,21 +119,57 @@ export class Sidecar {
   private onEvent(e: RelayEvent): void {
     if (!this.mine(e.to)) return;
     if (e.type === "thread.created" && e.status === "pending") {
-      if (!e.quiet) void this.notifyPending(e.threadId, e.from);
+      if (!e.quiet) this.prompt(e.threadId);
       return;
+    }
+    // Handled on the web or in Claude: the dialog is no longer needed.
+    if (e.status !== "pending") {
+      this.queue = this.queue.filter((id) => id !== e.threadId);
+      if (this.showing?.id === e.threadId) this.showing.asking?.close();
     }
     if (e.status !== "active") return;
     // Requests between one person's own AIs are created already active.
     if (e.type !== "message.created" || e.sender === e.from) void this.answer(e.threadId);
   }
 
-  private async notifyPending(threadId: string, fromId: string): Promise<void> {
+  private prompt(threadId: string): void {
+    if (this.shown.has(threadId) || this.queue.includes(threadId)) return;
+    this.queue.push(threadId);
+    void this.next();
+  }
+
+  // Shows one request at a time and acts on the person's answer.
+  private async next(): Promise<void> {
+    if (this.showing) return;
+    const id = this.queue.shift();
+    if (!id) return;
+    this.showing = { id, asking: null };
+    this.shown.add(id);
     try {
-      const from = (await this.agent(fromId))?.name ?? fromId;
-      const t = await this.opts.client.getThread(threadId);
-      this.opts.notify(from, `[待批准] ${t.topic}`, `${this.opts.webUrl}/#/t/${threadId}`);
-    } catch {
-      // the notification is a convenience; the request stays on the web page
+      const t = await this.opts.client.getThread(id);
+      if (t.status !== "pending") return;
+      const from = (await this.agent(t.from))?.name ?? t.from;
+      const to = ((await this.agent(t.to))?.name ?? t.to).replace(/^我的/, "你的");
+      const asking = this.opts.ask?.({
+        title: cjk(from, "想问", to),
+        topic: t.topic,
+        body: t.messages.find((m) => m.kind === "request")?.body ?? "",
+        scope: `只读 · ${t.scope.maxRounds} 轮 · $${t.scope.budgetUsd.toFixed(2)}`,
+      });
+      if (!asking) {
+        this.opts.notify(from, `[待批准] ${t.topic}`, `${this.opts.webUrl}/#/t/${id}`);
+        return;
+      }
+      this.showing.asking = asking;
+      const answer = await asking.answer;
+      if (answer === "approve") await this.opts.client.approve(id);
+      if (answer === "decline") await this.opts.client.decline(id);
+    } catch (err) {
+      // Already handled elsewhere, or the relay is away; the request stays on the web page.
+      this.log(`${id} 的批准对话框：${(err as Error).message}`);
+    } finally {
+      this.showing = null;
+      void this.next();
     }
   }
 

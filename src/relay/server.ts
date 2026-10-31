@@ -31,6 +31,7 @@ export async function startRelay(opts: RelayOptions): Promise<RunningRelay> {
   let port = opts.port ?? opts.config.port;
 
   const everything: Viewer = {
+    reader: "local",
     visible: null,
     sees: () => true,
     actsAs: () => true,

@@ -413,7 +413,13 @@ export class AccountStore {
       ? this.activeAgents(agent.accountId).filter((a) => a.client === agent.client && a.deviceId).length
       : 1;
     const where = twins > 1 ? `（${this.device(agent.deviceId!)?.name ?? agent.deviceId}）` : "";
-    return { id: agent.id, name: `${whose}${space}${label}${where}`, client: agent.client, canReceive: agent.canReceive };
+    return {
+      id: agent.id,
+      name: `${whose}${space}${label}${where}`,
+      client: agent.client,
+      canReceive: agent.canReceive,
+      owner: agent.accountId,
+    };
   }
 
   // --- AIs that connect with a credential (豆包, WorkBuddy, ...)
