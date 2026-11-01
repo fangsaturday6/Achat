@@ -47,11 +47,15 @@ export async function claudeTokenCommand(args: string[]): Promise<string> {
     store.remove();
     return "已删除。后台回答改用 Claude Code 自己的登录。";
   }
-  console.log("第 1 步：在浏览器里登录，拿到一个长期有效的凭证。\n");
-  const run = spawnSync(process.env.ACHAT_CLAUDE_BIN ?? "claude", ["setup-token"], { stdio: "inherit" });
-  if (run.error) throw new Error("这台电脑上找不到 claude 命令");
-  if (run.status !== 0) throw new Error("claude setup-token 没有完成，凭证没有保存");
-  const token = (await readHidden("\n第 2 步：把上面显示的凭证粘贴到这里（不会显示出来），按回车：")).trim();
+  // --paste: the credential came from running `claude setup-token` by hand,
+  // for example with a proxy set in that terminal.
+  if (!args.includes("--paste")) {
+    console.log("第 1 步：在浏览器里登录，拿到一个长期有效的凭证。\n");
+    const run = spawnSync(process.env.ACHAT_CLAUDE_BIN ?? "claude", ["setup-token"], { stdio: "inherit" });
+    if (run.error) throw new Error("这台电脑上找不到 claude 命令");
+    if (run.status !== 0) throw new Error("claude setup-token 没有完成，凭证没有保存");
+  }
+  const token = (await readHidden("\n把 claude setup-token 显示的凭证粘贴到这里（不会显示出来），按回车：")).trim();
   if (token.length < 20 || /\s/.test(token)) throw new Error("凭证看起来不完整，没有保存。再运行一次 achat claude-token");
   store.save(token);
   return "已保存。Achat 在后台回答时用这个凭证；到期后再运行一次 achat claude-token。";

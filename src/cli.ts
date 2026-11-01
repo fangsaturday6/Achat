@@ -27,7 +27,8 @@ const HELP = `用法：achat <命令>
   autostart on|off                  打开或关闭开机自启
   status                            列出最近的协作
   doctor                            检查请求能不能提醒到你：后台服务、账号、Claude Code 和 Codex 的提醒
-  claude-token [--remove]           给后台回答配一个长期有效的 Claude 凭证，不受 Claude Code 登录过期影响
+  claude-token [--paste] [--remove] 给后台回答配一个长期有效的 Claude 凭证，不受 Claude Code 登录过期影响；
+                                    --paste 只粘贴自己运行 claude setup-token 得到的凭证
   link [地址] [--no-wait] [--token 凭证]
                                     把这台电脑加入你的 Achat 账号；带上网页给的凭证时直接加入
   unlink                            让这台电脑退出 Achat 账号，并删除本机钥匙
