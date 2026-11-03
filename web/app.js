@@ -1336,8 +1336,15 @@ async function renderConnect(client) {
   if (offer.kind === "install") {
     connectPage(h("h1", {}, cjk("把这句话发给", name)), h("pre", { class: "code-box" }, offer.sentence), h("div", { class: "row-between" }, wait, copyButton(offer.sentence)));
   } else if (client === "workbuddy") {
-    const json = `"achat": {\n  "url": "${offer.url}",\n  "headers": { "Authorization": "Bearer ${offer.token}" }\n}`;
-    connectPage(h("h1", {}, "在 WorkBuddy 的 mcp.json 里加上"), h("pre", { class: "code-box" }, json), h("div", { class: "row-between" }, wait, copyButton(json)));
+    // WorkBuddy's 添加 MCP opens its mcp.json, empty the first time, so the
+    // page gives the whole file rather than an entry to fit into one.
+    const json = `{\n  "mcpServers": {\n    "achat": {\n      "url": "${offer.url}",\n      "headers": { "Authorization": "Bearer ${offer.token}" }\n    }\n  }\n}`;
+    connectPage(
+      h("h1", {}, "在 WorkBuddy 里添加 MCP"),
+      h("span", { class: "muted under" }, "专家 · 技能 · 连接器 → 连接器 → 右上角 自定义连接器 → 添加 MCP"),
+      h("pre", { class: "code-box" }, json),
+      h("div", { class: "row-between" }, wait, copyButton(json)),
+    );
   } else {
     const field = (label, value, copy) =>
       h("div", {}, h("span", { class: "label" }, label), h("span", { class: `value${copy ? " mono" : ""}` }, value), copy ? copyButton(value, false) : null);
