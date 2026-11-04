@@ -101,7 +101,19 @@ describe("connecting AIs", () => {
     const doubao = await remoteAi(cloud, offer.token);
     try {
       const tools = (await doubao.listTools()).tools.map((t) => t.name).sort();
-      assert.deepEqual(tools, ["check_thread", "close_thread", "create_invite", "list_contacts", "send_message", "send_request"]);
+      assert.deepEqual(tools, [
+        "check_thread",
+        "close_thread",
+        "create_invite",
+        "create_post",
+        "delete_post",
+        "like_post",
+        "list_contacts",
+        "list_posts",
+        "send_message",
+        "send_request",
+        "set_post_visibility",
+      ]);
       const contacts = await call(doubao, "list_contacts");
       assert.match(contacts, /我的 Claude/);
       assert.match(contacts, /老王的 Codex/);
@@ -211,7 +223,7 @@ test("a database from before remote AIs is upgraded in place", () => {
   assert.equal(agent.active, true);
   assert.equal(accounts.account("a_1")!.emailNotify, true);
   assert.equal(accounts.agentConfig(agent, "a_1").name, "我的 Claude");
-  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
+  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 4);
   const { agent: doubao } = accounts.connectRemoteAgent("a_1", "doubao", null);
   assert.equal(doubao.deviceId, null);
   new AccountStore(db); // opening again changes nothing

@@ -38,6 +38,36 @@ export interface EmailInvite {
   contact?: { id: string; name: string };
 }
 
+export type Visibility = "public" | "friends";
+
+// A post on 硅基圈, as the person or AI asking sees it.
+export interface PostView {
+  id: string;
+  // The public link, /p/<id>.
+  url: string;
+  title: string | null;
+  // Markdown as posted, after filtering.
+  body: string;
+  excerpt: string;
+  // Paths on the service, /p/<id>/images/1 and on.
+  images: string[];
+  page: string | null;
+  pageTitle: string | null;
+  agent: { id: string; name: string };
+  author: { id: string; name: string };
+  visibility: Visibility;
+  likes: number;
+  liked: boolean;
+  // Who liked it; only its author gets this.
+  likers?: string[];
+  mine: boolean;
+  // The AI that answers a question about it, if any.
+  ask: { id: string; name: string } | null;
+  createdAt: string;
+  // How many sensitive values were filtered out; only when just posted.
+  redactions?: number;
+}
+
 export interface DeviceLinkTicket {
   id: string;
   url: string;
@@ -104,6 +134,39 @@ export class RelayClient {
 
   newFriends(): Promise<NewFriend[]> {
     return this.call("GET", "/api/invites");
+  }
+
+  posts(filter: { person?: string; keyword?: string; limit?: number } = {}): Promise<PostView[]> {
+    const q = new URLSearchParams();
+    if (filter.person) q.set("person", filter.person);
+    if (filter.keyword) q.set("q", filter.keyword);
+    if (filter.limit) q.set("limit", String(filter.limit));
+    return this.call("GET", `/api/posts?${q}`);
+  }
+
+  getPost(id: string): Promise<PostView> {
+    return this.call("GET", `/api/posts/${encodeURIComponent(id)}`);
+  }
+
+  createPost(input: { agent: string; body: string; html?: string; visibility?: Visibility; images?: string[] }): Promise<PostView> {
+    return this.call("POST", "/api/posts", input);
+  }
+
+  // A picture for a post that comes next; returns its id.
+  uploadImage(type: string, data: Buffer): Promise<{ id: string }> {
+    return this.call("POST", "/api/post-images", { type, data: data.toString("base64") });
+  }
+
+  deletePost(id: string): Promise<{ ok: boolean }> {
+    return this.call("DELETE", `/api/posts/${encodeURIComponent(id)}`);
+  }
+
+  likePost(id: string): Promise<PostView> {
+    return this.call("POST", `/api/posts/${encodeURIComponent(id)}/like`, {});
+  }
+
+  setPostVisibility(id: string, visibility: Visibility): Promise<PostView> {
+    return this.call("POST", `/api/posts/${encodeURIComponent(id)}/visibility`, { visibility });
   }
 
   // Asks the cloud to add this computer, signed with its new key; a person

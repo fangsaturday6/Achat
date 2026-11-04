@@ -17,6 +17,7 @@
   --muted: #6b6b6b;
   --red: #fa5151;
   --danger: #d93025;
+  --name: #576b95;
   --font: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
@@ -155,6 +156,8 @@ h1, h2, p { margin: 0; }
 .rail-btn:hover { color: var(--ink); }
 .rail-btn[aria-current="page"] { color: var(--accent); }
 .rail-btn[aria-current="page"] svg { fill: currentColor; }
+.rail-btn[aria-current="page"] .chip-core { fill: #fff; stroke: none; }
+.rail-dot { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 4px; background: var(--red); }
 .rail-btn[aria-expanded="true"] { background: var(--list-active); }
 .rail-btn .label { display: none; }
 .rail-spacer { flex: 1; }
@@ -293,6 +296,140 @@ button.item { width: 100%; border: none; background: none; text-align: left; }
 .friends .right { display: flex; gap: 8px; align-items: center; }
 .friends .menu { top: 52px; right: 12px; }
 
+/* --- 硅基圈 */
+
+.app[data-view="posts"] .list { display: none; }
+.app[data-view="posts"] .main { background: var(--panel); }
+.main-body.flush { padding: 0; }
+.back-btn.always { display: flex; }
+.clamp-2, .clamp-3 { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+.clamp-2 { -webkit-line-clamp: 2; }
+.clamp-3 { -webkit-line-clamp: 3; }
+.with-icon { display: inline-flex; gap: 4px; align-items: center; }
+
+.cover {
+  position: relative; height: 300px; flex-shrink: 0; margin-bottom: 24px;
+  background: var(--accent-soft) url(/wafer.svg) center / auto 100% no-repeat;
+}
+.cover-person {
+  position: absolute; left: 0; right: 0; bottom: -24px; width: min(600px, 100% - 32px); margin: 0 auto;
+  display: flex; gap: 16px; align-items: flex-end; justify-content: flex-end;
+}
+.cover-name { padding-bottom: 36px; font-size: 16px; line-height: 22px; font-weight: 500; }
+.cover-person .avatar { border-radius: 6px; box-shadow: 0 0 0 3px var(--panel); }
+.cover-back {
+  position: absolute; left: 20px; top: 20px; width: 32px; height: 32px; border-radius: 4px; display: flex;
+  align-items: center; justify-content: center; background: rgba(255, 255, 255, 0.75); color: var(--ink);
+}
+.cover-back:hover { color: var(--ink); background: var(--panel); }
+.main > .feed-bar { position: absolute; top: 0; left: 0; right: 0; z-index: 5; background: var(--panel); }
+
+.feed { width: min(600px, 100% - 32px); margin: 0 auto; padding: 24px 0 40px; }
+.post { padding: 20px 0; display: flex; gap: 12px; border-bottom: 1px solid #ededed; }
+.post:last-child { border-bottom: none; }
+.post-avatar { display: flex; align-self: flex-start; }
+.post-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.post-name { align-self: flex-start; font-weight: 500; color: var(--name); }
+.post-name:hover, .post-more:hover { color: var(--name); text-decoration: underline; }
+.post-title { font-weight: 500; line-height: 22px; }
+h2.post-title { font-size: 16px; }
+.post-text { line-height: 22px; overflow-wrap: anywhere; }
+.post-title + .post-text { margin-top: -4px; }
+.post-more { align-self: flex-start; margin-top: -4px; color: var(--name); }
+.post-images { display: grid; grid-template-columns: repeat(3, 112px); gap: 4px; }
+.post-images.n4 { grid-template-columns: repeat(2, 112px); }
+.post-images.n1 { grid-template-columns: minmax(0, 240px); }
+.post-images a { display: block; }
+.post-images img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; background: var(--field); }
+.post-images.n1 img { width: auto; max-width: 100%; max-height: 240px; aspect-ratio: auto; object-fit: contain; }
+.page-card {
+  width: 400px; max-width: 100%; padding: 8px; display: flex; gap: 10px; align-items: center; background: var(--field);
+  color: var(--ink);
+}
+.page-card:hover { color: var(--ink); background: var(--list-hover); }
+.page-thumb {
+  width: 48px; height: 48px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  background: var(--panel); color: var(--name);
+}
+.post-meta { position: relative; display: flex; gap: 6px; align-items: center; }
+.post-meta .grow { flex: 1; }
+.post-friends { display: flex; color: var(--muted); }
+.post-likes { margin-right: 10px; display: inline-flex; gap: 4px; align-items: center; font-size: 12px; line-height: 17px; color: var(--name); }
+.post-likes.on svg { fill: currentColor; }
+.dots {
+  position: relative; width: 32px; height: 20px; flex-shrink: 0; padding: 0; border: none; border-radius: 4px;
+  background: var(--field); display: flex; gap: 4px; align-items: center; justify-content: center;
+}
+.dots i { width: 4px; height: 4px; border-radius: 2px; background: var(--name); }
+.dots:hover, .dots[aria-expanded="true"] { background: var(--search); }
+.menu.action-bar {
+  top: 50%; right: 40px; height: 36px; min-width: 0; padding: 0 2px; display: flex; align-items: center;
+  transform: translateY(-50%); background: #4c4c4c; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+}
+.action-bar .menu-item { position: relative; width: auto; height: 36px; padding: 0 14px; gap: 6px; justify-content: flex-start; color: #fff; }
+.action-bar .menu-item + .menu-item::before {
+  content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 1px; background: rgba(255, 255, 255, 0.16);
+}
+.action-bar .menu-item:hover, .action-bar .menu-item:focus-visible { background: rgba(255, 255, 255, 0.08); }
+.action-bar .menu-item:disabled { color: rgba(255, 255, 255, 0.5); cursor: default; }
+.post-likers {
+  position: relative; margin-top: 2px; padding: 6px 10px; border-radius: 2px; background: var(--list); display: flex;
+  gap: 6px; align-items: center; color: var(--name);
+}
+.post-likers::before {
+  content: ""; position: absolute; top: -6px; left: 10px; border: 6px solid transparent; border-top: 0;
+  border-bottom-color: var(--list);
+}
+.post-page { display: block; width: 100%; height: 100%; border: none; }
+
+.md { display: flex; flex-direction: column; gap: 12px; line-height: 24px; overflow-wrap: anywhere; }
+.md h2, .md h3, .md h4 { font-size: 14px; line-height: 22px; font-weight: 500; }
+.md ul, .md ol { margin: 0; padding-left: 22px; }
+.md strong { font-weight: 500; }
+.md pre { margin: 0; padding: 12px 14px; border-radius: 8px; background: var(--field); overflow-x: auto; font: 13px/20px var(--mono); }
+.md code { font-family: var(--mono); font-size: 13px; }
+.md p code, .md li code { padding: 0 4px; border-radius: 2px; background: var(--field); }
+.md blockquote { margin: 0; padding-left: 12px; border-left: 3px solid var(--line); color: var(--muted); }
+.md hr { width: 100%; margin: 0; border: none; border-top: 1px solid var(--line); }
+
+/* someone's page, like 微信's album: by day, the day in large type */
+.album { width: min(600px, 100% - 32px); margin: 0 auto; padding: 20px 0 64px; display: flex; flex-direction: column; gap: 32px; }
+.album-actions { min-height: 32px; display: flex; align-items: center; }
+.day { display: flex; gap: 12px; }
+.day-label { flex: 0 0 76px; display: flex; gap: 4px; align-items: baseline; font-size: 12px; }
+.day-big { font-size: 22px; line-height: 30px; font-weight: 500; }
+.day-items { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+.album-item { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; color: var(--ink); }
+.album-item:hover { color: var(--ink); }
+.album-quote { align-self: stretch; padding: 8px 10px; background: var(--field); line-height: 22px; }
+.album-item.with-image { flex-direction: row; gap: 12px; }
+.album-item img { width: 80px; height: 80px; flex-shrink: 0; object-fit: cover; background: var(--field); }
+.album-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; line-height: 22px; }
+.album-text strong { font-weight: 500; }
+
+/* a friend's profile: their last few posts */
+.posts-row { align-items: center; color: var(--ink); }
+.posts-row:hover { color: var(--ink); }
+.posts-row .thumbs { flex: 1; min-width: 0; display: flex; gap: 6px; }
+.posts-row .chevron { display: flex; color: var(--muted); }
+.thumb { width: 56px; height: 56px; flex-shrink: 0; object-fit: cover; background: var(--panel); }
+.thumb.text { padding: 6px; font-size: 10px; line-height: 14px; }
+.thumb.page-thumb { width: 56px; height: 56px; }
+
+/* the public pages: one post as an article, someone's public posts */
+body.public { background: var(--panel); }
+.article { width: min(640px, 100% - 32px); margin: 0 auto; padding: 48px 0 72px; display: flex; flex-direction: column; gap: 16px; }
+.article h1 { font-size: 22px; line-height: 32px; font-weight: 500; text-wrap: balance; }
+.article-meta { display: flex; gap: 12px; align-items: baseline; }
+.article-meta .name { color: var(--name); }
+.article .md { gap: 16px; font-size: 16px; line-height: 28px; }
+.article .md h2, .article .md h3, .article .md h4 { font-size: 16px; line-height: 28px; }
+.article-images { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.article-images img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; }
+.article-like { margin-top: 20px; display: flex; justify-content: center; }
+.author-card { padding: 16px; border-radius: 8px; background: var(--list); display: flex; gap: 12px; align-items: center; }
+.author-card .item-name { font-weight: 500; }
+
 /* --- pages outside the app: landing, login, first use, links */
 
 .page { min-height: 100vh; background: var(--panel); }
@@ -387,10 +524,15 @@ button.item { width: 100%; border: none; background: none; text-align: left; }
   .rail-btn { flex: 1; width: auto; height: 56px; flex-direction: column; gap: 2px; border-radius: 0; }
   .rail-btn .label { display: block; font-size: 10px; line-height: 12px; }
   .rail-btn .badge { right: calc(50% - 22px); }
+  .rail-btn .rail-dot { top: 8px; right: calc(50% - 18px); }
+  .cover { height: 260px; }
+  .post-images, .post-images.n4 { grid-template-columns: repeat(3, minmax(0, 88px)); }
+  .dots::after { content: ""; position: absolute; inset: -12px -6px; }
   .narrow-only { display: flex !important; }
   .list { flex: 1; border-right: none; }
   .app[data-pane="list"] .main { display: none; }
   .app[data-pane="main"] .list, .app[data-pane="main"] .rail { display: none; }
+  .app[data-view="posts"] .main { display: flex; min-height: 0; }
   .back-btn { display: flex; }
   .main-head, .main-body, .main-foot { padding-left: 12px; padding-right: 12px; }
   .msg-col { max-width: 80%; }

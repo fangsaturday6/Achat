@@ -64,7 +64,9 @@ CREATE TABLE IF NOT EXISTS invites (
   expires_at INTEGER NOT NULL,
   used_by TEXT,
   created_at TEXT NOT NULL,
-  emailed_at INTEGER
+  emailed_at INTEGER,
+  -- A request sent from someone's 硅基圈: the sender never saw this email.
+  email_hidden INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS invites_by_id ON invites (id);
 CREATE INDEX IF NOT EXISTS invites_by_email ON invites (email);
@@ -90,7 +92,7 @@ CREATE TABLE IF NOT EXISTS request_emails (
 CREATE INDEX IF NOT EXISTS request_emails_by_pair ON request_emails (account_id, from_account, sent_at);
 `;
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 // Version 1 had computer AIs only (agents.device_id NOT NULL) and no email
 // preference. Rebuilds the agents table in place, keeping its rows.
@@ -119,6 +121,11 @@ ALTER TABLE invites ADD COLUMN id TEXT;
 ALTER TABLE invites ADD COLUMN email TEXT;
 ALTER TABLE invites ADD COLUMN emailed_at INTEGER;
 UPDATE invites SET id = 'i_' || lower(hex(randomblob(8))) WHERE id IS NULL;
+`;
+
+// Version 3 had no friend requests from 硅基圈.
+const MIGRATE_FROM_3 = `
+ALTER TABLE invites ADD COLUMN email_hidden INTEGER NOT NULL DEFAULT 0;
 `;
 
 export interface Account {
@@ -176,6 +183,8 @@ export interface Invite {
   usedBy: string | null;
   createdAt: string;
   emailedAt: number | null;
+  // Sent from someone's 硅基圈, so the inviter does not know the email.
+  emailHidden: boolean;
 }
 
 export function hashSecret(value: string): string {
@@ -211,7 +220,8 @@ export class AccountStore {
       try {
         this.transaction(() => {
           if (version < 2) db.exec(MIGRATE_FROM_1);
-          if (has("invites")) db.exec(MIGRATE_FROM_2);
+          if (version < 3 && has("invites")) db.exec(MIGRATE_FROM_2);
+          if (has("invites")) db.exec(MIGRATE_FROM_3);
         });
       } finally {
         db.exec("PRAGMA foreign_keys = ON");
@@ -512,12 +522,12 @@ export class AccountStore {
 
   // --- invites and contacts
 
-  createInvite(accountId: string, ttlMs: number, email: string | null = null): { invite: Invite; code: string } {
+  createInvite(accountId: string, ttlMs: number, email: string | null = null, emailHidden = false): { invite: Invite; code: string } {
     const code = randomBytes(16).toString("base64url");
     const id = newId("i_");
     this.db
-      .prepare("INSERT INTO invites (code_hash, id, account_id, email, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(hashSecret(code), id, accountId, email, this.now().getTime() + ttlMs, this.stamp());
+      .prepare("INSERT INTO invites (code_hash, id, account_id, email, expires_at, created_at, email_hidden) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(hashSecret(code), id, accountId, email, this.now().getTime() + ttlMs, this.stamp(), emailHidden ? 1 : 0);
     return { invite: this.inviteById(id)!, code };
   }
 
@@ -653,6 +663,7 @@ function toInvite(row: Row): Invite {
     usedBy: (row.used_by as string | null) ?? null,
     createdAt: row.created_at as string,
     emailedAt: (row.emailed_at as number | null) ?? null,
+    emailHidden: row.email_hidden === 1,
   };
 }
 

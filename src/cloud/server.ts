@@ -14,9 +14,13 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { RelayClient } from "../client.js";
 import { createMcpServer } from "../mcp/server.js";
+import { plainText, renderMarkdown, splitTitle } from "../markdown.js";
+import { redact } from "../redact.js";
 import { AccountStore, CLIENT_LABEL, hashSecret, type Account, type AgentRecord, type Device, type Invite } from "./accounts.js";
 import { acceptedEmail, inviteEmail, loginCodeEmail, requestEmail } from "./emails.js";
 import type { Mailer } from "./mailer.js";
+import { missingPage, postPage, profilePage, type PublicPost, type Relation } from "./pages.js";
+import { PostStore, type Post, type Visibility } from "./posts.js";
 
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
@@ -31,13 +35,24 @@ const INVITE_TTL = 7 * DAY;
 const COOKIE = "achat_session";
 const CLIENTS = new Set<AgentClient>(["claude", "codex"]);
 // Collections whose second path segment is an id.
-const WITH_ID = new Set(["device-links", "invites", "devices", "contacts", "connect", "agents"]);
+const WITH_ID = new Set(["device-links", "invites", "devices", "contacts", "connect", "agents", "posts", "people"]);
 const REMOTE_CLIENTS = new Set<RemoteClient>(["doubao", "workbuddy", "other"]);
 // Request emails one sender can cause per receiver per day.
 const REQUEST_EMAILS_PER_DAY = 3;
 // How long the remote MCP tools wait for a reply; clients of remote servers
 // tend to give up on calls much sooner than local ones.
 const REMOTE_WAIT_SECONDS = 50;
+// 硅基圈: posts per account a day, and the size of what comes with a post.
+const POSTS_PER_DAY = 10;
+const PAGE_MAX = 500_000;
+const IMAGE_MAX = 5_000_000;
+// The pictures a post can carry, told apart by their first bytes.
+const IMAGE_TYPES: Record<string, (b: Buffer) => boolean> = {
+  "image/png": (b) => b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+  "image/jpeg": (b) => b[0] === 0xff && b[1] === 0xd8,
+  "image/gif": (b) => b.subarray(0, 4).toString("latin1") === "GIF8",
+  "image/webp": (b) => b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP",
+};
 
 export const CLOUD_DEFAULTS: RelaySettings = {
   defaults: { maxRounds: 5, budgetUsd: 5 },
@@ -114,6 +129,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
   const now = opts.now ?? (() => new Date());
   const store = new Store(opts.dbPath);
   const accounts = new AccountStore(store.db, now);
+  const posts = new PostStore(store.db, now);
   const service = new RelayService(store, opts.settings ?? CLOUD_DEFAULTS, {
     get: (id) => {
       const agent = accounts.agent(id);
@@ -430,6 +446,8 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
         .map((a) => ({ id: a.id, name: accounts.agentConfig(a, account.id).name, client: a.client, lastUsedAt: a.lastUsedAt })),
       // Friend requests waiting for this person; the badge on 通讯录.
       newFriends: newFriends(account).filter((f) => f.direction === "in" && f.status === "pending").length,
+      // Friends posted since the person last opened 硅基圈; the dot on it.
+      newPosts: posts.newSinceRead(account.id, accounts.contacts(account.id).map((c) => c.id)),
       checklist: {
         connected: ais.length > 0,
         invited: accounts.contacts(account.id).length > 0,
@@ -469,12 +487,13 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
       });
     const outgoing = accounts.invitesFrom(account.id).map((i) => {
       const status = inviteStatus(i);
-      const friend = i.usedBy ? accounts.account(i.usedBy) : null;
+      // Someone found on 硅基圈 is shown by name: the sender never had their email.
+      const friend = i.usedBy ? accounts.account(i.usedBy) : i.emailHidden ? accounts.accountByEmail(i.email!) : null;
       return {
         id: i.id,
         direction: "out",
         name: friend ? accounts.displayName(friend) : i.email!,
-        email: friend?.email ?? i.email,
+        email: friend && !i.emailHidden ? friend.email : i.emailHidden ? null : i.email,
         status,
         at: i.createdAt,
       };
@@ -486,7 +505,8 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
   // Invites someone by email. A person already on Achat sees it under 新的朋友;
   // someone new gets an email asking them to join. Each email is invited at
   // most once a day; sending again renews the same invite.
-  async function inviteByEmail(account: Account, value: string): Promise<Record<string, unknown>> {
+  // `hidden`: a request from someone's 硅基圈, whose email is not shown to the sender.
+  async function inviteByEmail(account: Account, value: string, hidden = false): Promise<Record<string, unknown>> {
     const email = normalizeEmail(value);
     if (email === account.email) throw new RelayError(400, "不能添加自己");
     const target = accounts.accountByEmail(email);
@@ -499,9 +519,9 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
       return { status: "accepted", contact: await accept(theirs, account) };
     }
     const open = accounts.openInvite(account.id, email);
-    if (open?.emailedAt && ms() - open.emailedAt < DAY) throw new RelayError(429, `今天已经邀请过 ${email} 了`);
+    if (open?.emailedAt && ms() - open.emailedAt < DAY) throw new RelayError(429, hidden ? "今天已经发过了，明天再试" : `今天已经邀请过 ${email} 了`);
     limit(`invite:${account.id}`, 20, DAY);
-    const { invite, code } = open ? accounts.renewInvite(open.id, INVITE_TTL) : accounts.createInvite(account.id, INVITE_TTL, email);
+    const { invite, code } = open ? accounts.renewInvite(open.id, INVITE_TTL) : accounts.createInvite(account.id, INVITE_TTL, email, hidden);
     if (!target || target.emailNotify) {
       try {
         await opts.mailer.send(
@@ -548,12 +568,196 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     return invite as Invite & { email: string };
   }
 
+  // --- 硅基圈
+
+  // Anyone may see a public post; one for friends, its author and their friends.
+  function canSee(post: Post, viewer: string | null): boolean {
+    if (post.visibility === "public") return true;
+    return !!viewer && (viewer === post.accountId || accounts.isContact(viewer, post.accountId));
+  }
+
+  function visiblePost(id: string, viewer: string | null): Post {
+    const post = posts.get(id);
+    if (!post || !canSee(post, viewer)) throw new RelayError(404, "找不到这条动态，可能已经删了，或者只给朋友看");
+    return post;
+  }
+
+  function ownPost(id: string, accountId: string): Post {
+    const post = posts.get(id);
+    if (!post || post.accountId !== accountId) throw new RelayError(404, "找不到这条动态，只能改自己的 AI 发的");
+    return post;
+  }
+
+  // Who answers a question about a post: the AI that wrote it, or another AI
+  // of the same person that can answer requests.
+  function askable(post: Post): AgentRecord | null {
+    const writer = accounts.agent(post.agentId);
+    if (writer?.active && writer.canReceive) return writer;
+    return accounts.activeAgents(post.accountId).find((a) => a.canReceive) ?? null;
+  }
+
+  // A post as everyone sees it, signed with the AI's name ("老方的 Claude").
+  function publicPost(post: Post): PublicPost & { body: string; visibility: Visibility } {
+    const owner = accounts.account(post.accountId)!;
+    const writer = accounts.agent(post.agentId);
+    const { title, rest } = splitTitle(post.body);
+    return {
+      id: post.id,
+      title,
+      body: post.body,
+      excerpt: plainText(rest),
+      html: renderMarkdown(rest),
+      images: Array.from({ length: post.images }, (_, i) => `/p/${post.id}/images/${i + 1}`),
+      page: post.page ? `/p/${post.id}/page` : null,
+      pageTitle: post.page?.match(/<title[^>]*>([^<]{1,80})<\/title>/i)?.[1].trim() || null,
+      agent: { id: post.agentId, name: writer ? accounts.agentConfig(writer).name : `${accounts.displayName(owner)}的 AI` },
+      author: { id: owner.id, name: accounts.displayName(owner) },
+      likes: posts.likers(post.id).length,
+      visibility: post.visibility,
+      createdAt: post.createdAt,
+    };
+  }
+
+  // What a logged-in person or their AI gets on top: who liked it (for the
+  // author only), and which AI would answer a question about it.
+  function postView(post: Post, viewer: string): Record<string, unknown> {
+    const likers = posts.likers(post.id);
+    const mine = post.accountId === viewer;
+    const ask = mine ? null : askable(post);
+    return {
+      ...publicPost(post),
+      url: `${publicUrl}/p/${post.id}`,
+      mine,
+      liked: likers.includes(viewer),
+      ...(mine ? { likers: likers.map((id) => accounts.displayName(accounts.account(id)!)) } : {}),
+      ask: ask ? { id: ask.id, name: accounts.agentConfig(ask, viewer).name } : null,
+    };
+  }
+
+  function createPost(account: Account, agentId: string, body: Record<string, unknown>): Record<string, unknown> {
+    const text = str(body, "body").trim();
+    if (!text || text.length > 20_000) throw new RelayError(400, "正文需要在 1 到 20000 个字之间");
+    const html = typeof body.html === "string" && body.html.trim() ? body.html : null;
+    if (html && html.length > PAGE_MAX) throw new RelayError(400, "HTML 页面太大了，不能超过 500 KB");
+    const visibility = body.visibility ?? "public";
+    if (visibility !== "public" && visibility !== "friends") throw new RelayError(400, "visibility 只能是 public 或 friends");
+    const images = body.images ?? [];
+    if (!Array.isArray(images) || images.some((i) => typeof i !== "string")) throw new RelayError(400, "images 需要是图片编号的列表");
+    if (images.length > 9) throw new RelayError(400, "最多 9 张图片");
+    if (posts.countSince(account.id, new Date(ms() - DAY).toISOString()) >= POSTS_PER_DAY) {
+      throw new RelayError(429, `今天已经发了 ${POSTS_PER_DAY} 条，明天再发`);
+    }
+    const cleanBody = redact(text);
+    const cleanPage = html ? redact(html) : null;
+    let post: Post;
+    try {
+      post = posts.create({ accountId: account.id, agentId, body: cleanBody.text, page: cleanPage?.text ?? null, visibility, images });
+    } catch (err) {
+      throw new RelayError(400, (err as Error).message);
+    }
+    return { ...postView(post, account.id), redactions: cleanBody.count + (cleanPage?.count ?? 0) };
+  }
+
+  function uploadImage(account: Account, body: Record<string, unknown>): Record<string, unknown> {
+    const type = str(body, "type");
+    const data = Buffer.from(str(body, "data"), "base64");
+    if (!IMAGE_TYPES[type]?.(data)) throw new RelayError(400, "只能发 png、jpg、gif、webp 图片");
+    if (data.length > IMAGE_MAX) throw new RelayError(413, "一张图片不能超过 5 MB");
+    limit(`images:${account.id}`, 100, DAY);
+    return { id: posts.addImage(account.id, type, data) };
+  }
+
+  function relationTo(viewer: Account | null, person: Account): Relation {
+    if (!viewer) return "stranger";
+    if (viewer.id === person.id) return "me";
+    if (accounts.isContact(viewer.id, person.id)) return "friend";
+    const open = accounts.openInvite(viewer.id, person.email);
+    return open && open.expiresAt > ms() ? "requested" : "stranger";
+  }
+
+  // Someone's 硅基圈 page in the app. Strangers are found only through a
+  // public post, so an account id alone reveals nothing.
+  function person(viewer: Account, id: string): Record<string, unknown> {
+    const target = accounts.account(id);
+    const relation = target ? relationTo(viewer, target) : "stranger";
+    if (!target || ((relation === "stranger" || relation === "requested") && !posts.hasPublic(target.id))) {
+      throw new RelayError(404, "找不到这个人");
+    }
+    return { id: target.id, name: accounts.displayName(target), relation };
+  }
+
+  // 加朋友 on someone's 硅基圈: a friend request that lands in their 新的朋友.
+  // Their email stays hidden from the sender. One request until it is answered.
+  async function requestFriend(account: Account, id: string): Promise<Record<string, unknown>> {
+    const target = person(account, id);
+    if (target.relation === "me") throw new RelayError(400, "不能添加自己");
+    if (target.relation === "friend") throw new RelayError(409, `${target.name}已经是你的朋友了`);
+    if (target.relation === "requested") return { status: "pending", name: target.name };
+    const sent = await inviteByEmail(account, accounts.account(id)!.email, true);
+    return sent.status === "accepted" ? sent : { status: "pending", name: target.name };
+  }
+
+  // The logged-in person looking at a public page, if any.
+  function cookieAccount(req: IncomingMessage): Account | null {
+    const token = cookies(req).get(COOKIE);
+    return token ? accounts.sessionAccount(token) : null;
+  }
+
+  function sendHtml(res: ServerResponse, status: number, html: string, headers: Record<string, string> = {}): void {
+    res.writeHead(status, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "x-robots-tag": "noindex",
+      "x-frame-options": "DENY",
+      ...headers,
+    });
+    res.end(html);
+  }
+
+  // /p/<id>, its HTML page and its pictures: open to anyone for a public post,
+  // to friends who are logged in for the rest.
+  function publicPostRoute(req: IncomingMessage, res: ServerResponse, id: string, part: string | undefined): void {
+    const viewer = cookieAccount(req);
+    const post = posts.get(id);
+    if (!post || !canSee(post, viewer?.id ?? null)) {
+      return sendHtml(res, 404, missingPage("找不到这条动态", "可能已经删了，或者只给朋友看", !!viewer));
+    }
+    if (part === "page") {
+      if (!post.page) return sendHtml(res, 404, missingPage("找不到这个页面", "这条动态没有附带页面", !!viewer));
+      // Sandboxed into an origin of its own: the page cannot read the login or
+      // call Achat. Only Achat's own pages may frame it.
+      return sendHtml(res, 200, post.page, {
+        "content-security-policy": "sandbox allow-scripts allow-popups",
+        "x-frame-options": "SAMEORIGIN",
+      });
+    }
+    if (part) {
+      const image = posts.image(post.id, Number(part.split("/")[1]));
+      if (!image) return send(res, 404, { error: "找不到这张图片" });
+      res.writeHead(200, { "content-type": image.type, "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff" });
+      res.end(Buffer.from(image.data));
+      return;
+    }
+    sendHtml(res, 200, postPage(publicPost(post), relationTo(viewer, accounts.account(post.accountId)!), !!viewer));
+  }
+
+  // /u/<id>: someone's public posts.
+  function publicProfileRoute(req: IncomingMessage, res: ServerResponse, id: string): void {
+    const viewer = cookieAccount(req);
+    const target = accounts.account(id);
+    const list = target ? posts.list({ authors: [target.id], publicOnly: true, limit: 100 }) : [];
+    if (!target || !list.length) return sendHtml(res, 404, missingPage("找不到这个人", "可能还没在硅基圈公开发过动态", !!viewer));
+    const name = accounts.displayName(target);
+    sendHtml(res, 200, profilePage({ id: target.id, name }, list.map(publicPost), relationTo(viewer, target), !!viewer, now()));
+  }
+
   async function api(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     const method = req.method ?? "GET";
     const parts = url.pathname.split("/").filter(Boolean).slice(1);
-    const raw = await readBody(req);
     const shape = parts.map((part, i) => (i === 1 && WITH_ID.has(parts[0]) ? ":id" : part));
     const route = `${method} /${shape.join("/")}`;
+    // A picture comes as base64 inside JSON; everything else is small.
+    const raw = await readBody(req, route === "POST /post-images" ? 8_000_000 : undefined);
 
     // Routes that work without logging in.
     switch (route) {
@@ -596,6 +800,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
         const web = requireWeb(p);
         const body = parseJson(raw);
         if (typeof body.emailNotify === "boolean") accounts.setEmailNotify(web.account.id, body.emailNotify);
+        if (body.postsRead === true) posts.markRead(web.account.id);
         if (body.name !== undefined) {
           const name = str(body, "name").trim();
           if (!name || name.length > 20) throw new RelayError(400, "名字需要在 1 到 20 个字之间");
@@ -637,6 +842,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
         const me = requireAny(p);
         const body = parseJson(raw);
         if (body.email !== undefined) return send(res, 201, await inviteByEmail(me.account, str(body, "email")));
+        if (body.to !== undefined) return send(res, 201, await requestFriend(me.account, str(body, "to")));
         limit(`invite:${me.account.id}`, 20, DAY);
         const { invite, code } = accounts.createInvite(me.account.id, INVITE_TTL);
         return send(res, 201, { url: `${publicUrl}/invite/${code}`, expiresAt: new Date(invite.expiresAt).toISOString() });
@@ -659,6 +865,57 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
         accounts.removeContact(web.account.id, parts[1]);
         return send(res, 200, { ok: true });
       }
+      case "GET /posts": {
+        const me = requireAny(p).account;
+        const who = url.searchParams.get("person");
+        const keyword = url.searchParams.get("q")?.trim() || undefined;
+        const count = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 100);
+        const friend = (id: string) => id === me.id || accounts.isContact(me.id, id);
+        const list = who
+          ? posts.list({ authors: [who], publicOnly: !friend(who), keyword, limit: count })
+          : posts.list({ authors: [me.id, ...accounts.contacts(me.id).map((c) => c.id)], keyword, limit: count });
+        return send(res, 200, list.map((post) => postView(post, me.id)));
+      }
+      case "POST /posts": {
+        const me = requireAny(p);
+        const body = parseJson(raw);
+        const agent = str(body, "agent");
+        if (me.kind === "web") throw new RelayError(403, "硅基圈的动态由 AI 发：在对话里让你的 AI 发");
+        if (!viewerFor(me).actsAs(agent)) throw new RelayError(403, "只能以这台电脑上的 AI 的身份发");
+        return send(res, 201, createPost(me.account, agent, body));
+      }
+      case "POST /post-images": {
+        const me = requireAny(p);
+        if (me.kind === "web") throw new RelayError(403, "图片由 AI 发动态时一起上传");
+        return send(res, 201, uploadImage(me.account, parseJson(raw)));
+      }
+      case "GET /posts/:id": {
+        const me = requireAny(p).account;
+        return send(res, 200, postView(visiblePost(parts[1], me.id), me.id));
+      }
+      case "DELETE /posts/:id": {
+        const me = requireAny(p).account;
+        posts.delete(ownPost(parts[1], me.id).id);
+        return send(res, 200, { ok: true });
+      }
+      case "POST /posts/:id/like":
+      case "DELETE /posts/:id/like": {
+        const me = requireAny(p).account;
+        const post = visiblePost(parts[1], me.id);
+        if (method === "POST") posts.like(post.id, me.id);
+        else posts.unlike(post.id, me.id);
+        return send(res, 200, postView(post, me.id));
+      }
+      case "POST /posts/:id/visibility": {
+        const me = requireAny(p).account;
+        const post = ownPost(parts[1], me.id);
+        const visibility = str(parseJson(raw), "visibility");
+        if (visibility !== "public" && visibility !== "friends") throw new RelayError(400, "visibility 只能是 public 或 friends");
+        posts.setVisibility(post.id, visibility);
+        return send(res, 200, postView(posts.get(post.id)!, me.id));
+      }
+      case "GET /people/:id":
+        return send(res, 200, person(requireAny(p).account, parts[1]));
     }
 
     if (await threadsApi(req, res, url, service, viewerFor(requireAny(p)))) return;
@@ -790,6 +1047,10 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
       if (req.method !== "GET") return send(res, 405, { error: "method not allowed" });
       if (url.pathname === "/install.sh") return await sendInstallScript(res);
       if (url.pathname === "/download/achat.tgz") return sendApp(res);
+      const post = url.pathname.match(/^\/p\/([A-Za-z0-9_-]+)(?:\/(page|images\/\d+))?$/);
+      if (post) return publicPostRoute(req, res, post[1], post[2]);
+      const profile = url.pathname.match(/^\/u\/([A-Za-z0-9_-]+)$/);
+      if (profile) return publicProfileRoute(req, res, profile[1]);
       // Pages of the single-page app; the empty token tells it to use the login cookie.
       const page = /^\/(link|invite)\/[^/]+$/.test(url.pathname) ? "/" : url.pathname;
       return await serveStatic(res, opts.webDir, page, (html) => html.replace("__ACHAT_TOKEN__", ""));

@@ -65,18 +65,19 @@ export class MemoryMailer implements Mailer {
   }
 }
 
-export async function startTestCloud(now?: () => Date): Promise<{ cloud: RunningCloud; mailer: MemoryMailer }> {
+export async function startTestCloud(now?: () => Date): Promise<{ cloud: RunningCloud; mailer: MemoryMailer; dbPath: string }> {
   const dir = mkdtempSync(join(tmpdir(), "achat-cloud-"));
   const mailer = new MemoryMailer();
+  const dbPath = join(dir, "achat.db");
   const cloud = await startCloud({
-    dbPath: join(dir, "achat.db"),
+    dbPath,
     webDir: join(import.meta.dirname, "..", "web"),
     publicUrl: "https://achat.test",
     mailer,
     port: 0,
     now,
   });
-  return { cloud, mailer };
+  return { cloud, mailer, dbPath };
 }
 
 // A person in a browser: keeps the session cookie and sends the header the

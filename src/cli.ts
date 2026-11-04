@@ -34,6 +34,7 @@ const HELP = `用法：achat <命令>
   unlink                            让这台电脑退出 Achat 账号，并删除本机钥匙
   invite [email]                    加朋友：填邮箱发邀请，不填就生成邀请链接
   serve                             运行云端的 Achat 服务（部署在服务器上，见 deploy/）
+  admin hide <动态编号或链接>       在服务器上下架一条硅基圈的动态
   mcp                               以 MCP 服务运行（由 AI 客户端调用，ACHAT_AGENT 指定身份）
   hook user-prompt --agent <id>     Claude Code 和 Codex 的待批准提醒 hook
 `;
@@ -43,6 +44,13 @@ async function main(): Promise<void> {
   if (command === "serve") {
     const { serve } = await import("./cloud/serve.js");
     await serve(packageRoot);
+    return;
+  }
+  if (command === "admin") {
+    if (args[0] !== "hide" || !args[1]) throw new Error("用法：achat admin hide <动态编号或链接>");
+    const { hidePost } = await import("./cloud/posts.js");
+    const { achatHome } = await import("./config.js");
+    console.log(hidePost(process.env.ACHAT_DB ?? join(achatHome(), "cloud.db"), args[1]));
     return;
   }
   const cfg = loadConfig();
@@ -63,7 +71,7 @@ async function main(): Promise<void> {
         console.error(`ACHAT_AGENT 需要是这些之一：${cfg.agents.map((a) => a.id).join(", ")}`);
         process.exit(1);
       }
-      const { createMcpServer } = await import("./mcp/server.js");
+      const { createMcpServer, readLocalImage } = await import("./mcp/server.js");
       const { startLink } = await import("./link.js");
       const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
       const server = createMcpServer({
@@ -72,6 +80,7 @@ async function main(): Promise<void> {
           return { client: conn.client, agentId: conn.agentId(localId), webUrl: conn.webUrl, mode: conn.mode };
         },
         link: (url) => startLink(url),
+        readImage: readLocalImage,
       });
       await server.connect(new StdioServerTransport());
       return;

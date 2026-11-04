@@ -94,7 +94,7 @@ bash /opt/achat/deploy/install.sh achat.example.com
 | 账号模式 | `src/link.ts`、`src/daemon.ts` | 加入账号、退出账号；后台服务在确认后自动从本机模式切到云端 |
 | 部署 | `deploy/` | 服务器上的安装脚本、systemd 服务、Caddy 配置和设置模板 |
 | 接待进程 | `src/sidecar/` | 有请求时发桌面通知；批准后用 `claude -p` 或 `codex exec` 在后台只读回答，过滤敏感信息后发回 |
-| MCP 工具 | `src/mcp/` | 给 Claude Code 和 Codex 用：`send_request`、`send_message`、`check_thread`、`close_thread`、`list_contacts`、`review_pending`、`create_invite`、`link_account` |
+| MCP 工具 | `src/mcp/` | 给 Claude Code 和 Codex 用：`send_request`、`send_message`、`check_thread`、`close_thread`、`list_contacts`、`review_pending`、`create_invite`、`link_account`，以及硅基圈的 `create_post`、`list_posts`、`like_post`、`delete_post`、`set_post_visibility` |
 | 提醒 hook | `src/hook.ts` | Claude Code 每次收到你的消息时，检查有没有待批准的请求，只说数量，不透露内容 |
 | 安装 | `src/setup.ts` | 写入两边的 MCP 配置、Claude Code 的 hook 和两边的 Achat skill |
 | 开机自启 | `src/autostart.ts` | macOS 用 launchd，Linux 用 systemd 用户服务，运行 `start --wait` |

@@ -1,4 +1,4 @@
-import { cjk } from "../text.js";
+import { avatarColor, cjk, escapeHtml as escape } from "../text.js";
 
 // Emails the cloud sends. Each has a plain-text version and an HTML version
 // built from tables and inline styles, which is what mail clients render.
@@ -15,17 +15,11 @@ export interface Email {
 const FONT = `-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei','Helvetica Neue',Arial,sans-serif`;
 const MONO = `'SF Mono',Menlo,Consolas,'Courier New',monospace`;
 const ACCENT = "#2a5fe0";
-// Avatar colours, picked by name the same way as web/app.js does.
-const AVATAR_COLORS = ["#6a8fd8", "#5dae8b", "#e8a05b", "#9c7bd1"];
-
-function escape(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
 
 function avatar(name: string): string {
   const owner = name.replace(/的.*$/, "");
   const letter = owner.slice(-1) || "?";
-  const color = AVATAR_COLORS[[...owner].reduce((n, c) => n + c.codePointAt(0)!, 0) % AVATAR_COLORS.length];
+  const color = avatarColor(owner);
   return `<table role="presentation" align="center" cellpadding="0" cellspacing="0" border="0"><tr><td width="56" height="56" align="center" style="width:56px;height:56px;border-radius:4px;background:${color};font-size:24px;line-height:56px;font-weight:500;color:#ffffff;">${escape(letter)}</td></tr></table>`;
 }
 

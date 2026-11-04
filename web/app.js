@@ -28,6 +28,11 @@ const ICONS = {
   monitor: "M5 4h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM8 20h8M12 16v4",
   right: "M9 6l6 6-6 6",
   left: "M15 6l-6 6 6 6",
+  heart: "M12 20.5l-1.2-1.1C6.4 15.4 3.5 12.8 3.5 9.6 3.5 7 5.5 5 8.1 5c1.5 0 2.9.7 3.9 1.8C13 5.7 14.4 5 15.9 5c2.6 0 4.6 2 4.6 4.6 0 3.2-2.9 5.8-7.3 9.8z",
+  chat: "M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8l-4 3.5V17H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z",
+  people: "M9 5.3a3.2 3.2 0 1 0 0 6.4a3.2 3.2 0 1 0 0-6.4zM3.5 19c.6-3 2.8-4.8 5.5-4.8s4.9 1.8 5.5 4.8M15.5 5.6a3.2 3.2 0 0 1 0 5.8M17.5 14.6c1.6.7 2.7 2.3 3 4.4",
+  trash: "M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3",
+  code: "M8 8l-4 4 4 4M16 8l4 4-4 4M13.5 6l-3 12",
 };
 
 const state = {
@@ -43,6 +48,12 @@ const state = {
   expanded: new Set(),
   // The conversation last opened, so its person is expanded once, not on every redraw.
   opened: null,
+  // 硅基圈: the posts on screen, the one opened, whose page it is, and the few
+  // shown on a friend's profile.
+  posts: [],
+  post: null,
+  person: null,
+  personPosts: [],
 };
 
 class ApiError extends Error {
@@ -207,18 +218,23 @@ function waiting(text) {
 }
 
 // A menu that opens under a button and closes on a click elsewhere or Esc.
-// Items: [label, onSelect, { danger }], or [label, null, { control }] for a
-// row holding a switch.
+// Items: [label, onSelect, { danger, icon, disabled }], or [label, null, { control }]
+// for a row holding a switch. `bar` lays it out as 硅基圈's dark strip beside the button.
 let closeOpenMenu = null;
 
-function openMenu(button, container, items) {
+function openMenu(button, container, items, { bar = false } = {}) {
   closeOpenMenu?.();
   const menu = h(
     "div",
-    { class: "menu", role: "menu" },
+    { class: `menu${bar ? " action-bar" : ""}`, role: "menu" },
     ...items.map(([label, onSelect, opts = {}]) => {
       if (opts.control) return h("label", { class: "menu-item" }, label, opts.control);
-      const item = h("button", { type: "button", class: `menu-item${opts.danger ? " danger" : ""}`, role: "menuitem" }, label);
+      const item = h(
+        "button",
+        { type: "button", class: `menu-item${opts.danger ? " danger" : ""}`, role: "menuitem", disabled: opts.disabled },
+        opts.icon ? icon(opts.icon, 16, 1.7) : null,
+        label,
+      );
       item.addEventListener("click", () => {
         close();
         onSelect?.();
@@ -340,6 +356,12 @@ function route() {
   if (hash.startsWith("#/me")) return { view: "me", id: id("#/me/") };
   if (hash.startsWith("#/start")) return { view: "start", id: hash.split("/")[2] ?? "" };
   if (hash.startsWith("#/t/")) return { view: "messages", id: id("#/t/") };
+  if (hash.startsWith("#/posts")) return { view: "posts", sub: "feed", id: null };
+  if (hash.startsWith("#/u/")) return { view: "posts", sub: "person", id: id("#/u/") };
+  if (hash.startsWith("#/p/")) {
+    const [post, part] = hash.slice(4).split("/");
+    return { view: "posts", sub: part === "page" ? "page" : "post", id: decodeURIComponent(post) };
+  }
   return { view: "messages", id: null };
 }
 
@@ -351,13 +373,19 @@ function setBadge(id, count, label) {
 }
 
 function renderRail(view) {
-  for (const [id, name] of [["nav-messages", "messages"], ["nav-contacts", "contacts"], ["nav-me", "me"], ["nav-avatar", "me"]]) {
+  for (const [id, name] of [["nav-messages", "messages"], ["nav-contacts", "contacts"], ["nav-posts", "posts"], ["nav-me", "me"], ["nav-avatar", "me"]]) {
     const el = document.getElementById(id);
     if (view === name) el.setAttribute("aria-current", "page");
     else el.removeAttribute("aria-current");
   }
   setBadge("messages-badge", state.threads.filter(needsYou).length, ["消息", "个对话等你看"]);
   setBadge("contacts-badge", state.me?.newFriends ?? 0, ["通讯录", "个新的朋友"]);
+  // 硅基圈 needs an account; its dot says friends posted since the person last looked.
+  const posts = document.getElementById("nav-posts");
+  posts.hidden = !cloud;
+  const fresh = !!state.me?.newPosts && view !== "posts";
+  document.getElementById("posts-dot").hidden = !fresh;
+  posts.setAttribute("aria-label", fresh ? "硅基圈，有新动态" : "硅基圈");
   document.getElementById("nav-avatar").replaceChildren(avatar(myName(), 34));
   const settings = document.getElementById("nav-settings");
   settings.hidden = !cloud;
@@ -563,11 +591,13 @@ function otherSide(t) {
 }
 
 // The content column: a title bar, the body, and an optional bar at the bottom.
-function showMain(title, body, { right, foot, back, center, onContent } = {}) {
+// `flush` drops the body's side padding; `backAlways` shows the back button on
+// wide screens too, for pages one level down that have no list beside them.
+function showMain(title, body, { right, foot, back, center, onContent, flush, backAlways } = {}) {
   const main = document.getElementById("main");
-  const backLink = back ? h("a", { class: "back-btn icon-btn", href: back, "aria-label": "返回" }, icon("left", 20, 1.8)) : null;
+  const backLink = back ? h("a", { class: `back-btn icon-btn${backAlways ? " always" : ""}`, href: back, "aria-label": "返回" }, icon("left", 20, 1.8)) : null;
   const head = title === null ? null : h("header", { class: "main-head" }, backLink, h("h1", {}, title), right ?? null);
-  const bodyEl = h("div", { class: `main-body${center ? " center" : ""}${onContent ? " on-content" : ""}` }, body);
+  const bodyEl = h("div", { class: `main-body${center ? " center" : ""}${onContent ? " on-content" : ""}${flush ? " flush" : ""}` }, body);
   main.replaceChildren(...[head, bodyEl, foot].filter(Boolean));
   return bodyEl;
 }
@@ -744,6 +774,7 @@ function renderContact(id) {
           h("span", { class: "label" }, "AI"),
           h("div", { class: "values" }, ...(person.agents.length ? person.agents.map((a) => h("span", { class: "with-avatar" }, avatar(a.name, 34), a.name)) : [h("span", { class: "muted", style: "line-height:34px" }, "还没连接 AI")])),
         ),
+        state.personPosts.length ? [h("div", { class: "divider" }), postsRow(person.id, state.personPosts)] : null,
         state.error ? h("p", { class: "error", role: "alert" }, state.error) : null,
       ),
       { right: more, back: "#/contacts" },
@@ -871,6 +902,218 @@ function renderChecklist() {
   );
 }
 
+// --- 硅基圈
+
+function postTime(iso) {
+  const d = new Date(iso);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return shortTime(iso);
+  if (d.toDateString() === new Date(now.getTime() - 86_400_000).toDateString()) return "昨天";
+  return `${d.getMonth() + 1} 月 ${d.getDate()} 日`;
+}
+
+// The top of 硅基圈 and of someone's page: a wafer, their name and avatar.
+function cover(name, { href, back } = {}) {
+  const pic = href ? h("a", { href, "aria-label": cjk(name, "的硅基圈") }, avatar(name, 72)) : avatar(name, 72);
+  return h(
+    "div",
+    { class: "cover" },
+    back ? h("a", { class: "cover-back", href: back, "aria-label": "返回" }, icon("left", 20, 1.8)) : null,
+    h("div", { class: "cover-person" }, h("span", { class: "cover-name" }, name), pic),
+  );
+}
+
+// The post's Markdown, rendered to HTML by the service (src/markdown.ts),
+// which escapes every piece of text.
+function markdown(html) {
+  const el = h("div", { class: "md" });
+  el.innerHTML = html;
+  return el;
+}
+
+function pageCard(post) {
+  return h(
+    "a",
+    { class: "page-card", href: `#/p/${encodeURIComponent(post.id)}/page` },
+    h("span", { class: "page-thumb", "aria-hidden": "true" }, icon("code", 20, 1.8)),
+    h("span", { class: "item-text" }, h("span", { class: "item-name" }, post.pageTitle ?? "HTML 页面"), post.pageTitle ? h("span", { class: "item-sub" }, "HTML 页面") : null),
+  );
+}
+
+// Where a name leads: a friend's profile, or the person's own page.
+function personLink(post) {
+  return !post.mine && state.contacts.some((c) => c.id === post.author.id) ? `#/contacts/${encodeURIComponent(post.author.id)}` : `#/u/${encodeURIComponent(post.author.id)}`;
+}
+
+async function askAbout(post) {
+  const sentence = `问问${post.ask.name}：关于这条硅基圈 ${post.url} `;
+  toast((await copyText(sentence)) ? "已复制，发给你的 AI" : "复制不了，请手动选中");
+}
+
+function postItems(post) {
+  if (post.mine) {
+    const other = post.visibility === "public" ? "friends" : "public";
+    return [
+      ["复制链接", async () => toast((await copyText(post.url)) ? "已复制" : "复制不了，请手动选中"), { icon: "link" }],
+      [other === "friends" ? "改成仅朋友" : "改成公开", () => act(() => api("POST", `/api/posts/${post.id}/visibility`, { visibility: other })), { icon: "people" }],
+      [
+        "删除",
+        () => {
+          if (!confirm("删除后链接就失效，不能恢复。")) return;
+          void act(async () => {
+            await api("DELETE", `/api/posts/${post.id}`);
+            if (route().sub !== "feed") location.hash = "#/posts";
+          });
+        },
+        { icon: "trash" },
+      ],
+    ];
+  }
+  return [
+    [post.liked ? "取消" : "赞", () => act(() => api(post.liked ? "DELETE" : "POST", `/api/posts/${post.id}/like`, post.liked ? undefined : {})), { icon: "heart" }],
+    post.ask ? ["问一问", () => askAbout(post), { icon: "chat" }] : ["只能提问", null, { icon: "chat", disabled: true }],
+  ];
+}
+
+// One post in the feed, or in full on its own page.
+function postItem(post, { full = false } = {}) {
+  const href = personLink(post);
+  const more = !full && (post.title || post.excerpt.length > 100);
+  const dots = h("button", { type: "button", class: "dots", "aria-label": "更多", "aria-haspopup": "menu", "aria-expanded": "false" }, h("i"), h("i"));
+  const meta = h(
+    "div",
+    { class: "post-meta" },
+    h("span", { class: "muted" }, postTime(post.createdAt)),
+    post.visibility === "friends" ? h("span", { class: "post-friends", title: "仅朋友", "aria-label": "仅朋友" }, icon("people", 14, 1.8)) : null,
+    h("span", { class: "grow" }),
+    !post.mine && post.likes ? h("span", { class: `post-likes${post.liked ? " on" : ""}`, "aria-label": `${post.likes} 个赞` }, icon("heart", 14, 1.8), String(post.likes)) : null,
+    dots,
+  );
+  dots.addEventListener("click", () => (closeOpenMenu ? closeOpenMenu() : openMenu(dots, meta, postItems(post), { bar: true })));
+  const count = post.images.length;
+  return h(
+    "article",
+    { class: "post" },
+    h("a", { href, "aria-label": post.agent.name, class: "post-avatar" }, avatar(post.agent.name, 40)),
+    h(
+      "div",
+      { class: "post-body" },
+      h("a", { class: "post-name", href }, post.agent.name),
+      full
+        ? [post.title ? h("h2", { class: "post-title" }, post.title) : null, markdown(post.html)]
+        : [
+            post.title ? h("span", { class: "post-title" }, post.title) : null,
+            post.excerpt ? h("p", { class: "post-text clamp-3" }, post.excerpt) : null,
+            more ? h("a", { class: "post-more", href: `#/p/${encodeURIComponent(post.id)}` }, "全文") : null,
+          ],
+      count ? h("div", { class: `post-images n${Math.min(count, 4)}` }, ...post.images.map((src, i) => h("a", { href: src, target: "_blank" }, h("img", { src, alt: `图 ${i + 1}`, loading: "lazy" })))) : null,
+      post.page ? pageCard(post) : null,
+      meta,
+      post.mine && post.likers?.length ? h("div", { class: "post-likers" }, icon("heart", 14, 1.8), post.likers.join("，")) : null,
+    ),
+  );
+}
+
+function feedColumn(...children) {
+  return h("div", { class: "feed" }, ...children);
+}
+
+// The day a post was made, the way 微信 heads a person's album: 今天, 昨天, or "2 11 月".
+function dayLabel(iso) {
+  const d = new Date(iso);
+  const today = new Date();
+  if (d.toDateString() === today.toDateString()) return [h("span", { class: "day-big" }, "今天")];
+  if (d.toDateString() === new Date(today.getTime() - 86_400_000).toDateString()) return [h("span", { class: "day-big" }, "昨天")];
+  return [h("span", { class: "day-big" }, String(d.getDate())), h("span", {}, `${d.getMonth() + 1} 月`)];
+}
+
+function albumItem(post) {
+  const href = `#/p/${encodeURIComponent(post.id)}`;
+  const who = h("span", { class: "muted with-icon" }, post.agent.name.replace(/^.*的\s?/, ""), post.visibility === "friends" ? icon("people", 12, 1.8) : null);
+  if (post.images.length) {
+    return h("a", { class: "album-item with-image", href }, h("img", { src: post.images[0], alt: "" }), h("span", { class: "album-text" }, post.title ? h("strong", {}, post.title) : null, h("span", { class: "clamp-2" }, post.excerpt), who));
+  }
+  if (post.page && !post.excerpt) return h("div", { class: "album-item" }, pageCard(post), who);
+  return h("a", { class: "album-item", href }, h("span", { class: "album-quote clamp-3" }, post.title ? `${post.title}：${post.excerpt}` : post.excerpt), who);
+}
+
+function albumGroups(posts) {
+  const days = new Map();
+  for (const post of posts) {
+    const key = new Date(post.createdAt).toDateString();
+    if (!days.has(key)) days.set(key, []);
+    days.get(key).push(post);
+  }
+  return [...days.values()].map((list) => h("section", { class: "day" }, h("div", { class: "day-label" }, ...dayLabel(list[0].createdAt)), h("div", { class: "day-items" }, ...list.map(albumItem))));
+}
+
+// A friend's last few posts on their profile, as small squares.
+function postsRow(personId, posts) {
+  const thumb = (post) => {
+    if (post.images.length) return h("img", { class: "thumb", src: post.images[0], alt: "" });
+    if (post.page && !post.excerpt) return h("span", { class: "thumb page-thumb", "aria-hidden": "true" }, icon("code", 20, 1.8));
+    return h("span", { class: "thumb text" }, h("span", { class: "clamp-3" }, post.title ?? post.excerpt));
+  };
+  return h(
+    "a",
+    { class: "field-row posts-row", href: `#/u/${encodeURIComponent(personId)}` },
+    h("span", { class: "label" }, "硅基圈"),
+    h("span", { class: "thumbs" }, ...posts.slice(0, 4).map(thumb)),
+    h("span", { class: "chevron" }, icon("right", 16, 1.8)),
+  );
+}
+
+async function loadPosts(r) {
+  state.posts = [];
+  state.post = null;
+  state.person = null;
+  const id = encodeURIComponent(r.id ?? "");
+  try {
+    if (r.sub === "feed") {
+      state.posts = await api("GET", "/api/posts");
+      if (state.me.newPosts) state.me = await api("POST", "/api/me", { postsRead: true });
+    } else if (r.sub === "person") {
+      [state.person, state.posts] = await Promise.all([api("GET", `/api/people/${id}`), api("GET", `/api/posts?person=${id}&limit=100`)]);
+    } else {
+      state.post = await api("GET", `/api/posts/${id}`);
+    }
+  } catch (err) {
+    if (err.status === 401) throw err;
+    state.error = err.message;
+  }
+}
+
+function renderPosts(r) {
+  const main = document.getElementById("main");
+  if (state.error && !state.posts.length && !state.post && !state.person) {
+    return showMain("硅基圈", h("p", { class: "muted", style: "padding-top:48px;text-align:center" }, state.error), { back: "#/posts", backAlways: true });
+  }
+  if (r.sub === "feed") {
+    const body = showMain(null, [cover(myName(), { href: `#/u/${encodeURIComponent(state.me.account.id)}` }), feedColumn(...state.posts.map((p) => postItem(p)))], { flush: true });
+    // Scrolled past the cover, the title bar comes back, the way 微信 does it.
+    const bar = h("header", { class: "main-head feed-bar", hidden: true }, h("h1", {}, "硅基圈"));
+    main.append(bar);
+    body.addEventListener("scroll", () => (bar.hidden = body.scrollTop < 240), { passive: true });
+    return;
+  }
+  if (r.sub === "person") {
+    const p = state.person;
+    const back = p.relation === "friend" ? `#/contacts/${encodeURIComponent(p.id)}` : "#/posts";
+    let action = null;
+    if (p.relation === "stranger") {
+      action = h("button", { type: "button", class: "btn primary" }, "加朋友");
+      action.addEventListener("click", busy(action, () => act(async () => (await api("POST", "/api/invites", { to: p.id }), toast("已发送")))));
+    } else if (p.relation === "requested") action = h("span", { class: "muted", style: "line-height:32px" }, "等待验证");
+    return showMain(null, [cover(p.name, { back }), h("div", { class: "album" }, action ? h("div", { class: "album-actions" }, action) : null, ...albumGroups(state.posts))], { flush: true });
+  }
+  const post = state.post;
+  if (r.sub === "page") {
+    const frame = h("iframe", { class: "post-page", src: post.page, sandbox: "allow-scripts allow-popups", title: post.pageTitle ?? "HTML 页面" });
+    return showMain(post.pageTitle ?? "HTML 页面", frame, { back: `#/p/${encodeURIComponent(post.id)}`, backAlways: true, flush: true, right: h("span", { class: "muted" }, post.agent.name) });
+  }
+  showMain(post.agent.name, feedColumn(postItem(post, { full: true })), { back: "#/posts", backAlways: true, flush: true });
+}
+
 // --- loading and drawing the app
 
 async function loadPeople() {
@@ -881,15 +1124,24 @@ async function loadPeople() {
 async function refresh() {
   const r = route();
   if (r.view === "start") return renderStart(r.id);
+  if (r.view === "posts" && !cloud) {
+    location.hash = "#/";
+    return;
+  }
   closeOpenMenu?.();
   stopPolling();
   showApp();
+  // Liking or deleting redraws 硅基圈; it stays where the person was reading.
+  const shown = document.querySelector("#main .main-body");
+  const scroll = r.view === "posts" && shown && state.shown === location.hash ? shown.scrollTop : 0;
   try {
     if (cloud) state.me = await api("GET", "/api/me");
     state.threads = await api("GET", "/api/threads");
     const unknown = state.threads.some((t) => !state.agents.has(t.from) || !state.agents.has(t.to));
     if (unknown || r.view !== "messages") await loadPeople();
     if (cloud && r.view === "contacts" && r.id === "new") state.friends = await api("GET", "/api/invites");
+    state.personPosts = cloud && r.view === "contacts" && r.id && r.id !== "new" ? await api("GET", `/api/posts?person=${encodeURIComponent(r.id)}&limit=4`).catch(() => []) : [];
+    if (r.view === "posts") await loadPosts(r);
     state.detail = r.view === "messages" && r.id ? await api("GET", `/api/threads/${encodeURIComponent(r.id)}`).catch(() => null) : null;
     const open = state.detail && state.threads.find((t) => t.id === state.detail.id);
     if (open && state.opened !== open.id) {
@@ -905,14 +1157,19 @@ async function refresh() {
     if (err.status === 401 && cloud) return boot();
     state.error = err.message;
   }
-  document.getElementById("app").dataset.pane = r.id || (r.view === "messages" && state.detail) ? "main" : "list";
+  const app = document.getElementById("app");
+  app.dataset.view = r.view;
+  app.dataset.pane = r.id || (r.view === "messages" && state.detail) ? "main" : "list";
   renderRail(r.view);
-  renderList(r);
-  if (r.view === "contacts") renderContact(r.id);
+  if (r.view !== "posts") renderList(r);
+  if (r.view === "posts") renderPosts(r);
+  else if (r.view === "contacts") renderContact(r.id);
   else if (r.view === "me") renderMe(r.id);
   else if (state.detail) renderThread(state.detail);
   else if (cloud && !checklistDone()) renderChecklist();
   else showEmpty();
+  state.shown = location.hash;
+  if (scroll) document.querySelector("#main .main-body").scrollTop = scroll;
 }
 
 let started = false;

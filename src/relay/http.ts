@@ -19,14 +19,14 @@ export function send(res: ServerResponse, status: number, body: unknown, headers
 // the route handler parses it, so it is kept here.
 const bodies = new WeakMap<IncomingMessage, Buffer>();
 
-export async function readBody(req: IncomingMessage): Promise<Buffer> {
+export async function readBody(req: IncomingMessage, limit = 1_000_000): Promise<Buffer> {
   const read = bodies.get(req);
   if (read) return read;
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     size += (chunk as Buffer).length;
-    if (size > 1_000_000) throw new RelayError(413, "请求太大");
+    if (size > limit) throw new RelayError(413, "请求太大");
     chunks.push(chunk as Buffer);
   }
   const body = Buffer.concat(chunks);

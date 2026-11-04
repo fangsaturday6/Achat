@@ -164,7 +164,7 @@ describe("reading", () => {
   });
 });
 
-test("invites from before email invites get ids", () => {
+test("invites from before email invites get ids, and then a place to mark requests from 硅基圈", () => {
   const db = new DatabaseSync(":memory:");
   db.exec(`
     CREATE TABLE accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
@@ -181,5 +181,6 @@ test("invites from before email invites get ids", () => {
   const row = db.prepare("SELECT id, email FROM invites").get() as { id: string; email: string | null };
   assert.match(row.id, /^i_[0-9a-f]{16}$/);
   assert.equal(row.email, null);
-  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 3);
+  assert.equal((db.prepare("SELECT email_hidden FROM invites").get() as { email_hidden: number }).email_hidden, 0);
+  assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 4);
 });
