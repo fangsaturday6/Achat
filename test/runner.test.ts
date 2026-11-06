@@ -6,6 +6,11 @@ import { test } from "node:test";
 import { secretStore } from "../src/device.js";
 import { BudgetExceededError, ClaudeRunner, CodexRunner, LoginExpiredError } from "../src/sidecar/runners.js";
 
+// The keychain on this computer may hold the person's own credential. The tests
+// never read it: the fake claude below writes down what it was given.
+process.env.ACHAT_KEYSTORE = "file";
+process.env.ACHAT_HOME = mkdtempSync(join(tmpdir(), "achat-runner-home-"));
+
 // A stand-in for the claude CLI that records how it was called.
 function fakeClaude(dir: string, reply: object): string {
   const bin = join(dir, "claude");
@@ -65,7 +70,7 @@ test("a missing or expired claude login is told apart from other errors", async 
     const bin = fakeClaude(dir, { type: "result", result, is_error: true });
     await assert.rejects(
       new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0.1 }),
-      (err: unknown) => err instanceof LoginExpiredError && err.client === "claude",
+      (err: unknown) => err instanceof LoginExpiredError && err.client === "claude" && !err.withToken,
     );
   }
   delete process.env.ACHAT_CLAUDE_PROJECTS;
@@ -84,6 +89,12 @@ test("background answers use the long-lived credential from achat claude-token",
     secretStore("claude-token").save("sk-ant-oat01-example");
     await new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0.1 });
     assert.equal(JSON.parse(readFileSync(join(dir, "call.json"), "utf8")).token, "sk-ant-oat01-example");
+    // When that credential itself has run out, the error says so.
+    const expired = fakeClaude(dir, { type: "result", result: "API Error: 401 OAuth access token has expired", is_error: true });
+    await assert.rejects(
+      new ClaudeRunner(expired).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0.1 }),
+      (err: unknown) => err instanceof LoginExpiredError && err.withToken,
+    );
   } finally {
     for (const [key, value] of [["ACHAT_HOME", saved.home], ["ACHAT_KEYSTORE", saved.keystore]]) {
       if (value === undefined) delete process.env[key!];

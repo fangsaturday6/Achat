@@ -34,6 +34,8 @@ export class LoginExpiredError extends Error {
   constructor(
     readonly client: "claude" | "codex",
     reason: string,
+    // Claude ran with the credential from `achat claude-token`, so that is what ran out.
+    readonly withToken = false,
   ) {
     super(reason);
   }
@@ -154,7 +156,7 @@ export class ClaudeRunner implements AgentRunner {
     if (!parsed || parsed.is_error || code !== 0 || !parsed.result) {
       const reason = parsed?.result || parsed?.subtype || lastLine(stderr) || `退出码 ${code}`;
       if (/max_budget/i.test(`${parsed?.subtype ?? ""} ${reason}`)) throw new BudgetExceededError(reason);
-      if (LOGIN_TROUBLE.test(reason)) throw new LoginExpiredError("claude", reason);
+      if (LOGIN_TROUBLE.test(reason)) throw new LoginExpiredError("claude", reason, token !== null);
       throw new Error(reason);
     }
     return { text: parsed.result, sessionId: parsed.session_id ?? sessionId, costUsd: parsed.total_cost_usd ?? 0 };

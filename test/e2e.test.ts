@@ -10,7 +10,7 @@ import { createMcpServer } from "../src/mcp/server.js";
 import type { RunningRelay } from "../src/relay/server.js";
 import type { Answer, ApprovalPrompt } from "../src/sidecar/dialog.js";
 import { BudgetExceededError, LoginExpiredError } from "../src/sidecar/runners.js";
-import { Sidecar } from "../src/sidecar/sidecar.js";
+import { loginAdvice, Sidecar } from "../src/sidecar/sidecar.js";
 import { CLAUDE, CODEX, ScriptedRunner, startTestRelay, until } from "./helpers.js";
 
 type Elicit = () => ElicitResult;
@@ -261,6 +261,11 @@ test("a dialog on the computer approves or declines, one at a time, and goes awa
   }
 });
 
+test("when the credential from achat claude-token ran out, the person is told to renew it, not to log in", () => {
+  assert.equal(loginAdvice(new LoginExpiredError("claude", "401", true)), "再运行一次 achat claude-token 换个新凭证，等着的问题会自动接着回答。");
+  assert.match(loginAdvice(new LoginExpiredError("codex", "401")), /codex login/);
+});
+
 test("when Claude's login runs out the thread waits, both sides are told, and the answer comes once it is back", async () => {
   const { relay, client, config } = await startTestRelay();
   const expired = new LoginExpiredError("claude", "API Error: 401 OAuth access token has expired");
@@ -292,7 +297,7 @@ test("when Claude's login runs out the thread waits, both sides are told, and th
       ["回答的 Claude 需要重新登录，登录后会自动接着回答"],
       "the asker is told once, not on every retry",
     );
-    assert.deepEqual(alerts, ["你的 Claude 需要重新登录｜打开 Claude Code 发一句话就能恢复，等着的问题会自动接着回答。"]);
+    assert.deepEqual(alerts, ["你的 Claude 需要重新登录｜打开 Claude Code 发一句话就能恢复，等着的问题会自动接着回答。运行一次 achat claude-token 就不会再过期。"]);
     const checked = textOf(await codex.callTool({ name: "check_thread", arguments: { thread_id: t.id } }));
     assert.match(checked, /需要重新登录/);
   } finally {

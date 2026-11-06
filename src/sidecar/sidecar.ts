@@ -12,7 +12,18 @@ const MIN_ROUND_BUDGET_USD = 0.1;
 // How long a thread waits for the person to log in again before giving up.
 const LOGIN_WAIT_MS = 24 * 60 * 60 * 1000;
 const CLIENT_NAME = { claude: "Claude", codex: "Codex" } as const;
-const RELOGIN = { claude: "打开 Claude Code 发一句话就能恢复", codex: "在终端运行 codex login 就能恢复" } as const;
+const RELOGIN = {
+  claude: "打开 Claude Code 发一句话就能恢复，等着的问题会自动接着回答。运行一次 achat claude-token 就不会再过期。",
+  codex: "在终端运行 codex login 就能恢复，等着的问题会自动接着回答。",
+} as const;
+// When Claude ran with the credential from `achat claude-token`, that is what
+// ran out; logging in to Claude Code again would not be used.
+const RENEW_TOKEN = "再运行一次 achat claude-token 换个新凭证，等着的问题会自动接着回答。";
+
+// What the person is told, once, when an AI's login ran out.
+export function loginAdvice(err: LoginExpiredError): string {
+  return err.withToken ? RENEW_TOKEN : RELOGIN[err.client];
+}
 
 export interface SidecarOptions {
   client: RelayClient;
@@ -198,7 +209,7 @@ export class Sidecar {
       await this.opts.client.note(threadId, `回答的 ${name} 需要重新登录，登录后会自动接着回答`).catch(() => {});
       if (!this.alerted.has(err.client)) {
         this.alerted.add(err.client);
-        this.opts.alert?.(`你的 ${name} 需要重新登录`, `${RELOGIN[err.client]}，等着的问题会自动接着回答。`);
+        this.opts.alert?.(`你的 ${name} 需要重新登录`, loginAdvice(err));
       }
     } else if (Date.now() - since > LOGIN_WAIT_MS) {
       this.waitingLogin.delete(threadId);
