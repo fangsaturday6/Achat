@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import type { AgentClient, AgentConfig } from "./config.js";
 import { signRequest, type DeviceKey } from "./device.js";
 import type { RelayEvent, Scope, ThreadDetail, ThreadStatus, ThreadSummary } from "./types.js";
@@ -9,6 +10,21 @@ export class RelayClientError extends Error {
   ) {
     super(message);
   }
+}
+
+// The longest pause between tries while the relay cannot be reached.
+const MAX_RETRY_MS = 30_000;
+// Replies that mean "come back later", not "no": too many calls, or a gateway
+// whose relay behind it is away.
+const COME_BACK_LATER = new Set([429, 502, 503, 504]);
+
+export interface Patience {
+  // The first pause between tries; it doubles up to MAX_RETRY_MS.
+  retryMs: number;
+  // Ends the wait; the call then rejects.
+  stop: AbortSignal;
+  // Told once per call, when it starts waiting.
+  onWait: (reason: string) => void;
 }
 
 export interface Contact {
@@ -90,7 +106,16 @@ export class RelayClient {
   constructor(
     readonly baseUrl: string,
     private auth: RelayAuth,
+    private patience?: Patience,
   ) {}
+
+  // The same client, except that a call keeps trying while the relay cannot be
+  // reached, and only a reply from the relay, even a refusal, ends it. Trying
+  // again is safe: the relay refuses a second answer in a row, and approving or
+  // ending a thread twice changes nothing.
+  patient(patience: Patience): RelayClient {
+    return new RelayClient(this.baseUrl, this.auth, patience);
+  }
 
   private headers(method: string, path: string, body: string): Record<string, string> {
     if (typeof this.auth === "string") return { "x-achat-token": this.auth };
@@ -100,6 +125,20 @@ export class RelayClient {
   }
 
   private async call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    const patience = this.patience;
+    if (!patience) return this.send<T>(method, path, body, signal);
+    for (let pause = patience.retryMs, told = false; ; pause = Math.min(pause * 2, MAX_RETRY_MS), told = true) {
+      try {
+        return await this.send<T>(method, path, body, signal);
+      } catch (err) {
+        if (err instanceof RelayClientError && !COME_BACK_LATER.has(err.status)) throw err;
+        if (!told) patience.onWait((err as Error).message);
+        await sleep(pause, undefined, { signal: patience.stop });
+      }
+    }
+  }
+
+  private async send<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const text = body === undefined ? "" : JSON.stringify(body);
     const res = await fetch(this.baseUrl + path, {
       method,

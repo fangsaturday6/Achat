@@ -1,4 +1,4 @@
-import type { RelayClient } from "../client.js";
+import { RelayClientError, type RelayClient } from "../client.js";
 import type { AgentClient, AgentConfig } from "../config.js";
 import { redact } from "../redact.js";
 import { cjk } from "../text.js";
@@ -40,6 +40,8 @@ export interface SidecarOptions {
   notify: Notifier;
   // How often a thread waiting for a login tries again.
   loginRetryMs?: number;
+  // The first pause before trying the relay again when it cannot be reached.
+  relayRetryMs?: number;
   webUrl: string;
   log?: (line: string) => void;
 }
@@ -79,6 +81,10 @@ export function responderPrompt(thread: ThreadDetail, message: Message, from: Ag
 // this computer, tells the person, and after approval answers each round in a
 // background session.
 export class Sidecar {
+  // Every call waits while the relay cannot be reached, so a network blip or a
+  // closed laptop neither loses an answer nor ends a thread.
+  private relay: RelayClient;
+  private stopping = new AbortController();
   private agentsById: Map<string, AgentConfig>;
   private inFlight = new Set<string>();
   private again = new Set<string>();
@@ -98,6 +104,11 @@ export class Sidecar {
   constructor(private opts: SidecarOptions) {
     this.agentsById = new Map(opts.agents.map((a) => [a.id, a]));
     this.log = opts.log ?? ((line) => console.log(`[achat sidecar] ${line}`));
+    this.relay = opts.client.patient({
+      retryMs: opts.relayRetryMs ?? 2000,
+      stop: this.stopping.signal,
+      onWait: (reason) => this.log(`连不上 Achat 服务，恢复后接着试：${reason}`),
+    });
   }
 
   private mine(agentId: string): boolean {
@@ -107,7 +118,7 @@ export class Sidecar {
   private async agent(id: string): Promise<AgentConfig | undefined> {
     if (!this.agentsById.has(id)) {
       try {
-        for (const a of await this.opts.client.agents()) this.agentsById.set(a.id, a);
+        for (const a of await this.relay.agents()) this.agentsById.set(a.id, a);
       } catch {
         // fall back to the id
       }
@@ -116,7 +127,7 @@ export class Sidecar {
   }
 
   start(): void {
-    this.unsubscribe = this.opts.client.subscribe(
+    this.unsubscribe = this.relay.subscribe(
       undefined,
       (e) => this.onEvent(e),
       () => void this.recover(),
@@ -124,6 +135,7 @@ export class Sidecar {
   }
 
   stop(): void {
+    this.stopping.abort();
     this.unsubscribe?.();
     this.unsubscribe = null;
     for (const timer of this.timers) clearTimeout(timer);
@@ -133,9 +145,9 @@ export class Sidecar {
   // Picks up requests and rounds that arrived while the sidecar was not running.
   private async recover(): Promise<void> {
     try {
-      const pending = await this.opts.client.listThreads({ status: "pending", surfaced: true });
+      const pending = await this.relay.listThreads({ status: "pending", surfaced: true });
       for (const t of pending) if (this.mine(t.to)) this.prompt(t.id);
-      const active = await this.opts.client.listThreads({ status: "active" });
+      const active = await this.relay.listThreads({ status: "active" });
       for (const t of active) if (this.mine(t.to)) void this.answer(t.id);
     } catch (err) {
       this.log(`恢复时出错：${(err as Error).message}`);
@@ -172,7 +184,7 @@ export class Sidecar {
     this.showing = { id, asking: null };
     this.shown.add(id);
     try {
-      const t = await this.opts.client.getThread(id);
+      const t = await this.relay.getThread(id);
       if (t.status !== "pending") return;
       const from = (await this.agent(t.from))?.name ?? t.from;
       const to = ((await this.agent(t.to))?.name ?? t.to).replace(/^我的/, "你的");
@@ -188,8 +200,8 @@ export class Sidecar {
       }
       this.showing.asking = asking;
       const answer = await asking.answer;
-      if (answer === "approve") await this.opts.client.approve(id);
-      if (answer === "decline") await this.opts.client.decline(id);
+      if (answer === "approve") await this.relay.approve(id);
+      if (answer === "decline") await this.relay.decline(id);
     } catch (err) {
       // Already handled elsewhere, or the relay is away; the request stays on the web page.
       this.log(`${id} 的批准对话框：${(err as Error).message}`);
@@ -206,14 +218,14 @@ export class Sidecar {
     const since = this.waitingLogin.get(threadId);
     if (since === undefined) {
       this.waitingLogin.set(threadId, Date.now());
-      await this.opts.client.note(threadId, `回答的 ${name} 需要重新登录，登录后会自动接着回答`).catch(() => {});
+      await this.relay.note(threadId, `回答的 ${name} 需要重新登录，登录后会自动接着回答`).catch(() => {});
       if (!this.alerted.has(err.client)) {
         this.alerted.add(err.client);
         this.opts.alert?.(`你的 ${name} 需要重新登录`, loginAdvice(err));
       }
     } else if (Date.now() - since > LOGIN_WAIT_MS) {
       this.waitingLogin.delete(threadId);
-      await this.opts.client.fail(threadId, `${name} 一天都没有重新登录，这次没有回答`).catch(() => {});
+      await this.relay.fail(threadId, `${name} 一天都没有重新登录，这次没有回答`).catch(() => {});
       return;
     }
     this.log(`${threadId} 等 ${name} 重新登录：${err.message}`);
@@ -231,7 +243,7 @@ export class Sidecar {
     }
     this.inFlight.add(threadId);
     try {
-      const thread = await this.opts.client.getThread(threadId);
+      const thread = await this.relay.getThread(threadId);
       if (thread.status !== "active" || !this.mine(thread.to)) return;
       const last = thread.messages.filter((m) => m.kind !== "system").at(-1);
       if (!last || last.sender !== thread.from) return;
@@ -240,14 +252,14 @@ export class Sidecar {
       const from = (await this.agent(thread.from)) ?? { id: thread.from, name: thread.from, client: "claude" as const };
       const runner = this.opts.runners[thread.to];
       if (!runner) {
-        await this.opts.client.fail(threadId, `${owner.name} 在这台电脑上还不能做接收方`);
+        await this.relay.fail(threadId, `${owner.name} 在这台电脑上还不能做接收方`);
         return;
       }
 
       const left = Math.round((thread.scope.budgetUsd - thread.costUsd) * 100) / 100;
       const budgetNote = `花费额度用完了（上限 $${thread.scope.budgetUsd.toFixed(2)}，已用 $${thread.costUsd.toFixed(2)}），这一轮没有回答。下次批准时可以把花费上限调高`;
       if (left < MIN_ROUND_BUDGET_USD) {
-        await this.opts.client.end(threadId, budgetNote);
+        await this.relay.end(threadId, budgetNote);
         return;
       }
 
@@ -262,27 +274,36 @@ export class Sidecar {
         });
       } catch (err) {
         if (!(err instanceof BudgetExceededError)) throw err;
-        await this.opts.client.end(threadId, budgetNote);
+        await this.relay.end(threadId, budgetNote);
         return;
       }
       const filtered = redact(out.text);
-      await this.opts.client.postMessage(threadId, {
-        from: thread.to,
-        body: filtered.text,
-        costUsd: out.costUsd,
-        redactions: filtered.count,
-        sessionId: out.sessionId,
-      });
+      await this.relay
+        .postMessage(threadId, {
+          from: thread.to,
+          body: filtered.text,
+          costUsd: out.costUsd,
+          redactions: filtered.count,
+          sessionId: out.sessionId,
+        })
+        .catch((err: unknown) => {
+          // It already arrived and only the reply was lost, or the thread ended
+          // meanwhile. Either way this is not a failure to report.
+          if (!(err instanceof RelayClientError && err.status === 409)) throw err;
+          this.log(`${threadId} 不用再发这次回答：${err.message}`);
+        });
       this.waitingLogin.delete(threadId);
       this.alerted.delete(owner.client);
     } catch (err) {
+      // Stopped while waiting for the relay: the next start picks the thread up.
+      if (this.stopping.signal.aborted) return;
       if (err instanceof LoginExpiredError) {
         await this.waitForLogin(threadId, err);
         return;
       }
       const reason = (err as Error).message || "未知错误";
       this.log(`${threadId} 出错：${reason}`);
-      await this.opts.client.fail(threadId, reason).catch(() => {});
+      await this.relay.fail(threadId, reason).catch((e: Error) => this.log(`${threadId} 的出错没有传到：${e.message}`));
     } finally {
       this.inFlight.delete(threadId);
       if (this.again.delete(threadId)) void this.answer(threadId);
