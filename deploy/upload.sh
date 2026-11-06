@@ -5,6 +5,8 @@
 #   bash deploy/upload.sh root@服务器IP achat.example.com
 # 要同时写入 Resend 设置，在前面加上：
 #   RESEND_API_KEY=re_xxx ACHAT_MAIL_FROM='Achat <login@example.com>' bash deploy/upload.sh ...
+# 构建后用这台电脑上的发布私钥签名（achat release），大家的电脑才会自动更新到这一版。
+# 确定不签名，在前面加上 ACHAT_UNSIGNED=1。
 set -euo pipefail
 
 TARGET="${1:?用法：bash deploy/upload.sh root@服务器IP <域名>}"
@@ -23,6 +25,14 @@ esac
 
 echo "== 构建"
 npm run build >/dev/null
+
+echo "== 签名"
+if [ "${ACHAT_UNSIGNED:-}" = 1 ]; then
+  rm -f release.json release.sig
+  echo "没有签名：电脑不会自动更新到这一版"
+else
+  node dist/cli.js release || { echo "确定不签名就加上 ACHAT_UNSIGNED=1 再运行"; exit 1; }
+fi
 
 echo "== 准备 Node.js 和 Caddy（下载过就不再下载）"
 CACHE=deploy/.cache
@@ -44,7 +54,7 @@ fi
 echo "== 上传到 $TARGET:/opt/achat"
 # COPYFILE_DISABLE 让 macOS 的 tar 不带 ._ 开头的附加文件。
 COPYFILE_DISABLE=1 tar --exclude=./node_modules --exclude=./.git -czf - . |
-  ssh "$TARGET" 'mkdir -p /opt/achat && tar -xzf - -C /opt/achat --no-same-owner'
+  ssh "$TARGET" 'mkdir -p /opt/achat && rm -f /opt/achat/release.json /opt/achat/release.sig && tar -xzf - -C /opt/achat --no-same-owner'
 
 echo "== 在服务器上安装"
 remote_env="ACHAT_MIRROR=cn"

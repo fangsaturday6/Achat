@@ -65,13 +65,17 @@ export class MemoryMailer implements Mailer {
   }
 }
 
-export async function startTestCloud(now?: () => Date): Promise<{ cloud: RunningCloud; mailer: MemoryMailer; dbPath: string }> {
+export async function startTestCloud(
+  now?: () => Date,
+  opts: { appDir?: string } = {},
+): Promise<{ cloud: RunningCloud; mailer: MemoryMailer; dbPath: string }> {
   const dir = mkdtempSync(join(tmpdir(), "achat-cloud-"));
   const mailer = new MemoryMailer();
   const dbPath = join(dir, "achat.db");
   const cloud = await startCloud({
     dbPath,
     webDir: join(import.meta.dirname, "..", "web"),
+    appDir: opts.appDir,
     publicUrl: "https://achat.test",
     mailer,
     port: 0,

@@ -16,6 +16,7 @@ import { RelayClient } from "../client.js";
 import { createMcpServer } from "../mcp/server.js";
 import { plainText, renderMarkdown, splitTitle } from "../markdown.js";
 import { redact } from "../redact.js";
+import { MANIFEST, RELEASE_FILES, SIGNATURE, type Release } from "../release.js";
 import { AccountStore, CLIENT_LABEL, hashSecret, type Account, type AgentRecord, type Device, type Invite } from "./accounts.js";
 import { acceptedEmail, inviteEmail, loginCodeEmail, requestEmail } from "./emails.js";
 import type { Mailer } from "./mailer.js";
@@ -930,9 +931,27 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     res.end(script.replaceAll("__ACHAT_URL__", publicUrl));
   }
 
-  // The built app without node_modules; the installer runs npm ci there.
-  function sendApp(res: ServerResponse): void {
-    const tar = spawn("tar", ["-czf", "-", "-C", appDir, "package.json", "package-lock.json", "dist", "web"], {
+  // The signed release, when the package was signed before it was deployed.
+  async function signedRelease(): Promise<{ manifest: string; signature: string } | null> {
+    const read = (name: string) => readFile(join(appDir, name), "utf8").catch(() => null);
+    const [manifest, signature] = await Promise.all([read(MANIFEST), read(SIGNATURE)]);
+    return manifest && signature ? { manifest, signature } : null;
+  }
+
+  // Computers check this before they update; see src/update.ts.
+  async function sendRelease(res: ServerResponse): Promise<void> {
+    const release = await signedRelease();
+    if (!release) return send(res, 404, { error: "这个服务还没有签过名的版本" });
+    send(res, 200, release);
+  }
+
+  // The built app without node_modules; the installer runs npm ci there. A
+  // signed release has exactly the files it lists, so files a deploy left
+  // behind do not end up in it.
+  async function sendApp(res: ServerResponse): Promise<void> {
+    const release = await signedRelease();
+    const files = release ? [...Object.keys((JSON.parse(release.manifest) as Release).files), MANIFEST, SIGNATURE] : RELEASE_FILES;
+    const tar = spawn("tar", ["-czf", "-", "-C", appDir, ...files], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let failed = "";
@@ -1046,7 +1065,8 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
       if (url.pathname.startsWith("/api/")) return await api(req, res, url);
       if (req.method !== "GET") return send(res, 405, { error: "method not allowed" });
       if (url.pathname === "/install.sh") return await sendInstallScript(res);
-      if (url.pathname === "/download/achat.tgz") return sendApp(res);
+      if (url.pathname === "/download/achat.tgz") return await sendApp(res);
+      if (url.pathname === "/download/release") return await sendRelease(res);
       const post = url.pathname.match(/^\/p\/([A-Za-z0-9_-]+)(?:\/(page|images\/\d+))?$/);
       if (post) return publicPostRoute(req, res, post[1], post[2]);
       const profile = url.pathname.match(/^\/u\/([A-Za-z0-9_-]+)$/);

@@ -25,6 +25,7 @@ const HELP = `用法：achat <命令>
                                     为这台电脑上的 Claude Code 和 Codex 配好 Achat，并设为开机自启
   start [--wait]                    启动 Achat；--wait 在端口被占用时等它空出来
   autostart on|off                  打开或关闭开机自启
+  update                            立即更新到最新版（从服务装的 Achat 会自己更新，一般不用运行）
   status                            列出最近的协作
   doctor                            检查请求能不能提醒到你：后台服务、账号、Claude Code 和 Codex 的提醒
   claude-token [--paste] [--remove] 给后台回答配一个长期有效的 Claude 凭证，不受 Claude Code 登录过期影响：
@@ -35,6 +36,7 @@ const HELP = `用法：achat <命令>
   invite [email]                    加朋友：填邮箱发邀请，不填就生成邀请链接
   serve                             运行云端的 Achat 服务（部署在服务器上，见 deploy/）
   admin hide <动态编号或链接>       在服务器上下架一条硅基圈的动态
+  release                           给构建好的版本签名，电脑只会自动更新到签过名的版本（deploy/upload.sh 部署前运行）
   mcp                               以 MCP 服务运行（由 AI 客户端调用，ACHAT_AGENT 指定身份）
   hook user-prompt --agent <id>     Claude Code 和 Codex 的待批准提醒 hook
 `;
@@ -51,6 +53,11 @@ async function main(): Promise<void> {
     const { hidePost } = await import("./cloud/posts.js");
     const { achatHome } = await import("./config.js");
     console.log(hidePost(process.env.ACHAT_DB ?? join(achatHome(), "cloud.db"), args[1]));
+    return;
+  }
+  if (command === "release") {
+    const { signPackage } = await import("./release.js");
+    console.log(signPackage(packageRoot));
     return;
   }
   const cfg = loadConfig();
@@ -168,6 +175,23 @@ async function main(): Promise<void> {
         const { takeOver } = await import("./running.js");
         console.log("\n" + (await takeOver(local, cli, cfg.port, result.autostarted.log)));
       }
+      return;
+    }
+    case "update": {
+      const { appDir, isInstalledCopy, setupWith, stageUpdate, switchTo } = await import("./update.js");
+      if (!isInstalledCopy(packageRoot)) {
+        console.log(`这份 Achat 是从 ${packageRoot} 的代码运行的：用 git pull、npm install、npm run build 更新，再运行 setup。`);
+        return;
+      }
+      if (!cfg.cloud) throw new Error("这台电脑还没加入 Achat 账号，不知道从哪里更新。先运行 achat link");
+      const staged = await stageUpdate({ url: cfg.cloud.url });
+      if (!staged) {
+        console.log("已经是最新版。");
+        return;
+      }
+      switchTo(staged);
+      console.log(`已更新到 ${staged.release.version}。\n`);
+      console.log(await setupWith(appDir(), true));
       return;
     }
     case "autostart": {

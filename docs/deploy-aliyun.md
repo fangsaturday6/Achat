@@ -65,13 +65,23 @@ RESEND_API_KEY='re_...' ACHAT_MAIL_FROM='Achat <login@example.com>' bash deploy/
 ```
 
 `upload.sh` 会：
-- 在电脑上构建 Achat，下载 Linux 版的 Node.js 和 Caddy；
+- 在电脑上构建 Achat，用这台电脑上的发布私钥签名，下载 Linux 版的 Node.js 和 Caddy；
 - 把它们和代码一起传到服务器的 `/opt/achat`；
 - 在服务器上运行 `deploy/install.sh`，npm 包从国内镜像下载；
 - 装好 systemd 服务和 Caddy（80/443 已被别的程序占着时不装，见下一节）；
 - 把 Resend 设置写进 `/etc/achat/achat.env`。
 
-最后一段输出“Achat 在服务器上正常运行”就成功了。以后更新代码，重复这一步即可；已有的设置和数据不会被覆盖。
+最后一段输出“Achat 在服务器上正常运行”就成功了。以后更新代码，重复这一步即可；已有的设置和数据不会被覆盖。大家的电脑会在半小时内自动换上签过名的新版。
+
+### 发布私钥
+
+电脑只装签名对得上 `src/release.ts` 里公钥的版本，所以服务器被人控制了，也推不了代码到大家的电脑上。私钥只放在负责部署的电脑上：`~/.config/achat/release-key.pem`（换地方用 `ACHAT_RELEASE_KEY` 指定），找不到时 `upload.sh` 会停下；确定不签名，在前面加 `ACHAT_UNSIGNED=1`，这一版电脑就不会自动更新。
+
+把私钥备份到密码管理器里。丢了只能生成一把新的，把公钥换进 `src/release.ts`，再让每台电脑重新运行一次安装命令：
+
+```sh
+node -e 'const c=require("crypto"),f=require("fs"),{publicKey,privateKey}=c.generateKeyPairSync("ed25519");f.writeFileSync(process.argv[1],privateKey.export({type:"pkcs8",format:"pem"}),{mode:0o600,flag:"wx"});console.log(publicKey.export({type:"spki",format:"der"}).toString("base64"))' ~/.config/achat/release-key.pem
+```
 
 ### 服务器上已经有网站占着 80/443
 

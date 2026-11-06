@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.db
 deploy/.cache/
+release.json
+release.sig

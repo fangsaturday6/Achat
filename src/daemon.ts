@@ -1,22 +1,79 @@
 import { createServer, type Server } from "node:http";
+import { dirname } from "node:path";
 import { RelayClient } from "./client.js";
 import { dbPath, loadConfig, type AchatConfig } from "./config.js";
 import { connect, type Connection } from "./connection.js";
 import { agentIdFor } from "./device.js";
 import { checkLink } from "./link.js";
 import { startRelay } from "./relay/server.js";
-import { desktopAlert, desktopAsk } from "./sidecar/dialog.js";
+import { desktopAlert, desktopAsk, type Asker } from "./sidecar/dialog.js";
 import { desktopNotify } from "./sidecar/notify.js";
 import { ClaudeRunner, CodexRunner, type AgentRunner } from "./sidecar/runners.js";
 import { Sidecar } from "./sidecar/sidecar.js";
+import { appDir, isInstalledCopy, setupWith, stageUpdate, switchTo, type Staged } from "./update.js";
+
+const UPDATE_EVERY_MS = 30 * 60 * 1000;
+// An update waits until nothing has been answered or asked for this long.
+const QUIET_MS = 30_000;
 
 interface Running {
   mode: Connection["mode"];
   stop(): Promise<void>;
 }
 
+// Counts answers being written and questions on screen, so that switching to
+// a new version never cuts one off.
+export class Activity {
+  private active = 0;
+  private last: number;
+
+  constructor(private now: () => number = Date.now) {
+    this.last = now();
+  }
+
+  private begin(): void {
+    this.active++;
+  }
+
+  private end(): void {
+    this.active--;
+    this.last = this.now();
+  }
+
+  quietFor(ms: number): boolean {
+    return this.active === 0 && this.now() - this.last >= ms;
+  }
+
+  runner(runner: AgentRunner): AgentRunner {
+    return {
+      run: async (input) => {
+        this.begin();
+        try {
+          return await runner.run(input);
+        } finally {
+          this.end();
+        }
+      },
+    };
+  }
+
+  asker(ask: Asker): Asker {
+    return (prompt) => {
+      const asking = ask(prompt);
+      if (!asking) return null;
+      this.begin();
+      const end = (): void => this.end();
+      asking.answer.then(end, end);
+      return asking;
+    };
+  }
+}
+
+const activity = new Activity();
+const ask = activity.asker(desktopAsk);
+
 function runnerFor(client: AchatConfig["agents"][number]["client"]): AgentRunner {
-  return client === "claude" ? new ClaudeRunner() : new CodexRunner();
+  return activity.runner(client === "claude" ? new ClaudeRunner() : new CodexRunner());
 }
 
 // Binds the local port, waiting for it while another copy holds it if asked.
@@ -69,7 +126,7 @@ async function startLocal(cfg: AchatConfig, webDir: string, wait: boolean): Prom
     client: new RelayClient(relay.url, cfg.token),
     agents: cfg.agents,
     runners,
-    ask: desktopAsk,
+    ask,
     alert: desktopAlert,
     notify: desktopNotify,
     webUrl: relay.url,
@@ -90,7 +147,7 @@ async function startCloudMode(cfg: AchatConfig, conn: Connection, wait: boolean)
   const pointer = await listen(() => startPointer(cfg, conn.webUrl), cfg.port, wait);
   const deviceId = conn.deviceId!;
   const runners = Object.fromEntries(cfg.agents.map((a) => [agentIdFor(deviceId, a.client), runnerFor(a.client)]));
-  const sidecar = new Sidecar({ client: conn.client, agents: [], runners, ask: desktopAsk, alert: desktopAlert, notify: desktopNotify, webUrl: conn.webUrl });
+  const sidecar = new Sidecar({ client: conn.client, agents: [], runners, ask, alert: desktopAlert, notify: desktopNotify, webUrl: conn.webUrl });
   sidecar.start();
   console.log(`Achat 已启动（账号模式）：${conn.webUrl}`);
   return {
@@ -114,10 +171,44 @@ export async function runDaemon(opts: { webDir: string; wait: boolean }): Promis
   let running = await begin(loadConfig());
   let busy = false;
 
+  // A copy installed from the service and run as the background service
+  // (`start --wait`, which launchd or systemd starts again when it exits)
+  // keeps itself up to date.
+  let staged: Staged | null = null;
+  let looking = false;
+  const look = async (): Promise<void> => {
+    const url = loadConfig().cloud?.url;
+    if (!url || staged || looking) return;
+    looking = true;
+    try {
+      staged = await stageUpdate({ url });
+      if (staged) console.log(`新版 ${staged.release.version} 已经装好，手上的事做完就换上`);
+    } catch (err) {
+      console.error(`[achat] 检查更新：${(err as Error).message}`);
+    } finally {
+      looking = false;
+    }
+  };
+  if (opts.wait && isInstalledCopy(dirname(opts.webDir))) {
+    setTimeout(look, 60_000);
+    setInterval(look, UPDATE_EVERY_MS);
+  }
+  // Switches to the staged copy and exits, so the service starts the new one.
+  const restartOn = async (next: Staged): Promise<void> => {
+    staged = null;
+    switchTo(next);
+    console.log(`已换成新版 ${next.release.version}，重新启动`);
+    await setupWith(appDir(), false).catch((err) => console.error(`[achat] 更新 AI 的配置：${(err as Error).message}`));
+    await running.stop();
+    // Non-zero, so that systemd's Restart=on-failure starts it again too.
+    process.exit(75);
+  };
+
   const timer = setInterval(async () => {
     if (busy) return;
     busy = true;
     try {
+      if (staged && activity.quietFor(QUIET_MS)) await restartOn(staged);
       let cfg = loadConfig();
       if (cfg.cloud && !cfg.cloud.linked) {
         const name = await checkLink().catch(() => null);
