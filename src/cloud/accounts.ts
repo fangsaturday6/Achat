@@ -201,6 +201,7 @@ export const CLIENT_LABEL: Record<AiClient, string> = {
   doubao: "豆包",
   workbuddy: "WorkBuddy",
   other: "AI",
+  person: "本人",
 };
 
 type Row = Record<string, string | number | null>;
@@ -406,16 +407,33 @@ export class AccountStore {
       this.db
         .prepare(
           `${AGENT_SELECT} WHERE agents.account_id = ? AND agents.revoked_at IS NULL AND devices.revoked_at IS NULL
+             AND agents.client != 'person'
            ORDER BY agents.created_at`,
         )
         .all(accountId) as Row[]
     ).map(toAgent);
   }
 
+  // The person's own seat, made the first time it is needed: they start
+  // conversations from the web page with it. Not one of their AIs, so the
+  // lists of AIs leave it out.
+  personAgent(accountId: string): AgentRecord {
+    const id = `p_${accountId}`;
+    this.db
+      .prepare("INSERT OR IGNORE INTO agents (id, account_id, device_id, client, created_at) VALUES (?, ?, NULL, 'person', ?)")
+      .run(id, accountId, this.stamp());
+    return this.agent(id)!;
+  }
+
   // "我的 Claude" for the viewer's own AIs, "老方的豆包" for others', with
   // the computer's name added when the person has the same AI on two computers.
+  // A person's seat is "我" or their name.
   agentConfig(agent: AgentRecord, viewerAccountId?: string): AgentConfig {
     const owner = this.account(agent.accountId);
+    if (agent.client === "person") {
+      const name = agent.accountId === viewerAccountId ? "我" : owner ? this.displayName(owner) : "某人";
+      return { id: agent.id, name, client: "person", canReceive: false, owner: agent.accountId };
+    }
     const label = agent.label ?? CLIENT_LABEL[agent.client];
     const whose = agent.accountId === viewerAccountId ? "我的" : `${owner ? this.displayName(owner) : "某人"}的`;
     const space = /^[A-Za-z0-9]/.test(label) ? " " : "";

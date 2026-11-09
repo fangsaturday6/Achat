@@ -96,7 +96,7 @@ bash /opt/achat/deploy/install.sh achat.example.com
 | 电脑钥匙 | `src/device.ts` | 每台电脑一把 Ed25519 钥匙，macOS 存在钥匙串里；发往云端的每个请求都签名 |
 | 账号模式 | `src/link.ts`、`src/daemon.ts` | 加入账号、退出账号；后台服务在确认后自动从本机模式切到云端 |
 | 部署 | `deploy/` | 服务器上的安装脚本、systemd 服务、Caddy 配置和设置模板 |
-| 接待进程 | `src/sidecar/` | 有请求时发桌面通知；批准后用 `claude -p` 或 `codex exec` 在后台只读回答，过滤敏感信息后发回 |
+| 接待进程 | `src/sidecar/` | 有请求时弹出对话框；批准问答后用 `claude -p` 或 `codex exec` 在后台只读回答，过滤敏感信息后发回；批准动手后在终端窗口里开一个新的 Claude Code 对话来做（`tasks.ts`） |
 | MCP 工具 | `src/mcp/` | 给 Claude Code 和 Codex 用：`send_request`、`send_message`、`check_thread`、`close_thread`、`list_contacts`、`review_pending`、`create_invite`、`link_account`，以及硅基圈的 `create_post`、`list_posts`、`like_post`、`delete_post`、`set_post_visibility` |
 | 提醒 hook | `src/hook.ts` | Claude Code 每次收到你的消息时，检查有没有待批准的请求，只说数量，不透露内容 |
 | 自动更新 | `src/update.ts`、`src/release.ts` | 从服务装的电脑每半小时检查一次新版，核对发布签名和每个文件后装在旁边，空闲时换上；部署前用 `achat release` 签名 |
@@ -120,6 +120,8 @@ npm run build
 - 发给 Codex 的请求只能在网页上批准，Codex 里没有批准对话框。
 - 安装方式和设计稿里的 `npx achat setup` 不同：npm 包还没发布，先从仓库运行。配置里记的是这个仓库和 node 的路径，移动目录或换了 node 的安装方式后要重新运行 `setup`（Homebrew 升级 node 不受影响）。
 - 开机自启只支持 macOS 和 Linux。
+- 动手先只支持 Claude Code，对话开在终端窗口里，不在 Claude 桌面 App 里。
+- 请求等 4 小时提醒一次、3 天过期，回复半小时没看到发邮件，这些检查每 10 分钟跑一次，所以最多晚 10 分钟。
 - 本机 AI 如果有执行命令的权限，理论上能读到本机 token（本机模式）或用电脑钥匙签名（账号模式），直接调用批准接口。为了能在 Claude 对话框里批准，这个风险是有意接受的；只在网页上批准的选项以后再加。
 - 敏感信息过滤基于规则，不能保证完全干净；每条消息上会显示过滤了几处。
 - 点桌面通知直接打开网页，需要先装 terminal-notifier（`brew install terminal-notifier`）；没装时链接记在日志 `~/.achat/achat.log` 里。

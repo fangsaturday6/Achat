@@ -18,6 +18,10 @@
   --red: #fa5151;
   --danger: #d93025;
   --name: #576b95;
+  /* 动手: an orange that differs from the blue in lightness too. */
+  --do: #d46b08;
+  --do-soft: #fdf0e3;
+  --do-ink: #a85405;
   --font: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
@@ -198,6 +202,7 @@ button.item { width: 100%; border: none; background: none; text-align: left; }
 .convo .dot { width: 8px; height: 8px; flex-shrink: 0; border-radius: 4px; }
 .convo .dot.on { background: var(--red); }
 .convo-topic { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.convo .mode-do { flex-shrink: 0; display: flex; color: var(--do); }
 .convo-status { flex-shrink: 0; font-size: 12px; line-height: 17px; color: var(--muted); }
 .item.danger { color: var(--danger); }
 .tag-pending { color: var(--danger); }
@@ -221,6 +226,15 @@ button.item { width: 100%; border: none; background: none; text-align: left; }
   border-top: 1px solid var(--line);
 }
 .main-foot .buttons { display: flex; gap: 10px; }
+/* The bottom of a conversation where the person can write, as in WeChat. */
+.main-foot.write-foot { height: auto; padding: 12px 24px 16px; flex-direction: column; align-items: stretch; gap: 8px; }
+.write {
+  height: 64px; padding: 0; border: none; background: transparent; resize: none; outline: none;
+  font: inherit; font-size: 14px; line-height: 20px; color: var(--ink);
+}
+.write-row { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+.card-actions { padding-top: 2px; display: flex; gap: 10px; justify-content: flex-end; }
+.with-avatar .grow { flex: 1; min-width: 0; }
 .empty-mark { font-size: 40px; line-height: 1; font-weight: 500; color: #d6d6d6; user-select: none; }
 
 /* a conversation */
@@ -253,6 +267,13 @@ button.item { width: 100%; border: none; background: none; text-align: left; }
   width: 56px; height: 22px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--field);
   font-size: 12px; text-align: center; color: var(--ink);
 }
+/* 问答 or 动手: a chip with its icon, in the request card's scope line. */
+.mode {
+  height: 22px; padding: 0 6px; border: none; border-radius: 4px; display: inline-flex; gap: 4px; align-items: center;
+  font-size: 12px; background: var(--accent-soft); color: var(--accent-press);
+}
+.mode.do { background: var(--do-soft); color: var(--do-ink); }
+button.mode { cursor: pointer; }
 .typing { display: inline-flex; gap: 4px; align-items: center; height: 20px; }
 .typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); animation: blink 1.2s infinite; }
 .typing i:nth-child(2) { animation-delay: 0.2s; }
@@ -266,7 +287,7 @@ button.item { width: 100%; border: none; background: none; text-align: left; }
 .divider { height: 1px; background: var(--line); }
 .field-row { display: flex; gap: 16px; }
 .field-row > .label { flex: 0 0 48px; line-height: 34px; color: var(--muted); }
-.field-row > .values { display: flex; flex-direction: column; gap: 12px; }
+.field-row > .values { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 .with-avatar { display: flex; gap: 10px; align-items: center; }
 
 .column { max-width: 520px; margin: 0 auto; padding: 48px 0; display: flex; flex-direction: column; gap: 24px; }

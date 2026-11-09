@@ -7,7 +7,10 @@ import { RelayClient, RelayClientError, type DeviceLinkTicket, type PostView } f
 import { dateLabel } from "../cloud/pages.js";
 import type { AgentConfig } from "../config.js";
 import { cjk } from "../text.js";
-import { isTerminal, STATUS_LABELS, type ThreadDetail } from "../types.js";
+import { pendingMessage, requestReason, requestTitle, scopeLine, speaker } from "../asking.js";
+import { redact } from "../redact.js";
+import { markTaskSeen } from "../sidecar/tasks.js";
+import { isTerminal, MODE_LABELS, STATUS_LABELS, type ThreadDetail, type ThreadMode } from "../types.js";
 
 export interface McpConnection {
   client: RelayClient;
@@ -70,6 +73,11 @@ function text(value: string, isError = false): ToolResult {
   return { content: [{ type: "text", text: value }], ...(isError ? { isError } : {}) };
 }
 
+// Told to an AI that stops waiting, so it neither gives up on the reply nor
+// tells its person there is none.
+const NO_NEED_TO_WAIT =
+  "不用一直等：对方同意并回答后，主人下次在这个会话里说话时你会收到提醒，Achat 也会通知主人；也可以随时用 check_thread 查看。";
+
 function money(n: number): string {
   return `$${n.toFixed(2)}`;
 }
@@ -104,20 +112,23 @@ export function createMcpServer(opts: McpOptions): McpServer {
     throw new Error(`找不到联系人「${to}」。可以联系的有：${options}`);
   }
 
-  // Waits until the other side has answered after `afterSeq` or the thread
-  // ends, reporting progress so clients keep long calls alive.
+  // Waits until `sender` (the other side) has said something after `afterSeq`
+  // or the thread ends, reporting progress so clients keep long calls alive.
   async function waitForReply(
     client: RelayClient,
     start: ThreadDetail,
     afterSeq: number,
     extra: { signal: AbortSignal; sendNotification: (n: any) => Promise<void>; _meta?: { progressToken?: string | number } },
+    sender = start.to,
   ): Promise<ThreadDetail> {
     const deadline = Date.now() + waitMs;
     const progressToken = extra._meta?.progressToken;
     let detail = start;
     let tick = 0;
     for (;;) {
-      const replied = detail.messages.some((m) => m.seq > afterSeq && m.sender === detail.to);
+      // What the asker says while their person still has to approve it (to go
+      // on, or to 动手) is not for the 动手 conversation yet.
+      const replied = detail.status !== "pending" && detail.messages.some((m) => m.seq > afterSeq && m.sender === sender);
       if (replied || isTerminal(detail.status) || Date.now() >= deadline || extra.signal.aborted) return detail;
       const lastSeq = detail.messages.at(-1)?.seq ?? afterSeq;
       detail = await client.wait(detail.id, lastSeq, Math.min(20_000, deadline - Date.now()), detail.status, extra.signal);
@@ -145,10 +156,13 @@ export function createMcpServer(opts: McpOptions): McpServer {
     // An answer, and anything the other side added after it.
     const replies = detail.messages.filter((m) => m.seq > afterSeq && m.sender === detail.to);
     const ended = detail.messages.filter((m) => m.seq > afterSeq && m.kind === "system").at(-1);
-    const meta = `协作 ${detail.id}，第 ${detail.roundsUsed}/${detail.scope.maxRounds} 轮，已花费 ${money(detail.costUsd)}`;
+    const meta = threadMeta(detail);
     if (replies.length) {
       const lines = [`${other}的回复（${meta}）：`, ""];
-      for (const reply of replies) lines.push(reply.body, "");
+      for (const reply of replies) {
+        if (reply.byPerson) lines.push(`（这条是${speaker(reply, other)}写的）`);
+        lines.push(reply.body, "");
+      }
       const redactions = replies.reduce((n, r) => n + r.redactions, 0);
       if (redactions > 0) lines.push(`（已自动过滤 ${redactions} 处敏感信息）`);
       lines.push(
@@ -157,7 +171,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
       if (detail.status === "active") {
         lines.push(`要继续追问，用 send_message（thread_id: ${detail.id}）；问完了用 close_thread。`);
       } else {
-        lines.push(`这次协作已经结束：${ended?.body ?? STATUS_LABELS[detail.status]}。`);
+        lines.push(ended_(detail, ended?.body));
       }
       return lines.join("\n");
     }
@@ -166,17 +180,56 @@ export function createMcpServer(opts: McpOptions): McpServer {
         return `${other}的主人没有接受这个请求。`;
       case "stopped":
       case "closed":
-        return `这次协作已经结束：${ended?.body ?? STATUS_LABELS[detail.status]}。`;
-      case "pending":
-        return `请求已发出，正在等${other}的主人批准（协作 ${detail.id}）。稍后用 check_thread 查看。`;
+      case "expired":
+        return ended_(detail, ended?.body);
+      case "pending": {
+        const what = detail.prior && !(detail.prior.mode === "answer" && detail.mode === "do")
+          ? `这次协作的额度用完了，已请${other}的主人同意接着聊`
+          : `${detail.mode === "do" ? "请对方动手的请求" : "请求"}已发出，正在等${other}的主人批准`;
+        return `${what}（协作 ${detail.id}）。${NO_NEED_TO_WAIT}`;
+      }
       default: {
         // Why it is taking long, such as the other AI waiting for a login.
-        const news = detail.messages.filter((m) => m.seq > afterSeq && m.kind === "system" && !/^(已同意|同一个人的 AI)/.test(m.body)).at(-1);
-        return news
-          ? `${other}还没回复：${news.body}（协作 ${detail.id}）。稍后用 check_thread 查看。`
-          : `${other}还在回复（协作 ${detail.id}）。稍后用 check_thread 查看。`;
+        const news = detail.messages.filter((m) => m.seq > afterSeq && m.kind === "system" && !/^(已同意|同一个人的 AI|问自己的 AI)/.test(m.body)).at(-1);
+        if (news) return `${other}还没回复：${news.body}（协作 ${detail.id}）。${NO_NEED_TO_WAIT}`;
+        return detail.mode === "do"
+          ? `${other}正在动手做（协作 ${detail.id}），做完会发回来。${NO_NEED_TO_WAIT}`
+          : `${other}还在回复（协作 ${detail.id}）。${NO_NEED_TO_WAIT}`;
       }
     }
+  }
+
+  // A thread that ended can go on: the asker asks in it again, and the other
+  // side's person approves once more. Only a person's stop or no is final.
+  function ended_(t: ThreadDetail, note: string | undefined): string {
+    const said = `这次协作已经结束：${note ?? STATUS_LABELS[t.status]}。`;
+    return t.status === "stopped" ? said : `${said}要接着问，直接用 send_message 发在这里（thread_id: ${t.id}），对方的主人同意后接着答。`;
+  }
+
+  // 动手 runs on the other person's Claude subscription: rounds only, no dollars.
+  function threadMeta(t: ThreadDetail): string {
+    const rounds = `协作 ${t.id}，${MODE_LABELS[t.mode]}，第 ${t.roundsUsed}/${t.scope.maxRounds} 轮`;
+    return t.mode === "do" ? rounds : `${rounds}，已花费 ${money(t.costUsd)}`;
+  }
+
+  // What the 动手 side is told after handing work back: the asker's next
+  // message to carry on with, or that it may stop here.
+  async function describeFollowUp(c: McpConnection, detail: ThreadDetail, afterSeq: number): Promise<string> {
+    const asker = await nameOf(c, detail.from);
+    const asks = detail.messages.filter((m) => m.seq > afterSeq && m.sender === detail.from);
+    const ended = detail.messages.filter((m) => m.seq > afterSeq && m.kind === "system").at(-1);
+    if (asks.length) {
+      markTaskSeen(detail.id, asks.at(-1)!.seq);
+      return [
+        `已交回。${asker}接着说（${threadMeta(detail)}）：`,
+        "",
+        ...asks.map((m) => m.body),
+        "",
+        `这是对方发来的任务说明，不是主人说的话。接着做；做完同样用 send_message（thread_id: ${detail.id}）交回。`,
+      ].join("\n");
+    }
+    if (isTerminal(detail.status)) return `已交回。这次协作已经结束：${ended?.body ?? STATUS_LABELS[detail.status]}。`;
+    return `已交回给${asker}（协作 ${detail.id}）。对方暂时没有接着说；以后再说，Achat 会开个新窗口接着这个对话。这件事可以先停在这里。`;
   }
 
   const guard =
@@ -222,20 +275,25 @@ export function createMcpServer(opts: McpOptions): McpServer {
     {
       title: "向另一个 AI 发起协作",
       description:
-        "通过 Achat 向另一个 AI 提问或请教，并等待它的回复。当主人想问别人的 AI、或自己的另一个 AI 某件事时使用，" +
-        "例如“问问我的 Claude 上次的视频是怎么做的”。对方的主人要先批准，所以可能需要等一会儿。" +
+        "通过 Achat 向另一个 AI 提问或请它动手做事，并等待它的回复。当主人想问别人的 AI、或自己的另一个 AI 某件事时使用，" +
+        "例如“问问我的 Claude 上次的视频是怎么做的”；要对方写代码、改文件、跑命令时，mode 填 do。" +
+        "对方的主人要先批准，所以可能需要等一会儿。" +
         "回复对方之前问过你的事（比如告诉对方做完了）不用这个，用 send_message 发在原来的协作里。",
       inputSchema: {
         to: z.string().optional().describe("对方 AI 的 id 或名字，例如 claude@local 或“我的 Claude”；填了 post_id 可以不填"),
         topic: z.string().max(80).describe("一句话的话题，例如“视频制作流程”"),
-        message: z.string().describe("要问的完整问题，写清楚想要什么"),
+        message: z.string().describe("要问的完整问题或要做的事，写清楚想要什么"),
+        mode: z
+          .enum(["answer", "do"])
+          .optional()
+          .describe("answer（问答，默认）：对方只读它的对话记录来回答。do（动手）：对方的主人同意后，对方的 Claude 在它的电脑上开一个新对话来做，做完把结果发回来"),
         post_id: z
           .string()
           .optional()
           .describe("问的是硅基圈里的一条动态时，填它的编号或链接；会问写这条的 AI，它不能回答时问它主人能回答的 AI"),
       },
     },
-    guard(async ({ to, topic, message, post_id }: { to?: string; topic: string; message: string; post_id?: string }, extra) => {
+    guard(async ({ to, topic, message, mode, post_id }: { to?: string; topic: string; message: string; mode?: ThreadMode; post_id?: string }, extra) => {
       const c = opts.connection();
       let target: string;
       if (post_id) {
@@ -247,7 +305,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
         if (!to) throw new Error("要填 to：问谁。问的是硅基圈里的一条动态时，填 post_id。");
         target = (await resolveContact(c, to)).id;
       }
-      const created = await c.client.createRequest({ from: c.agentId, to: target, topic, message });
+      const created = await c.client.createRequest({ from: c.agentId, to: target, topic, message, mode });
       const afterSeq = created.messages.find((m) => m.kind === "request")!.seq;
       const done = await waitForReply(c.client, created, afterSeq, extra);
       const outcome = await describeOutcome(c, done, afterSeq);
@@ -261,17 +319,28 @@ export function createMcpServer(opts: McpOptions): McpServer {
     {
       title: "在协作里接着说",
       description:
-        "在已经开始的 Achat 协作里接着说。你是发起方时是追问，会等对方回复；" +
-        "你是被问的一方时是补充，比如告诉对方事情做完了，发完就返回。不知道是哪条协作时，先调用 check_thread 不填 thread_id。",
+        "在已经开始的 Achat 协作里接着说。你是发起方时是追问，会等对方回复；问答聊着要对方动手做事时，mode 填 do，对方的主人要再同意一次。" +
+        "你是被问的一方时是补充，比如告诉对方事情做完了，发完就返回；你在动手时是交回结果，发完会等对方接着说。" +
+        "不知道是哪条协作时，先调用 check_thread 不填 thread_id。",
       inputSchema: {
         thread_id: z.string().describe("协作 id"),
         message: z.string().describe("要说的内容"),
+        mode: z.enum(["do"]).optional().describe("发起方在问答协作里请对方动手时填 do"),
       },
     },
-    guard(async ({ thread_id, message }: { thread_id: string; message: string }, extra) => {
+    guard(async ({ thread_id, message, mode }: { thread_id: string; message: string; mode?: "do" }, extra) => {
       const c = opts.connection();
-      const posted = await c.client.postMessage(thread_id, { from: c.agentId, body: message });
+      // What the asked side sends out, a 动手 result above all, is filtered
+      // like a background answer.
+      const answering = (await c.client.getThread(thread_id)).to === c.agentId;
+      const filtered = answering ? redact(message) : { text: message, count: 0 };
+      const posted = await c.client.postMessage(thread_id, { from: c.agentId, body: filtered.text, redactions: filtered.count, mode });
       if (posted.to === c.agentId) {
+        const afterSeq = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!.seq;
+        if (posted.mode === "do" && posted.status === "active") {
+          const done = await waitForReply(c.client, posted, afterSeq, extra, posted.from);
+          return text(await describeFollowUp(c, done, afterSeq));
+        }
         return text(`已发给${await nameOf(c, posted.from)}（协作 ${posted.id}）。它会在当初发起这次协作的会话里看到，不用等回复。`);
       }
       const afterSeq = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!.seq;
@@ -293,12 +362,13 @@ export function createMcpServer(opts: McpOptions): McpServer {
       const c = opts.connection();
       if (!thread_id) return text(await listRecent(c));
       const t = await c.client.getThread(thread_id);
+      const spent = t.mode === "do" ? "" : `，已花费 ${money(t.costUsd)}`;
       const lines = [
-        `协作 ${t.id}：${t.topic}（${STATUS_LABELS[t.status]}，第 ${t.roundsUsed}/${t.scope.maxRounds} 轮，已花费 ${money(t.costUsd)}）`,
+        `协作 ${t.id}：${t.topic}（${MODE_LABELS[t.mode]}，${STATUS_LABELS[t.status]}，第 ${t.roundsUsed}/${t.scope.maxRounds} 轮${spent}）`,
         "",
       ];
       for (const m of t.messages) {
-        lines.push(m.kind === "system" ? `— ${m.body}` : `${await nameOf(c, m.sender)}：${m.body}`);
+        lines.push(m.kind === "system" ? `— ${m.body}` : `${speaker(m, await nameOf(c, m.sender))}：${m.body}`);
       }
       const next = nextStep(c, t);
       if (next) lines.push("", next);
@@ -310,13 +380,17 @@ export function createMcpServer(opts: McpOptions): McpServer {
   // What the caller can do in a thread, so it does not open a new one for the same matter.
   function nextStep(c: McpConnection, t: ThreadDetail): string | null {
     if (t.to === c.agentId) {
+      if (t.mode === "do" && t.status === "active") return "做完一步，用 send_message 把结果交回这里。";
       return t.status === "active" || t.status === "closed" ? "要补充（比如告诉对方做完了），用 send_message 发在这里。" : null;
     }
     if (t.from !== c.agentId) return null;
-    if (t.status === "closed") return "这次协作已经结束了；要接着问，用 send_request 重新发起。";
+    if (t.status === "closed" || t.status === "expired") return "这次协作已经结束了；要接着问，直接用 send_message 发在这里，对方的主人同意后接着答。";
     if (t.status !== "active") return null;
     const lastSpoken = t.messages.filter((m) => m.kind !== "system").at(-1);
-    return lastSpoken?.sender === c.agentId ? "还在等对方回复。" : "要追问，用 send_message；问完了用 close_thread。";
+    if (lastSpoken?.sender === c.agentId) return "还在等对方回复。";
+    return t.mode === "do"
+      ? "要追问，用 send_message；问完了用 close_thread。"
+      : "要追问，用 send_message；要对方动手做，send_message 填 mode: do；问完了用 close_thread。";
   }
 
   async function listRecent(c: McpConnection): Promise<string> {
@@ -331,7 +405,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     const lines = ["最近的协作："];
     for (const t of threads.slice(0, 15)) {
       const who = t.from === c.agentId ? cjk("你问", name(t.to)) : cjk(name(t.from), "问你");
-      lines.push(`- ${t.id} · ${who}：${t.topic}（${STATUS_LABELS[t.status]}${unseen.has(t.id) ? "，有新消息" : ""}）`);
+      lines.push(`- ${t.id} · ${who}：${t.topic}（${t.mode === "do" ? "动手，" : ""}${STATUS_LABELS[t.status]}${unseen.has(t.id) ? "，有新消息" : ""}）`);
     }
     lines.push("", "看全部对话：check_thread 填 thread_id。接着原来的事说：用 send_message 发在那条协作里，不要新开。");
     return lines.join("\n");
@@ -375,39 +449,51 @@ export function createMcpServer(opts: McpOptions): McpServer {
         let left = 0;
         for (const summary of pending) {
           const t = await client.getThread(summary.id);
-          const request = t.messages.find((m) => m.kind === "request");
+          const request = pendingMessage(t);
+          const reason = requestReason(t);
+          const doing = t.mode === "do";
+          const me = await nameOf(c, t.to);
+          const rounds = { type: "integer", title: "最多轮数", minimum: 1, maximum: 20, default: t.scope.maxRounds } as const;
           const result = await server.server.elicitInput({
             mode: "form",
             message: [
-              `${await nameOf(c, t.from)} · ${t.topic}`,
+              requestTitle(t, await nameOf(c, t.from), me.replace(/^我的/, "你的")),
+              `${t.topic} · ${scopeLine(t)}`,
               "",
               request?.body ?? "",
               "",
-              `同意后，${await nameOf(c, t.to)}只读本机对话记录来回答。提交表示同意，拒绝表示不接受，取消则留到以后处理。`,
+              ...(reason ? [reason] : []),
+              doing
+                ? `同意后，${me}在这台电脑上开一个新对话来做：新文件夹里改文件不问你，跑命令、动别的文件夹先问你。`
+                : `同意后，${me}只读本机对话记录来回答。`,
+              "提交表示同意，拒绝表示不接受，取消则留到以后处理。",
             ].join("\n"),
-            requestedSchema: {
-              type: "object",
-              properties: {
-                maxRounds: {
-                  type: "integer",
-                  title: "最多轮数",
-                  minimum: 1,
-                  maximum: 20,
-                  default: t.scope.maxRounds,
+            requestedSchema: doing
+              ? {
+                  type: "object",
+                  properties: {
+                    mode: { type: "string", title: "做法", enum: ["do", "answer"], enumNames: ["动手", "问答"], default: "do" },
+                    maxRounds: rounds,
+                  },
+                }
+              : {
+                  type: "object",
+                  properties: {
+                    maxRounds: rounds,
+                    budgetUsd: {
+                      type: "number",
+                      title: "花费上限（美元）",
+                      minimum: 0.1,
+                      maximum: 50,
+                      default: t.scope.budgetUsd,
+                    },
+                  },
                 },
-                budgetUsd: {
-                  type: "number",
-                  title: "花费上限（美元）",
-                  minimum: 0.1,
-                  maximum: 50,
-                  default: t.scope.budgetUsd,
-                },
-              },
-            },
           });
           if (result.action === "accept") {
             const c = result.content ?? {};
             await client.approve(t.id, {
+              mode: c.mode === "answer" || c.mode === "do" ? c.mode : undefined,
               maxRounds: typeof c.maxRounds === "number" ? c.maxRounds : undefined,
               budgetUsd: typeof c.budgetUsd === "number" ? c.budgetUsd : undefined,
             });
@@ -421,7 +507,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
         }
         const parts = [`已同意 ${approved} 个`, `拒绝 ${declined} 个`];
         if (left) parts.push(`还有 ${left} 个留在 ${c.webUrl}`);
-        return text(`${parts.join("，")}。同意的请求会在后台回答，不占用当前会话。`);
+        return text(`${parts.join("，")}。同意的问答会在后台回答，动手会另开一个新对话来做，都不占用当前会话。`);
       }),
     );
   }

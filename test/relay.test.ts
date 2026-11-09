@@ -72,7 +72,17 @@ describe("relay", () => {
     assert.equal(t.roundsUsed, 2);
     assert.equal(t.costUsd, 0.2);
     assert.match(t.messages.at(-1)!.body, /2 轮上限/);
-    await assert.rejects(client.postMessage(created.id, { from: CODEX, body: "还有吗" }), /已经结束/);
+    // Asking again once the rounds are used up asks the person to go on, with
+    // a fresh allowance once they agree.
+    t = await client.postMessage(created.id, { from: CODEX, body: "还有吗" });
+    assert.equal(t.status, "pending");
+    assert.deepEqual(t.prior, { status: "closed", mode: "answer" });
+    assert.equal(t.messages.at(-1)!.kind, "request");
+    t = await client.approve(created.id, { maxRounds: 3 });
+    assert.equal(t.status, "active");
+    assert.equal(t.roundsUsed, 0);
+    assert.equal(t.costUsd, 0);
+    assert.equal(t.prior, null);
   });
 
   test("the asked side can add to a thread at any time, without using a round", async () => {
@@ -92,7 +102,11 @@ describe("relay", () => {
     t = await client.postMessage(created.id, { from: CLAUDE, body: "已经上线了" });
     assert.equal(t.status, "closed", "a word after the end does not open it again");
     assert.equal(t.messages.at(-1)!.body, "已经上线了");
-    await assert.rejects(client.postMessage(created.id, { from: CODEX, body: "好的" }), /重新发起/);
+    t = await client.postMessage(created.id, { from: CODEX, body: "好的，再问一句" });
+    assert.equal(t.status, "pending", "asking after the end asks the person to go on");
+    t = await client.decline(created.id);
+    assert.equal(t.status, "closed");
+    assert.equal(t.messages.at(-1)!.body, "没有同意接着聊");
 
     const stopped = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "停掉的", message: "问题" });
     await client.approve(stopped.id);

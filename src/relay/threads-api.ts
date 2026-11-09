@@ -1,10 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AgentConfig } from "../config.js";
-import type { Thread, ThreadStatus } from "../types.js";
+import type { Thread, ThreadMode, ThreadStatus } from "../types.js";
 import { optNum, readJson, send, str } from "./http.js";
 import { RelayError, type RelayService } from "./service.js";
 
-const STATUSES = new Set(["pending", "active", "declined", "closed", "stopped"]);
+const STATUSES = new Set(["pending", "active", "declined", "closed", "stopped", "expired"]);
 
 // Who is calling and what they may do. The local relay has one caller that
 // may do everything; in the cloud a caller is a logged-in person or one of
@@ -19,6 +19,10 @@ export interface Viewer {
   actsAs(agent: string): boolean;
   // Whether the caller can approve or decline requests to agents it sees.
   approves: boolean;
+  // The caller's own seat when the caller is the person on the web page:
+  // they start conversations from it, and write in their AIs' threads as
+  // themselves. Null for computers and AIs.
+  person: string | null;
   // The AIs the caller can contact, named from its point of view.
   agents(): AgentConfig[];
   // Throws if `from` may not contact `to`; returns true when the request needs
@@ -28,6 +32,11 @@ export interface Viewer {
 
 function readable(viewer: Viewer, t: Thread): boolean {
   return viewer.sees(t.from) || viewer.sees(t.to);
+}
+
+// Checked by the service, which says what the allowed values are.
+function modeOf(body: Record<string, unknown>): ThreadMode | undefined {
+  return body.mode === undefined || body.mode === null ? undefined : (body.mode as ThreadMode);
 }
 
 // Handles /api/agents, /api/events and /api/threads/*; returns false for
@@ -96,12 +105,15 @@ export async function threadsApi(
     const body = await readJson(req);
     const from = str(body, "from");
     const to = str(body, "to");
-    if (!viewer.actsAs(from)) throw new RelayError(403, "只能以这台电脑上的 AI 的身份发请求");
+    if (!viewer.actsAs(from) && from !== viewer.person) throw new RelayError(403, "只能以这台电脑上的 AI 的身份发请求");
     const autoApprove = viewer.reach(from, to);
     send(
       res,
       201,
-      service.createRequest({ from, to, topic: str(body, "topic"), message: str(body, "message") }, { autoApprove }),
+      service.createRequest(
+        { from, to, topic: str(body, "topic"), message: str(body, "message"), mode: modeOf(body), byPerson: from === viewer.person },
+        { autoApprove },
+      ),
     );
     return true;
   }
@@ -139,7 +151,7 @@ export async function threadsApi(
   switch (action) {
     case "approve":
       if (!viewer.approves || !viewer.sees(thread.to)) forbid("只有接收方的主人可以批准");
-      send(res, 200, service.approve(id, { maxRounds: optNum(body, "maxRounds"), budgetUsd: optNum(body, "budgetUsd") }));
+      send(res, 200, service.approve(id, { maxRounds: optNum(body, "maxRounds"), budgetUsd: optNum(body, "budgetUsd"), mode: modeOf(body) }));
       return true;
     case "read":
       if (!viewer.approves) forbid("只有人可以标记已读");
@@ -179,9 +191,15 @@ export async function threadsApi(
       if (!viewer.actsAs(thread.to)) forbid("只有接收方可以结束");
       send(res, 200, service.end(id, str(body, "note")));
       return true;
+    case "more":
+      if (!viewer.actsAs(thread.to)) forbid("只有接收方可以申请接着聊");
+      send(res, 200, service.askMore(id, str(body, "note")));
+      return true;
     case "messages": {
       const from = str(body, "from");
-      if (!viewer.actsAs(from)) forbid("只能以这台电脑上的 AI 的身份发消息");
+      // The person writes in a thread of their own AIs as themselves.
+      const byPerson = viewer.person !== null && (from === viewer.person || (body.byPerson === true && viewer.sees(from)));
+      if (!viewer.actsAs(from) && !byPerson) forbid("只能以这台电脑上的 AI 的身份发消息");
       send(
         res,
         201,
@@ -191,6 +209,8 @@ export async function threadsApi(
           costUsd: optNum(body, "costUsd"),
           redactions: optNum(body, "redactions"),
           sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
+          mode: modeOf(body),
+          byPerson,
         }),
       );
       return true;

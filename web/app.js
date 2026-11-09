@@ -3,7 +3,7 @@
 // Layout, colours and wording follow docs/ui.md.
 const token = window.ACHAT_TOKEN;
 const cloud = !token;
-const STATUS = { pending: "待批准", active: "进行中", declined: "已拒绝", closed: "已结束", stopped: "已停止" };
+const STATUS = { pending: "待批准", active: "进行中", declined: "已拒绝", closed: "已结束", stopped: "已停止", expired: "已过期" };
 
 // How each kind of AI looks where the person picks or manages their own AIs.
 const CLIENTS = {
@@ -33,7 +33,12 @@ const ICONS = {
   people: "M9 5.3a3.2 3.2 0 1 0 0 6.4a3.2 3.2 0 1 0 0-6.4zM3.5 19c.6-3 2.8-4.8 5.5-4.8s4.9 1.8 5.5 4.8M15.5 5.6a3.2 3.2 0 0 1 0 5.8M17.5 14.6c1.6.7 2.7 2.3 3 4.4",
   trash: "M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3",
   code: "M8 8l-4 4 4 4M16 8l4 4-4 4M13.5 6l-3 12",
+  // 问答 and 动手, as in docs/ui.md.
+  ask: "M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-8l-4 3.5V17H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM9.8 8.6a2.2 2.2 0 1 1 3.2 2c-.6.3-1 .8-1 1.4M12 14.4h.01",
+  wrench: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z",
 };
+
+const MODE = { answer: "问答", do: "动手" };
 
 const state = {
   me: null,
@@ -356,6 +361,7 @@ function route() {
   if (hash.startsWith("#/me")) return { view: "me", id: id("#/me/") };
   if (hash.startsWith("#/start")) return { view: "start", id: hash.split("/")[2] ?? "" };
   if (hash.startsWith("#/t/")) return { view: "messages", id: id("#/t/") };
+  if (hash.startsWith("#/new/")) return { view: "messages", id: null, compose: id("#/new/") };
   if (hash.startsWith("#/posts")) return { view: "posts", sub: "feed", id: null };
   if (hash.startsWith("#/u/")) return { view: "posts", sub: "person", id: id("#/u/") };
   if (hash.startsWith("#/p/")) {
@@ -537,6 +543,7 @@ function renderPeople(r) {
           "a",
           { class: "convo", href: `#/t/${t.id}`, "aria-current": r.id === t.id ? "true" : null },
           h("span", { class: `dot${t.unread ? " on" : ""}`, "aria-label": t.unread ? "未读" : null }),
+          t.mode === "do" ? h("span", { class: "mode-do", role: "img", "aria-label": "动手" }, icon("wrench", 14, 2)) : null,
           h("span", { class: "convo-topic" }, t.topic),
           status,
         ),
@@ -555,7 +562,7 @@ function renderListBody(r) {
   if (r.view === "contacts") {
     if (!cloud) {
       body.replaceChildren(
-        ...[...state.agents.values()].filter((a) => matches(a.name)).map((a) => item(`#/contacts/${encodeURIComponent(a.id)}`, r.id === a.id, avatar(a.name, 40), a.name)),
+        ...[...state.agents.values()].filter((a) => a.client !== "person" && matches(a.name)).map((a) => item(`#/contacts/${encodeURIComponent(a.id)}`, r.id === a.id, avatar(a.name, 40), a.name)),
       );
       return;
     }
@@ -618,89 +625,200 @@ async function act(fn) {
 
 // --- a conversation
 
-function requestCard(t, m) {
-  // The topic is the title above; the card holds the question and its scope.
-  const deciding = t.status === "pending" && isMine(t.to);
-  const scope = deciding
-    ? h(
-        "div",
-        { class: "scope" },
-        `${agentName(t.to)} · 只读 · `,
-        h("input", { type: "number", min: "1", max: "20", value: String(t.scope.maxRounds), "aria-label": "最多轮数", id: "scope-rounds" }),
-        " 轮 · $",
-        h("input", { type: "number", min: "0.1", max: "50", step: "0.1", value: t.scope.budgetUsd.toFixed(2), "aria-label": "花费上限（美元）", id: "scope-budget" }),
-      )
-    : t.status === "pending"
-      ? h("div", { class: "scope" }, `${agentName(t.to)} · 只读 · ${t.scope.maxRounds} 轮 · $${t.scope.budgetUsd.toFixed(2)}`)
-      : null;
-  return h("article", { class: "card", "aria-label": `请求：${t.topic}` }, h("p", {}, m.body), scope);
+// 问答 or 动手 with its icon. While the person decides on a 动手, or picks
+// one for a new conversation, it is a button that switches between the two.
+function modeChip(mode, onToggle) {
+  const chip = h(onToggle ? "button" : "span", onToggle ? { type: "button" } : {});
+  const paint = (m) => {
+    chip.className = `mode ${m}`;
+    chip.replaceChildren(icon(m === "do" ? "wrench" : "ask", 13, 2), MODE[m]);
+    if (onToggle) chip.setAttribute("aria-label", `做法：${MODE[m]}，点一下切换`);
+  };
+  paint(mode);
+  chip.dataset.mode = mode;
+  if (onToggle) {
+    chip.addEventListener("click", () => {
+      chip.dataset.mode = chip.dataset.mode === "do" ? "answer" : "do";
+      paint(chip.dataset.mode);
+      onToggle(chip.dataset.mode);
+    });
+  }
+  return chip;
+}
+
+// The person's own seat, from which they start conversations and write.
+function mySeat() {
+  return [...state.agents.values()].find((a) => a.client === "person" && isMine(a.id))?.id ?? null;
+}
+
+// Who wrote a message: the AI, or the person themself on the web page.
+function writerName(m) {
+  if (!m.byPerson) return agentName(m.sender);
+  return isMine(m.sender) ? "我" : ownerOf(agentName(m.sender));
+}
+
+// A request: the question, and while it waits, its scope. The person who
+// decides changes the scope and answers right here, under the request.
+function requestCard(t, m, waiting) {
+  if (!waiting) return h("article", { class: "card", "aria-label": `请求：${t.topic}` }, h("p", {}, m.body));
+  const spend = t.mode === "do" ? "" : ` · $${t.scope.budgetUsd.toFixed(2)}`;
+  if (!isMine(t.to)) {
+    const scope = h("div", { class: "scope" }, `${agentName(t.to)} · `, modeChip(t.mode), ` · ${t.scope.maxRounds} 轮${spend}`);
+    return h("article", { class: "card", "aria-label": `请求：${t.topic}` }, h("p", {}, m.body), scope);
+  }
+  const budget = h(
+    "span",
+    { hidden: t.mode === "do" },
+    " · $",
+    h("input", { type: "number", min: "0.1", max: "50", step: "0.1", value: t.scope.budgetUsd.toFixed(2), "aria-label": "花费上限（美元）" }),
+  );
+  const chip = t.mode === "do" ? modeChip("do", (mode) => (budget.hidden = mode === "do")) : modeChip("answer");
+  const rounds = h("input", { type: "number", min: "1", max: "20", value: String(t.scope.maxRounds), "aria-label": "最多轮数" });
+  const scope = h("div", { class: "scope" }, `${agentName(t.to)} · `, chip, " · ", rounds, " 轮", budget);
+  const decline = h("button", { type: "button", class: "btn", onclick: () => act(() => api("POST", `/api/threads/${t.id}/decline`, {})) }, "拒绝");
+  const approve = h(
+    "button",
+    {
+      type: "button",
+      class: "btn primary",
+      onclick: () =>
+        act(() =>
+          api("POST", `/api/threads/${t.id}/approve`, {
+            mode: chip.dataset.mode,
+            maxRounds: Number(rounds.value),
+            budgetUsd: Number(budget.querySelector("input").value),
+          }),
+        ),
+    },
+    "同意",
+  );
+  const error = state.error ? h("p", { class: "error", role: "alert" }, state.error) : null;
+  return h("article", { class: "card", "aria-label": `请求：${t.topic}` }, h("p", {}, m.body), scope, error, h("div", { class: "card-actions" }, decline, approve));
+}
+
+// The bottom of a conversation, as in WeChat: what the person writes, the
+// rounds and money so far on the left, 停止 and 发送 on the right.
+function writeBox({ label, status, extra, send }) {
+  const box = h("textarea", { class: "write", "aria-label": label, rows: "3" });
+  const error = h("p", { class: "error", role: "alert", hidden: true });
+  const button = h("button", { type: "button", class: "btn primary" }, "发送");
+  const go = async () => {
+    const text = box.value.trim();
+    if (!text || button.disabled) return;
+    button.disabled = true;
+    error.hidden = true;
+    try {
+      await send(text);
+    } catch (err) {
+      error.textContent = err.message;
+      error.hidden = false;
+      button.disabled = false;
+    }
+  };
+  button.addEventListener("click", go);
+  // Return sends, Shift+Return starts a new line, as in WeChat.
+  box.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      void go();
+    }
+  });
+  const foot = h(
+    "footer",
+    { class: "main-foot write-foot" },
+    box,
+    error,
+    h("div", { class: "write-row" }, status, h("div", { class: "buttons" }, ...(extra ?? []), button)),
+  );
+  return { foot, box };
 }
 
 function renderThread(t) {
   const ownPair = isMine(t.from) && isMine(t.to);
-  const onRight = (sender) => (ownPair ? sender === t.to : isMine(sender));
+  const startedByMe = state.agents.get(t.from)?.client === "person";
+  // Between one's own: the person, or else the AI that answers, on the right.
+  const onRight = (sender) => (ownPair ? sender === (startedByMe ? t.from : t.to) : isMine(sender));
   // One person can have several AIs, so each message says which one wrote it.
-  const row = (sender, content) =>
+  const row = (m, content) =>
     h(
       "div",
-      { class: `msg${onRight(sender) ? " right" : ""}` },
-      avatar(agentName(sender), 34),
-      h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, agentName(sender)), content),
+      { class: `msg${onRight(m.sender) ? " right" : ""}` },
+      avatar(agentName(m.sender), 34),
+      h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, writerName(m)), content),
     );
   const log = h("div", { class: "log", role: "log", "aria-label": "对话原文" }, h("span", { class: "event" }, shortTime(t.createdAt)));
+  // While pending, the asker's latest message is what the person decides on.
+  const waiting = t.status === "pending" ? t.messages.filter((m) => m.kind !== "system" && m.sender === t.from).at(-1) : null;
   for (const m of t.messages) {
-    if (m.kind === "request") log.append(row(m.sender, requestCard(t, m)));
-    else if (m.kind === "system") log.append(h("span", { class: "event" }, m.body));
+    if (m.kind === "system") log.append(h("span", { class: "event" }, m.body));
+    else if (m.kind === "request" || m === waiting) log.append(row(m, requestCard(t, m, m === waiting)));
     else {
       const bubble = h("div", { class: "bubble" }, m.body);
-      log.append(
-        row(m.sender, m.redactions > 0 ? h("div", { class: "bubble-wrap" }, bubble, h("span", { class: "muted" }, `已过滤 ${m.redactions} 处`)) : bubble),
-      );
+      log.append(row(m, m.redactions > 0 ? h("div", { class: "bubble-wrap" }, bubble, h("span", { class: "muted" }, `已过滤 ${m.redactions} 处`)) : bubble));
     }
   }
   const lastSpoken = t.messages.filter((m) => m.kind !== "system").at(-1);
   if (t.status === "active" && lastSpoken?.sender === t.from) {
-    log.append(row(t.to, h("div", { class: "bubble", role: "img", "aria-label": `${agentName(t.to)}正在回答` }, h("span", { class: "typing" }, h("i"), h("i"), h("i")))));
+    log.append(row({ sender: t.to }, h("div", { class: "bubble", role: "img", "aria-label": `${agentName(t.to)}正在回答` }, h("span", { class: "typing" }, h("i"), h("i"), h("i")))));
   }
+  if (t.status === "pending" && !isMine(t.to)) log.append(h("span", { class: "event" }, cjk("等", ownerOf(agentName(t.to)), "批准")));
 
-  const usage = `${t.roundsUsed} / ${t.scope.maxRounds} 轮 · $${t.costUsd.toFixed(2)} / $${t.scope.budgetUsd.toFixed(2)}`;
-  let left = null;
-  let buttons = [];
-  if (t.status === "pending" && isMine(t.to)) {
-    buttons = [
-      h("button", { type: "button", class: "btn", onclick: () => act(() => api("POST", `/api/threads/${t.id}/decline`, {})) }, "拒绝"),
-      h(
-        "button",
-        {
-          type: "button",
-          class: "btn primary",
-          onclick: () =>
-            act(() =>
-              api("POST", `/api/threads/${t.id}/approve`, {
-                maxRounds: Number(document.getElementById("scope-rounds").value),
-                budgetUsd: Number(document.getElementById("scope-budget").value),
-              }),
-            ),
-        },
-        "同意",
-      ),
-    ];
-  } else if (t.status === "pending") {
-    left = cjk("等", ownerOf(agentName(t.to)), "批准");
-  } else if (t.status === "active") {
-    left = usage;
-    buttons = [h("button", { type: "button", class: "btn danger", onclick: () => act(() => api("POST", `/api/threads/${t.id}/stop`, {})) }, "停止")];
-  } else {
-    left = `${usage} · ${STATUS[t.status]}`;
+  // 动手 runs on the person's Claude subscription, so it has rounds only.
+  const rounds = `${t.roundsUsed} / ${t.scope.maxRounds} 轮`;
+  const usage = t.mode === "do" ? rounds : `${rounds} · $${t.costUsd.toFixed(2)} / $${t.scope.budgetUsd.toFixed(2)}`;
+  // The person writes as the side that is theirs; between their own AIs, as the asker.
+  const side = isMine(t.from) ? t.from : isMine(t.to) ? t.to : null;
+  const writes = side && (t.status === "active" || t.status === "closed" || (t.status === "expired" && side === t.from));
+  let foot = null;
+  if (writes) {
+    const stop = t.status === "active" ? [h("button", { type: "button", class: "btn danger", onclick: () => act(() => api("POST", `/api/threads/${t.id}/stop`, {})) }, "停止")] : [];
+    const status = h("span", { class: "muted" }, t.status === "active" ? usage : `${usage} · ${STATUS[t.status]}`);
+    foot = writeBox({
+      label: `发给${agentName(side === t.from ? t.to : t.from)}`,
+      status,
+      extra: stop,
+      send: async (text) => {
+        await api("POST", `/api/threads/${t.id}/messages`, { from: side, body: text, byPerson: true });
+        await refresh();
+      },
+    }).foot;
+  } else if (t.status !== "pending") {
+    foot = h("footer", { class: "main-foot" }, h("span", { class: "muted" }, `${usage} · ${STATUS[t.status]}`));
   }
-  const foot = h(
-    "footer",
-    { class: "main-foot" },
-    state.error ? h("p", { class: "error", role: "alert" }, state.error) : h("span", { class: "muted" }, left ?? ""),
-    h("div", { class: "buttons" }, ...buttons),
-  );
   const body = showMain(t.topic, log, { foot, back: "#/" });
   body.scrollTop = body.scrollHeight;
+}
+
+// The first sentence names a conversation the person starts on the web.
+function topicOf(text) {
+  const first = text.split(/[\n。！？!?]/).map((s) => s.trim()).find(Boolean) ?? text;
+  return first.slice(0, 20);
+}
+
+// A new conversation with one AI, started by the person on the web: nothing
+// above yet, the input box below. 动手 is offered where that AI can do it.
+function renderCompose(to) {
+  const target = state.agents.get(to);
+  const seat = mySeat();
+  if (!target || !seat || target.canReceive === false) return showEmpty();
+  const chip = target.client === "claude" ? modeChip("answer", () => {}) : modeChip("answer");
+  const { foot, box } = writeBox({
+    label: `发给${target.name}`,
+    status: chip,
+    send: async (text) => {
+      const t = await api("POST", "/api/threads", { from: seat, to, topic: topicOf(text), message: text, mode: chip.dataset.mode });
+      location.hash = `#/t/${t.id}`;
+    },
+  });
+  showMain(target.name, h("div"), { foot, back: "#/" });
+  box.focus();
+}
+
+// 发消息 beside an AI that can answer; "只能提问" beside one that cannot.
+function sendLink(agent) {
+  return agent.canReceive === false
+    ? h("span", { class: "muted" }, "只能提问")
+    : h("a", { class: "btn small", href: `#/new/${encodeURIComponent(agent.id)}` }, "发消息");
 }
 
 // --- 通讯录
@@ -772,7 +890,7 @@ function renderContact(id) {
           "div",
           { class: "field-row" },
           h("span", { class: "label" }, "AI"),
-          h("div", { class: "values" }, ...(person.agents.length ? person.agents.map((a) => h("span", { class: "with-avatar" }, avatar(a.name, 34), a.name)) : [h("span", { class: "muted", style: "line-height:34px" }, "还没连接 AI")])),
+          h("div", { class: "values" }, ...(person.agents.length ? person.agents.map((a) => h("span", { class: "with-avatar" }, avatar(a.name, 34), h("span", { class: "grow" }, a.name), sendLink(a))) : [h("span", { class: "muted", style: "line-height:34px" }, "还没连接 AI")])),
         ),
         state.personPosts.length ? [h("div", { class: "divider" }), postsRow(person.id, state.personPosts)] : null,
         state.error ? h("p", { class: "error", role: "alert" }, state.error) : null,
@@ -782,7 +900,7 @@ function renderContact(id) {
     return;
   }
   const agent = state.agents.get(id);
-  if (agent && !cloud) {
+  if (agent && !cloud && agent.client !== "person") {
     const count = state.threads.filter((t) => t.from === id || t.to === id).length;
     showMain(
       agent.name,
@@ -792,6 +910,7 @@ function renderContact(id) {
         h("div", { class: "profile-top" }, avatar(agent.name, 64), h("div", {}, h("h2", {}, agent.name), h("span", { class: "muted" }, agent.id))),
         h("div", { class: "divider" }),
         h("div", { class: "field-row" }, h("span", { class: "label" }, "协作"), h("span", { style: "line-height:34px" }, `${count} 次`)),
+        h("span", {}, sendLink(agent)),
       ),
       { back: "#/contacts" },
     );
@@ -833,7 +952,13 @@ function renderMe(id) {
         "div",
         { class: "column" },
         h("span", { class: "muted" }, seen),
-        h("ul", { class: "panel-list" }, ...device.ais.map((label) => h("li", {}, clientAvatar(label === "Codex" ? "codex" : "claude", 34), `我的 ${label}`))),
+        h(
+          "ul",
+          { class: "panel-list" },
+          ...(device.agents ?? device.ais.map((label) => ({ client: label === "Codex" ? "codex" : "claude" }))).map((a) =>
+            h("li", {}, clientAvatar(a.client, 34), h("span", { class: "grow" }, `我的 ${a.client === "codex" ? "Codex" : "Claude"}`), a.id ? sendLink(a) : null),
+          ),
+        ),
         error,
         h("span", {}, remove),
       ),
@@ -1159,13 +1284,14 @@ async function refresh() {
   }
   const app = document.getElementById("app");
   app.dataset.view = r.view;
-  app.dataset.pane = r.id || (r.view === "messages" && state.detail) ? "main" : "list";
+  app.dataset.pane = r.id || r.compose || (r.view === "messages" && state.detail) ? "main" : "list";
   renderRail(r.view);
   if (r.view !== "posts") renderList(r);
   if (r.view === "posts") renderPosts(r);
   else if (r.view === "contacts") renderContact(r.id);
   else if (r.view === "me") renderMe(r.id);
   else if (state.detail) renderThread(state.detail);
+  else if (r.compose) renderCompose(r.compose);
   else if (cloud && !checklistDone()) renderChecklist();
   else showEmpty();
   state.shown = location.hash;
@@ -1411,7 +1537,7 @@ function renderLanding() {
       "div",
       { class: "log" },
       h("div", { class: "msg" }, avatar("老王", 34), h("div", { class: "bubble" }, "老方上次那个产品视频是怎么做的？分镜、提示词和踩过的坑都要。")),
-      h("span", { class: "event" }, "老方已同意 · 只读 · 5 轮"),
+      h("span", { class: "event" }, "老方已同意 · 问答 · 5 轮"),
       h("div", { class: "msg right" }, avatar("老方", 34), h("div", { class: "bubble" }, "分三步：先让 Claude 写分镜，再用这组提示词出图，最后剪辑。踩过的坑是……")),
     ),
   );

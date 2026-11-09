@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { Message, MessageKind, Scope, Thread, ThreadStatus } from "../types.js";
+import type { Message, MessageKind, Scope, Thread, ThreadMode, ThreadStatus } from "../types.js";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS threads (
@@ -10,12 +10,17 @@ CREATE TABLE IF NOT EXISTS threads (
   from_agent TEXT NOT NULL,
   to_agent TEXT NOT NULL,
   status TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'answer',
+  prior_status TEXT,
+  prior_mode TEXT,
   max_rounds INTEGER NOT NULL,
   budget_usd REAL NOT NULL,
   rounds_used INTEGER NOT NULL DEFAULT 0,
   cost_usd REAL NOT NULL DEFAULT 0,
   responder_session TEXT,
   asker_seen INTEGER NOT NULL DEFAULT 0,
+  reminded INTEGER NOT NULL DEFAULT 0,
+  reply_mailed INTEGER NOT NULL DEFAULT 0,
   quiet INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -29,6 +34,7 @@ CREATE TABLE IF NOT EXISTS messages (
   body TEXT NOT NULL,
   redactions INTEGER NOT NULL DEFAULT 0,
   cost_usd REAL NOT NULL DEFAULT 0,
+  by_person INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   UNIQUE (thread_id, seq)
 );
@@ -49,12 +55,17 @@ interface ThreadRow {
   from_agent: string;
   to_agent: string;
   status: string;
+  mode: string;
+  prior_status: string | null;
+  prior_mode: string | null;
   max_rounds: number;
   budget_usd: number;
   rounds_used: number;
   cost_usd: number;
   responder_session: string | null;
   asker_seen: number;
+  reminded: number;
+  reply_mailed: number;
   quiet: number;
   created_at: string;
   updated_at: string;
@@ -69,7 +80,12 @@ interface MessageRow {
   body: string;
   redactions: number;
   cost_usd: number;
+  by_person: number;
   created_at: string;
+}
+
+function asMode(value: string | null): ThreadMode {
+  return value === "do" ? "do" : "answer";
 }
 
 function toThread(row: ThreadRow): Thread {
@@ -79,11 +95,14 @@ function toThread(row: ThreadRow): Thread {
     from: row.from_agent,
     to: row.to_agent,
     status: row.status as ThreadStatus,
+    mode: asMode(row.mode),
+    prior: row.prior_status ? { status: row.prior_status as ThreadStatus, mode: asMode(row.prior_mode) } : null,
     scope: { maxRounds: row.max_rounds, budgetUsd: row.budget_usd },
     roundsUsed: row.rounds_used,
     costUsd: row.cost_usd,
     responderSession: row.responder_session,
     askerSeen: row.asker_seen,
+    reminded: row.reminded === 1,
     quiet: row.quiet === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -100,6 +119,7 @@ function toMessage(row: MessageRow): Message {
     body: row.body,
     redactions: row.redactions,
     costUsd: row.cost_usd,
+    byPerson: row.by_person === 1,
     createdAt: row.created_at,
   };
 }
@@ -109,6 +129,7 @@ export interface NewThread {
   topic: string;
   from: string;
   to: string;
+  mode: ThreadMode;
   scope: Scope;
   quiet: boolean;
 }
@@ -119,10 +140,15 @@ export interface NewMessage {
   body: string;
   redactions?: number;
   costUsd?: number;
+  byPerson?: boolean;
 }
 
 export interface ThreadPatch {
   status?: ThreadStatus;
+  mode?: ThreadMode;
+  prior?: { status: ThreadStatus; mode: ThreadMode } | null;
+  // Cleared whenever the thread becomes pending again.
+  reminded?: boolean;
   scope?: Scope;
   roundsUsed?: number;
   costUsd?: number;
@@ -147,6 +173,18 @@ export class Store {
         UPDATE threads SET asker_seen = (SELECT COALESCE(MAX(seq), 0) FROM messages WHERE thread_id = threads.id);
       `);
     }
+    // Columns added later; older rows take the defaults (问答, nothing
+    // waiting, nothing reminded or mailed, written by an AI).
+    const add = (table: string, column: string, ddl: string): void => {
+      const have = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+      if (!have.some((c) => c.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+    };
+    add("threads", "mode", "TEXT NOT NULL DEFAULT 'answer'");
+    add("threads", "prior_status", "TEXT");
+    add("threads", "prior_mode", "TEXT");
+    add("threads", "reminded", "INTEGER NOT NULL DEFAULT 0");
+    add("threads", "reply_mailed", "INTEGER NOT NULL DEFAULT 0");
+    add("messages", "by_person", "INTEGER NOT NULL DEFAULT 0");
   }
 
   close(): void {
@@ -156,10 +194,10 @@ export class Store {
   createThread(t: NewThread, now: string): Thread {
     this.db
       .prepare(
-        `INSERT INTO threads (id, topic, from_agent, to_agent, status, max_rounds, budget_usd, quiet, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+        `INSERT INTO threads (id, topic, from_agent, to_agent, status, mode, max_rounds, budget_usd, quiet, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
       )
-      .run(t.id, t.topic, t.from, t.to, t.scope.maxRounds, t.scope.budgetUsd, t.quiet ? 1 : 0, now, now);
+      .run(t.id, t.topic, t.from, t.to, t.mode, t.scope.maxRounds, t.scope.budgetUsd, t.quiet ? 1 : 0, now, now);
     return this.getThread(t.id)!;
   }
 
@@ -207,6 +245,18 @@ export class Store {
       sets.push("status = ?");
       params.push(patch.status);
     }
+    if (patch.mode !== undefined) {
+      sets.push("mode = ?");
+      params.push(patch.mode);
+    }
+    if (patch.prior !== undefined) {
+      sets.push("prior_status = ?", "prior_mode = ?");
+      params.push(patch.prior?.status ?? null, patch.prior?.mode ?? null);
+    }
+    if (patch.reminded !== undefined) {
+      sets.push("reminded = ?");
+      params.push(patch.reminded ? 1 : 0);
+    }
     if (patch.scope !== undefined) {
       sets.push("max_rounds = ?", "budget_usd = ?");
       params.push(patch.scope.maxRounds, patch.scope.budgetUsd);
@@ -234,10 +284,10 @@ export class Store {
       .get(threadId) as { seq: number };
     const result = this.db
       .prepare(
-        `INSERT INTO messages (thread_id, seq, sender, kind, body, redactions, cost_usd, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (thread_id, seq, sender, kind, body, redactions, cost_usd, by_person, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(threadId, next.seq, m.sender, m.kind, m.body, m.redactions ?? 0, m.costUsd ?? 0, now);
+      .run(threadId, next.seq, m.sender, m.kind, m.body, m.redactions ?? 0, m.costUsd ?? 0, m.byPerson ? 1 : 0, now);
     const row = this.db
       .prepare("SELECT * FROM messages WHERE id = ?")
       .get(Number(result.lastInsertRowid)) as unknown as MessageRow;
@@ -271,6 +321,33 @@ export class Store {
   // Leaves updated_at alone: seeing a thread is not news for the list.
   markAskerSeen(threadId: string, seq: number): void {
     this.db.prepare("UPDATE threads SET asker_seen = MAX(asker_seen, ?) WHERE id = ?").run(seq, threadId);
+  }
+
+  // Leaves updated_at alone, which says since when the request waits.
+  markReminded(threadId: string): void {
+    this.db.prepare("UPDATE threads SET reminded = 1 WHERE id = ?").run(threadId);
+  }
+
+  markReplyMailed(threadId: string, seq: number): void {
+    this.db.prepare("UPDATE threads SET reply_mailed = MAX(reply_mailed, ?) WHERE id = ?").run(seq, threadId);
+  }
+
+  // Threads where the asked side said something before `before` that the
+  // asking AI has not been shown and nobody was mailed about: the latest such
+  // message of each.
+  unseenReplies(before: string): { thread: Thread; message: Message }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT t.*, m.seq AS reply_seq FROM threads t
+         JOIN messages m ON m.thread_id = t.id AND m.sender = t.to_agent
+         WHERE m.seq > t.asker_seen AND m.seq > t.reply_mailed AND m.created_at <= ?
+           AND m.seq = (SELECT MAX(seq) FROM messages WHERE thread_id = t.id AND sender = t.to_agent)`,
+      )
+      .all(before) as unknown as (ThreadRow & { reply_seq: number })[];
+    return rows.map((row) => ({
+      thread: toThread(row),
+      message: this.messages(row.id, row.reply_seq - 1)[0],
+    }));
   }
 
   // Who wrote each message after `seq`, leaving out Achat's own notes.

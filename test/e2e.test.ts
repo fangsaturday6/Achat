@@ -224,21 +224,27 @@ describe("experiment 0 end to end", () => {
     assert.match(textOf(await asking), /接收方出错：预算用完/);
   });
 
-  test("running out of budget ends the thread with a plain explanation", async () => {
-    startSidecar([new BudgetExceededError("error_max_budget_usd")]);
+  test("running out of money mid-answer waits for the person to allow more, then answers", async () => {
+    startSidecar([new BudgetExceededError("error_max_budget_usd"), "加了额度后的回答"]);
     const codex = await mcpClient(client, CODEX, relay.url);
     const asking = codex.callTool({ name: "send_request", arguments: { to: "我的 Claude", topic: "超预算", message: "问题" } });
     const pending = await until(async () =>
       (await client.listThreads({ status: "pending", to: CLAUDE })).find((t) => t.topic === "超预算"),
     );
     await client.approve(pending.id);
+    const paused = await until(async () => {
+      const t = await client.getThread(pending.id);
+      return t.status === "pending" && t.prior ? t : null;
+    });
+    assert.match(paused.messages.at(-1)!.body, /花费到了上限 \$5\.00/);
+    await client.approve(pending.id, { budgetUsd: 2 });
     const outcome = textOf(await asking);
-    assert.match(outcome, /花费额度用完了/);
+    assert.match(outcome, /加了额度后的回答/);
     assert.doesNotMatch(outcome, /error_max_budget_usd|出错/);
   });
 
-  test("a round is not started when too little budget is left", async () => {
-    startSidecar(["第一轮回答"]);
+  test("asking with too little money left asks the person to go on, and the round runs once they agree", async () => {
+    startSidecar(["第一轮回答", "第二轮回答"]);
     const codex = await mcpClient(client, CODEX, relay.url);
     const asking = codex.callTool({ name: "send_request", arguments: { to: "我的 Claude", topic: "额度很少", message: "问题" } });
     const pending = await until(async () =>
@@ -246,11 +252,11 @@ describe("experiment 0 end to end", () => {
     );
     await client.approve(pending.id, { budgetUsd: 0.12 });
     assert.match(textOf(await asking), /完整转给主人/);
-    const second = textOf(
-      await codex.callTool({ name: "send_message", arguments: { thread_id: pending.id, message: "追问" } }),
-    );
-    assert.match(second, /花费额度用完了/);
-    assert.equal(runner.calls.length, 1, "the second round never ran");
+    const second = codex.callTool({ name: "send_message", arguments: { thread_id: pending.id, message: "追问" } });
+    await until(async () => (await client.getThread(pending.id)).status === "pending");
+    assert.equal(runner.calls.length, 1, "nothing ran before the person agreed");
+    await client.approve(pending.id);
+    assert.match(textOf(await second), /第二轮回答/);
   });
 
   test("the hook stays quiet inside headless runs", async () => {
@@ -298,7 +304,7 @@ test("a dialog on the computer approves or declines, one at a time, and goes awa
     const first = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "对话框同意", message: "怎么做的？" });
     const second = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "对话框拒绝", message: "问题" });
     await until(async () => asked.length === 1);
-    assert.deepEqual(asked[0], { title: "我的 Codex 想问你的 Claude", topic: "对话框同意", body: "怎么做的？", scope: "只读 · 5 轮 · $5.00" });
+    assert.deepEqual(asked[0], { mode: "answer", title: "我的 Codex 想问你的 Claude", topic: "对话框同意", body: "怎么做的？", scope: "问答 · 5 轮 · $5.00" });
     answers[0]("approve");
     await until(async () => (await client.getThread(first.id)).status !== "pending");
     await until(async () => runner.calls.length === 1);

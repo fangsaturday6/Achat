@@ -9,6 +9,7 @@ import { startRelay } from "./relay/server.js";
 import { desktopAlert, desktopAsk, type Asker } from "./sidecar/dialog.js";
 import { desktopNotify } from "./sidecar/notify.js";
 import { ClaudeRunner, CodexRunner, type AgentRunner } from "./sidecar/runners.js";
+import { ClaudeTaskOpener, type TaskOpener } from "./sidecar/tasks.js";
 import { Sidecar } from "./sidecar/sidecar.js";
 import { appDir, isInstalledCopy, setupWith, stageUpdate, switchTo, type Staged } from "./update.js";
 
@@ -76,6 +77,11 @@ function runnerFor(client: AchatConfig["agents"][number]["client"]): AgentRunner
   return activity.runner(client === "claude" ? new ClaudeRunner() : new CodexRunner());
 }
 
+// Only Claude Code opens a conversation of its own to 动手, so far.
+function doersFor(cfg: AchatConfig, idOf: (a: AchatConfig["agents"][number]) => string): Record<string, TaskOpener> {
+  return Object.fromEntries(cfg.agents.filter((a) => a.client === "claude").map((a) => [idOf(a), new ClaudeTaskOpener()]));
+}
+
 // Binds the local port, waiting for it while another copy holds it if asked.
 async function listen<T>(open: () => Promise<T>, port: number, wait: boolean): Promise<T> {
   for (let waiting = false; ; waiting = true) {
@@ -126,6 +132,7 @@ async function startLocal(cfg: AchatConfig, webDir: string, wait: boolean): Prom
     client: new RelayClient(relay.url, cfg.token),
     agents: cfg.agents,
     runners,
+    doers: doersFor(cfg, (a) => a.id),
     ask,
     alert: desktopAlert,
     notify: desktopNotify,
@@ -147,7 +154,8 @@ async function startCloudMode(cfg: AchatConfig, conn: Connection, wait: boolean)
   const pointer = await listen(() => startPointer(cfg, conn.webUrl), cfg.port, wait);
   const deviceId = conn.deviceId!;
   const runners = Object.fromEntries(cfg.agents.map((a) => [agentIdFor(deviceId, a.client), runnerFor(a.client)]));
-  const sidecar = new Sidecar({ client: conn.client, agents: [], runners, ask, alert: desktopAlert, notify: desktopNotify, webUrl: conn.webUrl });
+  const doers = doersFor(cfg, (a) => agentIdFor(deviceId, a.client));
+  const sidecar = new Sidecar({ client: conn.client, agents: [], runners, doers, ask, alert: desktopAlert, notify: desktopNotify, webUrl: conn.webUrl });
   sidecar.start();
   console.log(`Achat 已启动（账号模式）：${conn.webUrl}`);
   return {

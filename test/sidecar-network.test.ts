@@ -80,14 +80,14 @@ test("an answer that arrived before its reply was lost does not end the thread",
 });
 
 test("a failure that could not be reported reaches the asker once the relay is back", async (t) => {
-  const { client, sidecar, id } = await approvedRequest(t, [new Error("回答超时")]);
+  const { client, sidecar, id } = await approvedRequest(t, [new Error("claude 意外退出")]);
   breakCalls(t, "POST", /\/fail$/, ["down", "down"]);
 
   await sidecar.answer(id);
 
   const thread = await client.getThread(id);
   assert.equal(thread.status, "closed");
-  assert.ok(thread.messages.some((m) => m.body === "接收方出错：回答超时"));
+  assert.ok(thread.messages.some((m) => m.body === "接收方出错：claude 意外退出"));
 });
 
 test("a thread is not ended because it could not be read for a moment", async (t) => {

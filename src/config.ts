@@ -8,7 +8,9 @@ export type AgentClient = "claude" | "codex";
 // AIs that connect to the cloud with an address and a credential; they can
 // ask others but not answer.
 export type RemoteClient = "doubao" | "workbuddy" | "other";
-export type AiClient = AgentClient | RemoteClient;
+// "person": the person themself, writing on the web page. Each person has one
+// such seat; it starts conversations and speaks in them, and never answers.
+export type AiClient = AgentClient | RemoteClient | "person";
 
 export interface AgentConfig {
   id: string;
@@ -19,6 +21,9 @@ export interface AgentConfig {
   // The account it belongs to, in the cloud; absent on this computer.
   owner?: string;
 }
+
+// The person at this computer, on the local web page.
+export const LOCAL_PERSON: AgentConfig = { id: "me@local", name: "我", client: "person", canReceive: false };
 
 // An AI listed in this computer's config.json.
 export interface LocalAgent extends AgentConfig {

@@ -3,11 +3,13 @@ import { EventEmitter } from "node:events";
 import type { AchatConfig, AgentConfig } from "../config.js";
 import {
   isTerminal,
+  MODE_LABELS,
   type Message,
   type RelayEvent,
   type Scope,
   type Thread,
   type ThreadDetail,
+  type ThreadMode,
   type ThreadStatus,
   type ThreadSummary,
 } from "../types.js";
@@ -22,7 +24,16 @@ export class RelayError extends Error {
   }
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+// Below this a 问答 round cannot do anything useful, so asking again needs
+// more money, approved like the first time.
+export const MIN_ROUND_BUDGET_USD = 0.1;
+// A request nobody handled: its person is reminded once, and after three
+// days it is given up.
+export const REMIND_AFTER_MS = 4 * HOUR_MS;
+export const EXPIRE_AFTER_MS = 3 * DAY_MS;
+export const SWEEP_EVERY_MS = 10 * 60 * 1000;
 
 function clampScope(scope: Partial<Scope> | undefined, defaults: Scope): Scope {
   const maxRounds = Math.round(Number(scope?.maxRounds ?? defaults.maxRounds));
@@ -36,11 +47,20 @@ function clampScope(scope: Partial<Scope> | undefined, defaults: Scope): Scope {
   return { maxRounds, budgetUsd: Math.round(budgetUsd * 100) / 100 };
 }
 
+function checkMode(mode: unknown): ThreadMode | undefined {
+  if (mode === undefined || mode === null) return undefined;
+  if (mode !== "answer" && mode !== "do") throw new RelayError(400, 'mode 只能是 "answer"（问答）或 "do"（动手）');
+  return mode;
+}
+
 export interface CreateRequestInput {
   from: string;
   to: string;
   topic: string;
   message: string;
+  mode?: ThreadMode;
+  // Written by the person on the web page, not by their AI.
+  byPerson?: boolean;
 }
 
 // Where the relay looks up the AIs it carries messages between: the fixed
@@ -57,6 +77,10 @@ export interface PostMessageInput {
   costUsd?: number;
   redactions?: number;
   sessionId?: string;
+  // "do" from the asker in a 问答 thread asks the other side to 动手; its
+  // person approves again.
+  mode?: ThreadMode;
+  byPerson?: boolean;
 }
 
 // Owns the thread state machine. Every state change goes through here so the
@@ -115,6 +139,22 @@ export class RelayService {
     return agent;
   }
 
+  // Only Claude Code opens a conversation of its own to do the work, so far.
+  private requireDoer(id: string): void {
+    const agent = this.requireAgent(id);
+    if (agent.client !== "claude") throw new RelayError(400, `${agent.name}还不能动手，只能问答`);
+  }
+
+  // The rounds, or for 问答 the money, the person allowed are used up.
+  private spent(t: Thread): boolean {
+    return t.roundsUsed >= t.scope.maxRounds || (t.mode === "answer" && t.scope.budgetUsd - t.costUsd < MIN_ROUND_BUDGET_USD);
+  }
+
+  // The person's own seat writes as a person, not as an AI.
+  private byPerson(agent: string, said?: boolean): boolean {
+    return said === true || this.agents.get(agent)?.client === "person";
+  }
+
   getThread(id: string): ThreadDetail {
     const thread = this.requireThread(id);
     return { ...thread, messages: this.store.messages(id) };
@@ -143,6 +183,10 @@ export class RelayService {
       .some((sender) => sender !== null && (own ? sender === thread.to : !mine(sender)));
   }
 
+  readSeq(reader: string, threadId: string): number {
+    return this.store.readSeq(reader, threadId);
+  }
+
   markRead(reader: string, threadId: string): void {
     const last = this.store.lastMessage(threadId);
     if (last) this.store.markRead(reader, threadId, last.seq);
@@ -161,6 +205,8 @@ export class RelayService {
     this.requireAgent(input.from);
     this.requireAgent(input.to);
     if (input.from === input.to) throw new RelayError(400, "不能给自己发请求");
+    const mode = checkMode(input.mode) ?? "answer";
+    if (mode === "do") this.requireDoer(input.to);
     const topic = input.topic.trim();
     const message = input.message.trim();
     if (!topic || topic.length > 80) throw new RelayError(400, "话题需要在 1 到 80 个字之间");
@@ -181,17 +227,26 @@ export class RelayService {
           topic,
           from: input.from,
           to: input.to,
+          mode,
           scope: this.config.defaults,
           quiet,
         },
         now,
       );
-      const msg = this.store.addMessage(thread.id, { sender: input.from, kind: "request", body: message }, now);
+      const msg = this.store.addMessage(
+        thread.id,
+        { sender: input.from, kind: "request", body: message, byPerson: this.byPerson(input.from, input.byPerson) },
+        now,
+      );
       if (!opts.autoApprove) return { ...thread, messages: [msg] };
       const started = this.store.updateThread(thread.id, { status: "active" }, now);
       const note = this.store.addMessage(
         thread.id,
-        { sender: null, kind: "system", body: `同一个人的 AI，自动接待 · ${this.scopeNote(started.scope)}` },
+        {
+          sender: null,
+          kind: "system",
+          body: `${this.agents.get(input.from)?.client === "person" ? "问自己的 AI" : "同一个人的 AI"}，自动接待 · ${this.scopeNote(started.scope, mode)}`,
+        },
         now,
       );
       return { ...started, messages: [msg, note] };
@@ -200,19 +255,25 @@ export class RelayService {
     return detail;
   }
 
-  approve(id: string, scope?: Partial<Scope>): ThreadDetail {
+  // The person may turn a 动手 request into 问答, not the other way round.
+  // Approving a 动手 asked for mid-thread starts the rounds over.
+  approve(id: string, scope?: Partial<Scope> & { mode?: ThreadMode }): ThreadDetail {
     const thread = this.requireThread(id);
     if (thread.status !== "pending") throw new RelayError(409, "这次协作已经处理过了");
     const finalScope = clampScope(scope, thread.scope);
+    const mode = checkMode(scope?.mode) ?? thread.mode;
+    if (mode === "do" && thread.mode !== "do") throw new RelayError(400, "对方要的是问答，不能改成动手");
     const now = this.stamp();
     const updated = this.store.transaction(() => {
-      const t = this.store.updateThread(id, { status: "active", scope: finalScope }, now);
+      // A request inside the thread is a new allowance: rounds and money start over.
+      const restart = thread.prior ? { roundsUsed: 0, costUsd: 0 } : {};
+      const t = this.store.updateThread(id, { status: "active", mode, scope: finalScope, prior: null, reminded: false, ...restart }, now);
       this.store.addMessage(
         id,
         {
           sender: null,
           kind: "system",
-          body: `已同意：${this.scopeNote(finalScope)}`,
+          body: `已同意：${this.scopeNote(finalScope, mode)}`,
         },
         now,
       );
@@ -222,14 +283,77 @@ export class RelayService {
     return this.getThread(id);
   }
 
-  private scopeNote(scope: Scope): string {
-    return `只读对话记录 · ${scope.maxRounds} 轮 · $${scope.budgetUsd.toFixed(2)}`;
+  // 动手 runs on the person's Claude subscription, so it has no dollar figure.
+  private scopeNote(scope: Scope, mode: ThreadMode): string {
+    const rounds = `${MODE_LABELS[mode]} · ${scope.maxRounds} 轮`;
+    return mode === "do" ? rounds : `${rounds} · $${scope.budgetUsd.toFixed(2)}`;
   }
 
+  // Declining a first request ends it. Declining one made inside the thread
+  // goes back to where it was: a 动手 asked for in a 问答 with rounds left
+  // keeps the 问答 going; asking to go on leaves it ended.
   decline(id: string): ThreadDetail {
     const thread = this.requireThread(id);
     if (thread.status !== "pending") throw new RelayError(409, "这次协作已经处理过了");
-    return this.finish(id, "declined", "没有接受");
+    if (!thread.prior) return this.finish(id, "declined", "没有接受");
+    return this.goBack(thread, "没有同意接着聊");
+  }
+
+  private goBack(thread: Thread, note: string): ThreadDetail {
+    const prior = thread.prior!;
+    const keepsGoing = prior.status === "active" && !this.spent({ ...thread, mode: prior.mode });
+    const now = this.stamp();
+    const updated = this.store.transaction(() => {
+      const t = this.store.updateThread(
+        thread.id,
+        { status: keepsGoing ? "active" : "closed", mode: prior.mode, prior: null, reminded: false },
+        now,
+      );
+      this.store.addMessage(thread.id, { sender: null, kind: "system", body: keepsGoing ? "没有接受动手，接着问答" : note }, now);
+      return t;
+    });
+    this.emit("thread.updated", updated);
+    return this.getThread(thread.id);
+  }
+
+  // The asked side ran out of money in the middle of answering: the question
+  // waits for its person to allow more instead of the thread ending.
+  askMore(id: string, note: string): ThreadDetail {
+    const thread = this.requireThread(id);
+    if (thread.status !== "active") return this.getThread(id);
+    const now = this.stamp();
+    const updated = this.store.transaction(() => {
+      const t = this.store.updateThread(id, { status: "pending", prior: { status: "closed", mode: thread.mode }, reminded: false }, now);
+      this.store.addMessage(id, { sender: null, kind: "system", body: note }, now);
+      return t;
+    });
+    this.emit("thread.updated", updated);
+    return this.getThread(id);
+  }
+
+  // Run every few minutes: a request waiting for hours is brought up again
+  // once; one waiting for days is given up, and one made inside a thread
+  // goes back to where the thread was.
+  sweep(): void {
+    const now = this.now().getTime();
+    for (const t of this.store.listThreads({ status: "pending" })) {
+      const waited = now - Date.parse(t.updatedAt);
+      if (waited >= EXPIRE_AFTER_MS) {
+        if (t.prior) this.goBack(t, "3 天没人处理，没有接着聊");
+        else this.finish(t.id, "expired", "3 天没人处理，已过期");
+      } else if (waited >= REMIND_AFTER_MS && !t.reminded) {
+        this.store.markReminded(t.id);
+        this.emit("thread.reminded", t);
+      }
+    }
+  }
+
+  // Replies of the asked side that nobody on the asking side has seen since
+  // `before`; marks them so each is reported once.
+  unseenReplies(before: Date): { thread: Thread; message: Message }[] {
+    const found = this.store.unseenReplies(before.toISOString());
+    for (const { thread, message } of found) this.store.markReplyMailed(thread.id, message.seq);
+    return found;
   }
 
   stop(id: string, by: string | null): ThreadDetail {
@@ -290,9 +414,13 @@ export class RelayService {
     const fromResponder = input.from === thread.to;
     if (thread.status === "pending") throw new RelayError(409, "这次协作还没被批准");
     if (thread.status === "stopped" || thread.status === "declined") throw new RelayError(409, "这次协作已经停止了");
-    if (thread.status === "closed" && !fromResponder) {
-      throw new RelayError(409, "这次协作已经结束了，要接着问就重新发起请求");
-    }
+    if (thread.status === "expired" && fromResponder) throw new RelayError(409, "这个请求已经过期了");
+    const upgrade = checkMode(input.mode) === "do" && thread.mode !== "do";
+    if (upgrade && fromResponder) throw new RelayError(400, "只有发起方可以请对方动手");
+    if (upgrade) this.requireDoer(thread.to);
+    // The asker asking to 动手, or to go on once the thread ended or its
+    // allowance is used up: a request of its own, which the person approves.
+    const asks = !fromResponder && (upgrade || thread.status !== "active" || this.spent(thread));
     const body = input.body.trim();
     if (!body || body.length > 20000) throw new RelayError(400, "消息需要在 1 到 20000 个字之间");
 
@@ -300,15 +428,13 @@ export class RelayService {
       .messages(id)
       .filter((m) => m.kind !== "system")
       .at(-1);
-    // A call tried again after its reply was lost must not post twice.
-    if (lastSpoken?.sender === input.from && lastSpoken.body === body) {
+    // A call tried again after its reply was lost must not post twice. Asking
+    // to go on may repeat a question that was never answered.
+    if (!asks && lastSpoken?.sender === input.from && lastSpoken.body === body) {
       throw new RelayError(409, "这条已经发过了");
     }
-    if (!fromResponder && lastSpoken?.sender === input.from) {
+    if (!asks && !fromResponder && lastSpoken?.sender === input.from) {
       throw new RelayError(409, "还没轮到你说话，先等对方回复");
-    }
-    if (!fromResponder && thread.roundsUsed >= thread.scope.maxRounds) {
-      throw new RelayError(409, "已经到轮数上限了");
     }
 
     const now = this.stamp();
@@ -318,10 +444,11 @@ export class RelayService {
         id,
         {
           sender: input.from,
-          kind: "message",
+          kind: asks ? "request" : "message",
           body,
           redactions: input.redactions ?? 0,
           costUsd: fromResponder ? (input.costUsd ?? 0) : 0,
+          byPerson: this.byPerson(input.from, input.byPerson),
         },
         now,
       );
@@ -345,7 +472,13 @@ export class RelayService {
         );
         if (closingNote) this.store.addMessage(id, { sender: null, kind: "system", body: closingNote }, now);
       } else {
-        t = this.store.updateThread(id, {}, now);
+        t = this.store.updateThread(
+          id,
+          asks
+            ? { status: "pending", mode: upgrade ? "do" : thread.mode, prior: { status: thread.status, mode: thread.mode }, reminded: false }
+            : {},
+          now,
+        );
       }
       return { thread: t, msg };
     });

@@ -13,7 +13,7 @@ import type { AgentRunner, RunInput, RunOutput } from "../src/sidecar/runners.js
 export const CLAUDE = "claude@local";
 export const CODEX = "codex@local";
 
-export async function startTestRelay(overrides: Partial<AchatConfig> = {}): Promise<{
+export async function startTestRelay(overrides: Partial<AchatConfig> = {}, now?: () => Date): Promise<{
   relay: RunningRelay;
   client: RelayClient;
   config: AchatConfig;
@@ -25,6 +25,7 @@ export async function startTestRelay(overrides: Partial<AchatConfig> = {}): Prom
     dbPath: join(dir, "achat.db"),
     webDir: join(import.meta.dirname, "..", "web"),
     port: 0,
+    now,
   });
   return { relay, client: new RelayClient(relay.url, config.token), config };
 }

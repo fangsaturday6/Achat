@@ -76,6 +76,8 @@ export function loginCodeEmail(to: string, code: string, site: string): Email {
 }
 
 export interface RequestNotice {
+  // 老王的 Codex 想问你的 Claude, unless given: 还在等你批准, 回复了你的 Codex.
+  title?: string;
   fromName: string; // 老王的 Codex
   toName: string; // 你的 Claude
   topic: string;
@@ -88,7 +90,7 @@ export interface RequestNotice {
 // the request; the approval itself happens on the page.
 export function requestEmail(to: string, n: RequestNotice): Email {
   const question = n.question.length > 300 ? n.question.slice(0, 300) + "……" : n.question;
-  const title = cjk(n.fromName, "想问", n.toName);
+  const title = n.title ?? cjk(n.fromName, "想问", n.toName);
   const text = [`${title}：${n.topic}`, "", question, "", `查看：${n.link}`, "", `关闭邮件提醒：${n.settingsLink}`].join("\n");
   const html = layout(title, `${n.topic}：${question.slice(0, 60)}`, [
     cell(avatar(n.fromName)),

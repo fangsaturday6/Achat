@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { AgentClient, AgentConfig } from "./config.js";
 import { signRequest, type DeviceKey } from "./device.js";
-import type { RelayEvent, Scope, ThreadDetail, ThreadStatus, ThreadSummary } from "./types.js";
+import type { RelayEvent, Scope, ThreadDetail, ThreadMode, ThreadStatus, ThreadSummary } from "./types.js";
 
 export class RelayClientError extends Error {
   constructor(
@@ -252,11 +252,11 @@ export class RelayClient {
     return this.call("GET", `/api/threads/${encodeURIComponent(id)}`);
   }
 
-  createRequest(input: { from: string; to: string; topic: string; message: string }): Promise<ThreadDetail> {
+  createRequest(input: { from: string; to: string; topic: string; message: string; mode?: ThreadMode; byPerson?: boolean }): Promise<ThreadDetail> {
     return this.call("POST", "/api/threads", input);
   }
 
-  approve(id: string, scope: Partial<Scope> = {}): Promise<ThreadDetail> {
+  approve(id: string, scope: Partial<Scope> & { mode?: ThreadMode } = {}): Promise<ThreadDetail> {
     return this.call("POST", `/api/threads/${encodeURIComponent(id)}/approve`, scope);
   }
 
@@ -285,6 +285,11 @@ export class RelayClient {
     return this.call("POST", `/api/threads/${encodeURIComponent(id)}/seen`, { seq });
   }
 
+  // The money ran out mid-answer: the question waits for the person to allow more.
+  askMore(id: string, note: string): Promise<ThreadDetail> {
+    return this.call("POST", `/api/threads/${encodeURIComponent(id)}/more`, { note });
+  }
+
   fail(id: string, reason: string): Promise<ThreadDetail> {
     return this.call("POST", `/api/threads/${encodeURIComponent(id)}/fail`, { reason });
   }
@@ -295,7 +300,7 @@ export class RelayClient {
 
   postMessage(
     id: string,
-    input: { from: string; body: string; costUsd?: number; redactions?: number; sessionId?: string },
+    input: { from: string; body: string; costUsd?: number; redactions?: number; sessionId?: string; mode?: ThreadMode; byPerson?: boolean },
   ): Promise<ThreadDetail> {
     return this.call("POST", `/api/threads/${encodeURIComponent(id)}/messages`, input);
   }

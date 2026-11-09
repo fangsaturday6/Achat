@@ -1,8 +1,8 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { AchatConfig } from "../config.js";
+import { LOCAL_PERSON, type AchatConfig, type AgentConfig } from "../config.js";
 import { send, serveStatic } from "./http.js";
-import { RelayError, RelayService } from "./service.js";
+import { RelayError, RelayService, SWEEP_EVERY_MS } from "./service.js";
 import { Store } from "./store.js";
 import { threadsApi, type Viewer } from "./threads-api.js";
 
@@ -11,6 +11,7 @@ export interface RelayOptions {
   dbPath: string;
   webDir: string;
   port?: number;
+  now?: () => Date;
 }
 
 export interface RunningRelay {
@@ -24,8 +25,9 @@ export interface RunningRelay {
 // one token for everything, reachable only from this machine.
 export async function startRelay(opts: RelayOptions): Promise<RunningRelay> {
   const store = new Store(opts.dbPath);
-  const agents = new Map(opts.config.agents.map((a) => [a.id, a]));
-  const service = new RelayService(store, opts.config, agents);
+  // The AIs in config.json, and the person at this computer on the web page.
+  const agents = new Map<string, AgentConfig>([...opts.config.agents, LOCAL_PERSON].map((a) => [a.id, a]));
+  const service = new RelayService(store, opts.config, agents, opts.now);
   const token = opts.config.token;
   const startedAt = Date.now();
   let port = opts.port ?? opts.config.port;
@@ -36,8 +38,11 @@ export async function startRelay(opts: RelayOptions): Promise<RunningRelay> {
     sees: () => true,
     actsAs: () => true,
     approves: true,
-    agents: () => opts.config.agents,
-    reach: () => false,
+    person: LOCAL_PERSON.id,
+    agents: () => [...opts.config.agents, LOCAL_PERSON],
+    // The person asking their own AIs needs no approval; the AIs asking each
+    // other here still do, as in experiment 0.
+    reach: (from) => from === LOCAL_PERSON.id,
   };
 
   // Only answer requests addressed to this machine by name, so a web page on
@@ -84,6 +89,9 @@ export async function startRelay(opts: RelayOptions): Promise<RunningRelay> {
     throw err;
   }
   port = (server.address() as AddressInfo).port;
+  // Brings up requests waiting for hours and gives up ones waiting for days.
+  const sweeping = setInterval(() => service.sweep(), SWEEP_EVERY_MS);
+  sweeping.unref();
 
   return {
     url: `http://127.0.0.1:${port}`,
@@ -91,6 +99,7 @@ export async function startRelay(opts: RelayOptions): Promise<RunningRelay> {
     service,
     close: () =>
       new Promise<void>((resolve) => {
+        clearInterval(sweeping);
         server.closeAllConnections();
         server.close(() => {
           store.close();

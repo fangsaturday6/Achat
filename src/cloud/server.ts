@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import type { AgentClient, AgentConfig, RemoteClient } from "../config.js";
 import { checkSignature, deviceIdFor, pairingCode, SIGNATURE_WINDOW_MS } from "../device.js";
 import { parseJson, readBody, send, serveStatic, str } from "../relay/http.js";
-import { RelayError, RelayService, type RelaySettings } from "../relay/service.js";
+import { RelayError, RelayService, SWEEP_EVERY_MS, type RelaySettings } from "../relay/service.js";
 import { Store } from "../relay/store.js";
 import { threadsApi, type Viewer } from "../relay/threads-api.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
@@ -16,6 +16,7 @@ import { RelayClient } from "../client.js";
 import { createMcpServer } from "../mcp/server.js";
 import { plainText, renderMarkdown, splitTitle } from "../markdown.js";
 import { redact } from "../redact.js";
+import { cjk } from "../text.js";
 import { MANIFEST, RELEASE_FILES, SIGNATURE, type Release } from "../release.js";
 import { AccountStore, CLIENT_LABEL, hashSecret, type Account, type AgentRecord, type Device, type Invite } from "./accounts.js";
 import { acceptedEmail, inviteEmail, loginCodeEmail, requestEmail } from "./emails.js";
@@ -40,6 +41,8 @@ const WITH_ID = new Set(["device-links", "invites", "devices", "contacts", "conn
 const REMOTE_CLIENTS = new Set<RemoteClient>(["doubao", "workbuddy", "other"]);
 // Request emails one sender can cause per receiver per day.
 const REQUEST_EMAILS_PER_DAY = 3;
+// A reply the asking side has not seen this long after it came is mailed.
+const REPLY_MAIL_AFTER = 30 * 60 * 1000;
 // How long the remote MCP tools wait for a reply; clients of remote servers
 // tend to give up on calls much sooner than local ones.
 const REMOTE_WAIT_SECONDS = 50;
@@ -83,6 +86,8 @@ export interface RunningCloud {
   port: number;
   service: RelayService;
   accounts: AccountStore;
+  // Reminders, expiry and reply emails, which otherwise run every ten minutes.
+  sweep(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -223,6 +228,14 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     }));
   }
 
+  // People's seats, made once per account the first time one is needed.
+  const seats = new Set<string>();
+  function seatOf(accountId: string): AgentRecord {
+    const seat = accounts.personAgent(accountId);
+    seats.add(seat.id);
+    return seat;
+  }
+
   function viewerFor(p: Principal): Viewer {
     const accountId = p.account.id;
     return {
@@ -238,9 +251,12 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
       // A credential pasted into another app cannot approve; the person does,
       // on the web or in a dialog on their computer.
       approves: p.kind !== "agent",
+      person: p.kind === "web" ? seatOf(accountId).id : null,
+      // The person's and their friends' seats are named too, for threads they started.
       agents: () => [
         ...accounts.activeAgents(accountId).map((a) => accounts.agentConfig(a, accountId)),
-        ...contactsOf(accountId).flatMap((c) => c.agents),
+        accounts.agentConfig(seatOf(accountId), accountId),
+        ...contactsOf(accountId).flatMap((c) => [...c.agents, accounts.agentConfig(seatOf(c.id), accountId)]),
       ],
       reach: (_from, to) => {
         const target = accounts.agent(to);
@@ -441,6 +457,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
         createdAt: d.createdAt,
         lastSeenAt: d.lastSeenAt,
         ais: ais.filter((a) => a.deviceId === d.id).map((a) => CLIENT_LABEL[a.client]),
+        agents: ais.filter((a) => a.deviceId === d.id).map((a) => ({ id: a.id, client: a.client })),
       })),
       remoteAis: ais
         .filter((a) => !a.deviceId)
@@ -991,9 +1008,69 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
   }
 
   service.onEvent((e) => {
+    if (e.type === "thread.reminded") {
+      emailReminder(e.threadId).catch((err) => console.error("[achat cloud] 提醒邮件没有发出去", err));
+      return;
+    }
     if (e.type !== "thread.created" || e.status !== "pending" || e.quiet) return;
     emailRequest(e.threadId).catch((err) => console.error("[achat cloud] 提醒邮件没有发出去", err));
   });
+
+  // A request still waiting after hours: its person is mailed once more.
+  async function emailReminder(threadId: string): Promise<void> {
+    const thread = service.getThread(threadId);
+    const to = accounts.agent(thread.to);
+    const from = accounts.agent(thread.from);
+    if (!to || !from || to.accountId === from.accountId) return;
+    const receiver = accounts.account(to.accountId)!;
+    if (!receiver.emailNotify) return;
+    const fromName = accounts.agentConfig(from, receiver.id).name;
+    const asked = thread.messages.filter((m) => m.sender === thread.from && m.kind !== "system").at(-1);
+    await opts.mailer.send(
+      requestEmail(receiver.email, {
+        title: cjk(fromName, "还在等你批准"),
+        fromName,
+        toName: accounts.agentConfig(to, receiver.id).name.replace(/^我的/, "你的"),
+        topic: thread.topic,
+        question: asked?.body ?? "",
+        link: `${publicUrl}/#/t/${thread.id}`,
+        settingsLink: `${publicUrl}/#/me`,
+      }),
+    );
+  }
+
+  // Replies the asking side has not seen for half an hour, because its AI
+  // stopped waiting and nobody read them on the web: mailed to that person.
+  async function emailReplies(): Promise<void> {
+    for (const { thread, message } of service.unseenReplies(new Date(ms() - REPLY_MAIL_AFTER))) {
+      const asker = accounts.agent(thread.from);
+      const responder = accounts.agent(thread.to);
+      if (!asker || !responder || asker.accountId === responder.accountId) continue;
+      if (service.readSeq(asker.accountId, thread.id) >= message.seq) continue;
+      const person = accounts.account(asker.accountId)!;
+      if (!person.emailNotify) continue;
+      const responderName = accounts.agentConfig(responder, person.id).name;
+      const askerName = accounts.agentConfig(asker, person.id).name.replace(/^我的/, "你的").replace(/^我$/, "你");
+      await opts.mailer.send(
+        requestEmail(person.email, {
+          title: cjk(responderName, "回复了", askerName),
+          fromName: responderName,
+          toName: askerName,
+          topic: thread.topic,
+          question: message.body,
+          link: `${publicUrl}/#/t/${thread.id}`,
+          settingsLink: `${publicUrl}/#/me`,
+        }),
+      );
+    }
+  }
+
+  async function sweep(): Promise<void> {
+    service.sweep();
+    await emailReplies();
+  }
+  const sweeping = setInterval(() => void sweep().catch((err) => console.error("[achat cloud] 定时检查出错", err)), SWEEP_EVERY_MS);
+  sweeping.unref();
 
   let selfUrl = "";
 
@@ -1099,8 +1176,10 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     port,
     service,
     accounts,
+    sweep,
     close: () =>
       new Promise<void>((resolve) => {
+        clearInterval(sweeping);
         server.closeAllConnections();
         server.close(() => {
           store.close();
