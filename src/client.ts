@@ -232,13 +232,20 @@ export class RelayClient {
     return this.call("GET", "/api/agents");
   }
 
-  listThreads(filter: { agent?: string; to?: string; status?: ThreadStatus; surfaced?: boolean } = {}): Promise<ThreadSummary[]> {
+  // `unseen`: threads this AI asked in which the other side said something it
+  // has not been shown yet.
+  async listThreads(
+    filter: { agent?: string; to?: string; status?: ThreadStatus; surfaced?: boolean; unseen?: string } = {},
+  ): Promise<ThreadSummary[]> {
     const q = new URLSearchParams();
     if (filter.agent) q.set("agent", filter.agent);
     if (filter.to) q.set("to", filter.to);
     if (filter.status) q.set("status", filter.status);
     if (filter.surfaced) q.set("surfaced", "1");
-    return this.call("GET", `/api/threads?${q}`);
+    if (filter.unseen) q.set("unseen", filter.unseen);
+    const list = await this.call<ThreadSummary[]>("GET", `/api/threads?${q}`);
+    // A relay from before `unseen` ignores it and lists every thread.
+    return filter.unseen ? list.filter((t) => t.from === filter.unseen && typeof t.askerSeen === "number") : list;
   }
 
   getThread(id: string): Promise<ThreadDetail> {
@@ -271,6 +278,11 @@ export class RelayClient {
 
   markRead(id: string): Promise<{ ok: boolean }> {
     return this.call("POST", `/api/threads/${encodeURIComponent(id)}/read`, {});
+  }
+
+  // The asking AI was shown the thread up to message `seq`.
+  markSeen(id: string, seq: number): Promise<{ ok: boolean }> {
+    return this.call("POST", `/api/threads/${encodeURIComponent(id)}/seen`, { seq });
   }
 
   fail(id: string, reason: string): Promise<ThreadDetail> {

@@ -82,6 +82,7 @@ export async function threadsApi(
       to: url.searchParams.get("to") ?? undefined,
       status: (status as ThreadStatus | null) ?? undefined,
       surfaced: url.searchParams.get("surfaced") === "1",
+      unseen: url.searchParams.get("unseen") ?? undefined,
     });
     send(
       res,
@@ -145,6 +146,14 @@ export async function threadsApi(
       service.markRead(viewer.reader, id);
       send(res, 200, { ok: true });
       return true;
+    case "seen": {
+      if (!viewer.actsAs(thread.from)) forbid("只有发起方的 AI 可以标记看到了哪里");
+      const seq = optNum(body, "seq");
+      if (seq === undefined) throw new RelayError(400, "缺少 seq");
+      service.markSeen(id, seq);
+      send(res, 200, { ok: true });
+      return true;
+    }
     case "decline":
       if (!viewer.approves || !viewer.sees(thread.to)) forbid("只有接收方的主人可以拒绝");
       send(res, 200, service.decline(id));

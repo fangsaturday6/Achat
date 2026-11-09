@@ -12,10 +12,17 @@ function flag(args: string[], name: string): string | undefined {
   return i >= 0 ? args[i + 1] : undefined;
 }
 
-async function readStdin(): Promise<void> {
-  if (process.stdin.isTTY) return;
-  for await (const _ of process.stdin) {
-    // Claude Code sends the hook input on stdin; it is not needed here.
+// Claude Code and Codex send the hook input on stdin as JSON; the hook needs
+// the path of the session's conversation log from it.
+async function readHookInput(): Promise<{ transcriptPath?: string }> {
+  if (process.stdin.isTTY) return {};
+  let raw = "";
+  for await (const chunk of process.stdin) raw += chunk;
+  try {
+    const input = JSON.parse(raw) as { transcript_path?: unknown };
+    return typeof input.transcript_path === "string" ? { transcriptPath: input.transcript_path } : {};
+  } catch {
+    return {};
   }
 }
 
@@ -38,7 +45,7 @@ const HELP = `用法：achat <命令>
   admin hide <动态编号或链接>       在服务器上下架一条硅基圈的动态
   release                           给构建好的版本签名，电脑只会自动更新到签过名的版本（deploy/upload.sh 部署前运行）
   mcp                               以 MCP 服务运行（由 AI 客户端调用，ACHAT_AGENT 指定身份）
-  hook user-prompt --agent <id>     Claude Code 和 Codex 的待批准提醒 hook
+  hook user-prompt --agent <id>     Claude Code 和 Codex 的提醒 hook：待批准的请求，发起的协作里的新消息
 `;
 
 async function main(): Promise<void> {
@@ -106,10 +113,10 @@ async function main(): Promise<void> {
       if (args[0] !== "user-prompt") throw new Error("未知的 hook");
       const localId = flag(args, "--agent");
       if (!localId) throw new Error("缺少 --agent");
-      await readStdin();
+      const input = await readHookInput();
       const { userPromptHook } = await import("./hook.js");
       const conn = connect(cfg);
-      const out = await userPromptHook(conn.client, conn.agentId(localId));
+      const out = await userPromptHook(conn.client, conn.agentId(localId), input);
       if (out) process.stdout.write(out);
       return;
     }

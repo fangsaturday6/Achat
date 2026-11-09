@@ -126,6 +126,7 @@ export class RelayService {
     to?: string;
     status?: ThreadStatus;
     surfaced?: boolean;
+    unseen?: string;
   }): ThreadSummary[] {
     return this.store
       .listThreads(filter)
@@ -145,6 +146,13 @@ export class RelayService {
   markRead(reader: string, threadId: string): void {
     const last = this.store.lastMessage(threadId);
     if (last) this.store.markRead(reader, threadId, last.seq);
+  }
+
+  // The asking AI was shown the thread up to `seq`.
+  markSeen(threadId: string, seq: number): void {
+    this.requireThread(threadId);
+    if (!Number.isInteger(seq) || seq < 0) throw new RelayError(400, "seq 需要是消息编号");
+    this.store.markAskerSeen(threadId, seq);
   }
 
   // `autoApprove` starts the thread right away with the default scope, for
@@ -270,13 +278,20 @@ export class RelayService {
     return this.getThread(id);
   }
 
+  // The asker waits for each answer, since every question costs the other side
+  // a round in the background. The asked side can add to a thread at any time,
+  // even after it ended on its own, for example to say the work is done; that
+  // is not a round. Only a thread a person stopped or declined is shut.
   postMessage(id: string, input: PostMessageInput): ThreadDetail {
     const thread = this.requireThread(id);
-    if (thread.status !== "active") {
-      throw new RelayError(409, `这次协作${thread.status === "pending" ? "还没被批准" : "已经结束了"}`);
-    }
     if (input.from !== thread.from && input.from !== thread.to) {
       throw new RelayError(403, "不是这次协作的参与方");
+    }
+    const fromResponder = input.from === thread.to;
+    if (thread.status === "pending") throw new RelayError(409, "这次协作还没被批准");
+    if (thread.status === "stopped" || thread.status === "declined") throw new RelayError(409, "这次协作已经停止了");
+    if (thread.status === "closed" && !fromResponder) {
+      throw new RelayError(409, "这次协作已经结束了，要接着问就重新发起请求");
     }
     const body = input.body.trim();
     if (!body || body.length > 20000) throw new RelayError(400, "消息需要在 1 到 20000 个字之间");
@@ -285,10 +300,13 @@ export class RelayService {
       .messages(id)
       .filter((m) => m.kind !== "system")
       .at(-1);
-    if (lastSpoken?.sender === input.from) {
+    // A call tried again after its reply was lost must not post twice.
+    if (lastSpoken?.sender === input.from && lastSpoken.body === body) {
+      throw new RelayError(409, "这条已经发过了");
+    }
+    if (!fromResponder && lastSpoken?.sender === input.from) {
       throw new RelayError(409, "还没轮到你说话，先等对方回复");
     }
-    const fromResponder = input.from === thread.to;
     if (!fromResponder && thread.roundsUsed >= thread.scope.maxRounds) {
       throw new RelayError(409, "已经到轮数上限了");
     }
@@ -309,13 +327,14 @@ export class RelayService {
       );
       let t = thread;
       if (fromResponder) {
-        const roundsUsed = thread.roundsUsed + 1;
+        const answers = lastSpoken?.sender === thread.from;
+        const roundsUsed = thread.roundsUsed + (answers ? 1 : 0);
         const costUsd = Math.round((thread.costUsd + (input.costUsd ?? 0)) * 10000) / 10000;
         let status: ThreadStatus = thread.status;
-        if (costUsd >= thread.scope.budgetUsd) {
+        if (status === "active" && costUsd >= thread.scope.budgetUsd) {
           status = "closed";
           closingNote = `花费到了上限 $${thread.scope.budgetUsd.toFixed(2)}，协作结束`;
-        } else if (roundsUsed >= thread.scope.maxRounds) {
+        } else if (status === "active" && answers && roundsUsed >= thread.scope.maxRounds) {
           status = "closed";
           closingNote = `已到 ${thread.scope.maxRounds} 轮上限，协作结束`;
         }

@@ -205,6 +205,17 @@ describe("cloud", () => {
 
     const fromWang = (await wangLaptop.client.agents()).find((a) => a.id === fangMac.agent("claude"));
     assert.equal(fromWang?.name, "老方的 Claude");
+
+    // Later 老方's Claude says the work is done; it is news for 老王's Codex only.
+    const done = await fangMac.client.postMessage(t.id, { from: fangMac.agent("claude"), body: "做完了" });
+    const askerNews = async (client: RelayClient) =>
+      (await client.listThreads({ unseen: wangLaptop.agent("codex") })).map((x) => x.id);
+    assert.ok((await askerNews(wangLaptop.client)).includes(t.id));
+    assert.deepEqual(await askerNews(outsiderPc.client), []);
+    await assert.rejects(fangMac.client.markSeen(t.id, done.messages.at(-1)!.seq), /发起方的 AI/);
+    await assert.rejects(outsiderPc.client.markSeen(t.id, done.messages.at(-1)!.seq), /找不到这次协作/);
+    await wangLaptop.client.markSeen(t.id, done.messages.at(-1)!.seq);
+    assert.deepEqual(await askerNews(wangLaptop.client), []);
   });
 
   test("the event stream only carries the account's own threads", async () => {

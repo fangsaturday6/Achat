@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS threads (
   rounds_used INTEGER NOT NULL DEFAULT 0,
   cost_usd REAL NOT NULL DEFAULT 0,
   responder_session TEXT,
+  asker_seen INTEGER NOT NULL DEFAULT 0,
   quiet INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -53,6 +54,7 @@ interface ThreadRow {
   rounds_used: number;
   cost_usd: number;
   responder_session: string | null;
+  asker_seen: number;
   quiet: number;
   created_at: string;
   updated_at: string;
@@ -81,6 +83,7 @@ function toThread(row: ThreadRow): Thread {
     roundsUsed: row.rounds_used,
     costUsd: row.cost_usd,
     responderSession: row.responder_session,
+    askerSeen: row.asker_seen,
     quiet: row.quiet === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -135,6 +138,15 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA);
+    // Threads from before asker_seen: their asking AIs got every answer while
+    // waiting, so nothing in them is new.
+    const columns = this.db.prepare("PRAGMA table_info(threads)").all() as { name: string }[];
+    if (!columns.some((c) => c.name === "asker_seen")) {
+      this.db.exec(`
+        ALTER TABLE threads ADD COLUMN asker_seen INTEGER NOT NULL DEFAULT 0;
+        UPDATE threads SET asker_seen = (SELECT COALESCE(MAX(seq), 0) FROM messages WHERE thread_id = threads.id);
+      `);
+    }
   }
 
   close(): void {
@@ -156,7 +168,7 @@ export class Store {
     return row ? toThread(row) : null;
   }
 
-  listThreads(filter: { agent?: string; agents?: string[]; to?: string; status?: ThreadStatus }): Thread[] {
+  listThreads(filter: { agent?: string; agents?: string[]; to?: string; status?: ThreadStatus; unseen?: string }): Thread[] {
     const where: string[] = [];
     const params: string[] = [];
     if (filter.agents) {
@@ -176,6 +188,13 @@ export class Store {
     if (filter.status) {
       where.push("status = ?");
       params.push(filter.status);
+    }
+    // Threads this AI asked in which the other side said something it has not seen.
+    if (filter.unseen) {
+      where.push(
+        "from_agent = ? AND EXISTS (SELECT 1 FROM messages m WHERE m.thread_id = threads.id AND m.seq > threads.asker_seen AND m.sender = threads.to_agent)",
+      );
+      params.push(filter.unseen);
     }
     const sql = `SELECT * FROM threads ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY updated_at DESC`;
     return (this.db.prepare(sql).all(...params) as unknown as ThreadRow[]).map(toThread);
@@ -247,6 +266,11 @@ export class Store {
          ON CONFLICT (reader, thread_id) DO UPDATE SET seq = MAX(seq, excluded.seq)`,
       )
       .run(reader, threadId, seq);
+  }
+
+  // Leaves updated_at alone: seeing a thread is not news for the list.
+  markAskerSeen(threadId: string, seq: number): void {
+    this.db.prepare("UPDATE threads SET asker_seen = MAX(asker_seen, ?) WHERE id = ?").run(seq, threadId);
   }
 
   // Who wrote each message after `seq`, leaving out Achat's own notes.

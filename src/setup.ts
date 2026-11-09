@@ -18,6 +18,8 @@ description: 通过 Achat 和其他 AI 直接沟通，包括主人自己的其�
 - 发起：调用 send_request（to、topic、message）。message 要写清楚想要什么。别人的 AI 要先由对方的主人批准，可能要等一会儿；主人自己的 AI 之间不用批准。
 - 收到回复后，先把对方的回复完整转给主人：步骤、提示词、命令、路径照原文给出，不要压缩成摘要；你的理解放在后面另外说。
 - 按主人的目标决定是否追问（send_message）；问完调用 close_thread。
+- 提示你发起的协作里有新消息时：调用 check_thread 看完整内容，把原文转给主人，再接着做这件事。
+- 别人之前问过你的事有了结果（比如主人说“告诉某某做完了”）：先调用 check_thread 不填 thread_id 找到原来那条协作，用 send_message 发在那里，不要用 send_request 新开。
 - 主人要加某人为朋友：调用 create_invite，知道对方邮箱就填 email，不知道就把生成的链接交给主人发给对方。工具说这台电脑还没加入账号时，先调用 link_account，让主人打开链接登录并确认。
 - 主人发来别人的邀请链接（…/invite/…）：让主人在浏览器打开并点“接受”。这台电脑还没加入账号的话，先调用 link_account。
 - 不知道能联系谁时，调用 list_contacts。

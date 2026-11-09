@@ -6,6 +6,7 @@ import { z } from "zod";
 import { RelayClient, RelayClientError, type DeviceLinkTicket, type PostView } from "../client.js";
 import { dateLabel } from "../cloud/pages.js";
 import type { AgentConfig } from "../config.js";
+import { cjk } from "../text.js";
 import { isTerminal, STATUS_LABELS, type ThreadDetail } from "../types.js";
 
 export interface McpConnection {
@@ -132,14 +133,24 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }
   }
 
+  // The asking AI has now been shown the thread up to its last message, so
+  // nothing in it is brought back to its session as news.
+  async function seen(c: McpConnection, detail: ThreadDetail): Promise<void> {
+    const last = detail.messages.at(-1);
+    if (detail.from === c.agentId && last) await c.client.markSeen(detail.id, last.seq).catch(() => {});
+  }
+
   async function describeOutcome(c: McpConnection, detail: ThreadDetail, afterSeq: number): Promise<string> {
     const other = await nameOf(c, detail.to);
-    const reply = detail.messages.filter((m) => m.seq > afterSeq && m.sender === detail.to).at(-1);
+    // An answer, and anything the other side added after it.
+    const replies = detail.messages.filter((m) => m.seq > afterSeq && m.sender === detail.to);
     const ended = detail.messages.filter((m) => m.seq > afterSeq && m.kind === "system").at(-1);
     const meta = `协作 ${detail.id}，第 ${detail.roundsUsed}/${detail.scope.maxRounds} 轮，已花费 ${money(detail.costUsd)}`;
-    if (reply) {
-      const lines = [`${other}的回复（${meta}）：`, "", reply.body, ""];
-      if (reply.redactions > 0) lines.push(`（已自动过滤 ${reply.redactions} 处敏感信息）`);
+    if (replies.length) {
+      const lines = [`${other}的回复（${meta}）：`, ""];
+      for (const reply of replies) lines.push(reply.body, "");
+      const redactions = replies.reduce((n, r) => n + r.redactions, 0);
+      if (redactions > 0) lines.push(`（已自动过滤 ${redactions} 处敏感信息）`);
       lines.push(
         "请把上面的回复完整转给主人：步骤、提示词、命令、路径照原文给出，不要压缩成摘要；你的理解或建议放在原文后面另外说。",
       );
@@ -212,7 +223,8 @@ export function createMcpServer(opts: McpOptions): McpServer {
       title: "向另一个 AI 发起协作",
       description:
         "通过 Achat 向另一个 AI 提问或请教，并等待它的回复。当主人想问别人的 AI、或自己的另一个 AI 某件事时使用，" +
-        "例如“问问我的 Claude 上次的视频是怎么做的”。对方的主人要先批准，所以可能需要等一会儿。",
+        "例如“问问我的 Claude 上次的视频是怎么做的”。对方的主人要先批准，所以可能需要等一会儿。" +
+        "回复对方之前问过你的事（比如告诉对方做完了）不用这个，用 send_message 发在原来的协作里。",
       inputSchema: {
         to: z.string().optional().describe("对方 AI 的 id 或名字，例如 claude@local 或“我的 Claude”；填了 post_id 可以不填"),
         topic: z.string().max(80).describe("一句话的话题，例如“视频制作流程”"),
@@ -238,26 +250,35 @@ export function createMcpServer(opts: McpOptions): McpServer {
       const created = await c.client.createRequest({ from: c.agentId, to: target, topic, message });
       const afterSeq = created.messages.find((m) => m.kind === "request")!.seq;
       const done = await waitForReply(c.client, created, afterSeq, extra);
-      return text(await describeOutcome(c, done, afterSeq));
+      const outcome = await describeOutcome(c, done, afterSeq);
+      await seen(c, done);
+      return text(outcome);
     }),
   );
 
   server.registerTool(
     "send_message",
     {
-      title: "在协作里继续追问",
-      description: "在已经开始的 Achat 协作里继续追问，并等待对方回复。",
+      title: "在协作里接着说",
+      description:
+        "在已经开始的 Achat 协作里接着说。你是发起方时是追问，会等对方回复；" +
+        "你是被问的一方时是补充，比如告诉对方事情做完了，发完就返回。不知道是哪条协作时，先调用 check_thread 不填 thread_id。",
       inputSchema: {
         thread_id: z.string().describe("协作 id"),
-        message: z.string().describe("追问的内容"),
+        message: z.string().describe("要说的内容"),
       },
     },
     guard(async ({ thread_id, message }: { thread_id: string; message: string }, extra) => {
       const c = opts.connection();
       const posted = await c.client.postMessage(thread_id, { from: c.agentId, body: message });
+      if (posted.to === c.agentId) {
+        return text(`已发给${await nameOf(c, posted.from)}（协作 ${posted.id}）。它会在当初发起这次协作的会话里看到，不用等回复。`);
+      }
       const afterSeq = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!.seq;
       const done = await waitForReply(c.client, posted, afterSeq, extra);
-      return text(await describeOutcome(c, done, afterSeq));
+      const outcome = await describeOutcome(c, done, afterSeq);
+      await seen(c, done);
+      return text(outcome);
     }),
   );
 
@@ -265,11 +286,12 @@ export function createMcpServer(opts: McpOptions): McpServer {
     "check_thread",
     {
       title: "查看协作",
-      description: "查看一次 Achat 协作的状态和全部对话。",
-      inputSchema: { thread_id: z.string().describe("协作 id") },
+      description: "查看一次 Achat 协作的状态和全部对话。不填 thread_id 时列出最近的协作，用来找到原来那条。",
+      inputSchema: { thread_id: z.string().optional().describe("协作 id；不填就列出最近的协作") },
     },
-    guard(async ({ thread_id }: { thread_id: string }) => {
+    guard(async ({ thread_id }: { thread_id?: string }) => {
       const c = opts.connection();
+      if (!thread_id) return text(await listRecent(c));
       const t = await c.client.getThread(thread_id);
       const lines = [
         `协作 ${t.id}：${t.topic}（${STATUS_LABELS[t.status]}，第 ${t.roundsUsed}/${t.scope.maxRounds} 轮，已花费 ${money(t.costUsd)}）`,
@@ -278,9 +300,42 @@ export function createMcpServer(opts: McpOptions): McpServer {
       for (const m of t.messages) {
         lines.push(m.kind === "system" ? `— ${m.body}` : `${await nameOf(c, m.sender)}：${m.body}`);
       }
+      const next = nextStep(c, t);
+      if (next) lines.push("", next);
+      await seen(c, t);
       return text(lines.join("\n"));
     }),
   );
+
+  // What the caller can do in a thread, so it does not open a new one for the same matter.
+  function nextStep(c: McpConnection, t: ThreadDetail): string | null {
+    if (t.to === c.agentId) {
+      return t.status === "active" || t.status === "closed" ? "要补充（比如告诉对方做完了），用 send_message 发在这里。" : null;
+    }
+    if (t.from !== c.agentId) return null;
+    if (t.status === "closed") return "这次协作已经结束了；要接着问，用 send_request 重新发起。";
+    if (t.status !== "active") return null;
+    const lastSpoken = t.messages.filter((m) => m.kind !== "system").at(-1);
+    return lastSpoken?.sender === c.agentId ? "还在等对方回复。" : "要追问，用 send_message；问完了用 close_thread。";
+  }
+
+  async function listRecent(c: McpConnection): Promise<string> {
+    const [threads, news, agents] = await Promise.all([
+      c.client.listThreads({ agent: c.agentId }),
+      c.client.listThreads({ unseen: c.agentId }),
+      c.client.agents(),
+    ]);
+    if (!threads.length) return "还没有协作。";
+    const name = (id: string) => agents.find((a) => a.id === id)?.name ?? id;
+    const unseen = new Set(news.map((t) => t.id));
+    const lines = ["最近的协作："];
+    for (const t of threads.slice(0, 15)) {
+      const who = t.from === c.agentId ? cjk("你问", name(t.to)) : cjk(name(t.from), "问你");
+      lines.push(`- ${t.id} · ${who}：${t.topic}（${STATUS_LABELS[t.status]}${unseen.has(t.id) ? "，有新消息" : ""}）`);
+    }
+    lines.push("", "看全部对话：check_thread 填 thread_id。接着原来的事说：用 send_message 发在那条协作里，不要新开。");
+    return lines.join("\n");
+  }
 
   server.registerTool(
     "close_thread",

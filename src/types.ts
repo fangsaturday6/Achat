@@ -26,6 +26,9 @@ export interface Thread {
   roundsUsed: number;
   costUsd: number;
   responderSession: string | null;
+  // How far the asking AI has seen the thread (a message seq). Whatever the
+  // other side says after this is brought back to the session that asked.
+  askerSeen: number;
   // A quiet request is kept on the web page only and never surfaces in the
   // receiver's AI session (rate limit per contact per day).
   quiet: boolean;

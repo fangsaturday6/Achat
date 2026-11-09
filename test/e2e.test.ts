@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, afterEach, before, describe, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -44,19 +47,73 @@ describe("experiment 0 end to end", () => {
   });
   after(() => relay.close());
 
-  function startSidecar(replies: (string | Error)[], receiver = CLAUDE): void {
+  // `alsoHere`: another AI on the same computer, which only asks.
+  function startSidecar(replies: (string | Error)[], receiver = CLAUDE, alsoHere?: string): void {
     runner = new ScriptedRunner(replies);
     sidecar = new Sidecar({
       client,
       agents: config.agents,
-      runners: { [receiver]: runner },
+      runners: { [receiver]: runner, ...(alsoHere ? { [alsoHere]: new ScriptedRunner([]) } : {}) },
       notify: (title, body) => notes.push(`${title} ${body}`),
       webUrl: relay.url,
+      seenWaitMs: 300,
       log: () => {},
     });
     sidecar.start();
   }
   afterEach(() => sidecar?.stop());
+
+  test("the asked side says the work is done in the same thread, and it comes back to the session that asked", async () => {
+    startSidecar(["可以接，做完告诉你", "已经上线了"], CLAUDE, CODEX);
+    const codex = await mcpClient(client, CODEX, relay.url);
+    const asking = codex.callTool({ name: "send_request", arguments: { to: "我的 Claude", topic: "交接", message: "能接手吗？" } });
+    const pending = await until(async () =>
+      (await client.listThreads({ status: "pending", to: CLAUDE })).find((t) => t.topic === "交接"),
+    );
+    await client.approve(pending.id);
+    assert.match(textOf(await asking), /可以接/);
+    await new Promise((r) => setTimeout(r, 500));
+    assert.ok(!notes.some((n) => n.includes("「交接」")), "an answer the asker got while waiting is not news");
+
+    // The person on the other side, in their own Claude, later reports back.
+    const claude = await mcpClient(client, CLAUDE, relay.url);
+    const listed = textOf(await claude.callTool({ name: "check_thread", arguments: {} }));
+    assert.match(listed, new RegExp(`${pending.id} · 我的 Codex 问你：交接（进行中）`));
+    const started = Date.now();
+    const sent = textOf(
+      await claude.callTool({ name: "send_message", arguments: { thread_id: pending.id, message: "做完了，已推送" } }),
+    );
+    assert.ok(Date.now() - started < 2000, "adding to a thread does not wait for an answer");
+    assert.match(sent, /已发给我的 Codex/);
+    assert.equal(runner.calls.length, 1, "the background does not answer its own side");
+
+    // The asker's computer tells the person, and the session that asked is reminded.
+    await until(async () => notes.some((n) => n === "我的 Claude 回复了 「交接」，回到问它的会话说句话就能接上"));
+    const dir = mkdtempSync(join(tmpdir(), "achat-transcript-"));
+    const asked = join(dir, "asked.jsonl");
+    const other = join(dir, "other.jsonl");
+    writeFileSync(asked, JSON.stringify({ content: `请求已发出（协作 ${pending.id}）` }) + "\n");
+    writeFileSync(other, JSON.stringify({ content: "别的事" }) + "\n");
+    const reminder = await userPromptHook(client, CODEX, { transcriptPath: asked });
+    assert.match(reminder ?? "", new RegExp(`我的 Claude 在你之前发起的协作「交接」（${pending.id}）里有新消息`));
+    assert.match(reminder ?? "", /check_thread/);
+    assert.equal(await userPromptHook(client, CODEX, { transcriptPath: other }), null, "other sessions are left alone");
+    assert.equal(await userPromptHook(client, CODEX), null);
+
+    assert.match(textOf(await codex.callTool({ name: "check_thread", arguments: {} })), /你问我的 Claude：交接（进行中，有新消息）/);
+    const read = textOf(await codex.callTool({ name: "check_thread", arguments: { thread_id: pending.id } }));
+    assert.match(read, /我的 Claude：做完了，已推送/);
+    assert.match(read, /要追问，用 send_message/);
+    assert.equal(await userPromptHook(client, CODEX, { transcriptPath: asked }), null, "once seen, no more reminders");
+
+    // The next round in the background knows what was said in the foreground.
+    const next = textOf(await codex.callTool({ name: "send_message", arguments: { thread_id: pending.id, message: "上线了吗？" } }));
+    assert.match(next, /已经上线了/);
+    assert.match(runner.calls[1].prompt, /<added>\n做完了，已推送\n<\/added>/);
+    const t = await client.getThread(pending.id);
+    assert.equal(t.roundsUsed, 2, "the word in between was not a round");
+    await codex.callTool({ name: "close_thread", arguments: { thread_id: pending.id } });
+  });
 
   test("Codex asks, the person approves on the web, Claude answers in the background", async () => {
     startSidecar(["第一步写分镜，第二步出图。联系 me@example.com", "风格参数用 --stylize 250"]);

@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
 import { request } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, test } from "node:test";
 import { RelayClient, RelayClientError } from "../src/client.js";
 import type { RunningRelay } from "../src/relay/server.js";
+import { Store } from "../src/relay/store.js";
 import { CLAUDE, CODEX, startTestRelay } from "./helpers.js";
 
 function rawGet(port: number, path: string, headers: Record<string, string>): Promise<number> {
@@ -70,6 +75,58 @@ describe("relay", () => {
     await assert.rejects(client.postMessage(created.id, { from: CODEX, body: "还有吗" }), /已经结束/);
   });
 
+  test("the asked side can add to a thread at any time, without using a round", async () => {
+    const created = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "交接", message: "能接手吗？" });
+    await client.approve(created.id, { maxRounds: 2, budgetUsd: 1 });
+    await client.postMessage(created.id, { from: CLAUDE, body: "可以，做完告诉你", costUsd: 0.1 });
+
+    let t = await client.postMessage(created.id, { from: CLAUDE, body: "做完了，已推送" });
+    assert.equal(t.roundsUsed, 1, "adding to an answer is not a round");
+    assert.equal(t.costUsd, 0.1);
+    assert.equal(t.status, "active");
+
+    await client.postMessage(created.id, { from: CODEX, body: "什么时候上线？" });
+    t = await client.postMessage(created.id, { from: CLAUDE, body: "下周", costUsd: 0.1 });
+    assert.equal(t.status, "closed");
+
+    t = await client.postMessage(created.id, { from: CLAUDE, body: "已经上线了" });
+    assert.equal(t.status, "closed", "a word after the end does not open it again");
+    assert.equal(t.messages.at(-1)!.body, "已经上线了");
+    await assert.rejects(client.postMessage(created.id, { from: CODEX, body: "好的" }), /重新发起/);
+
+    const stopped = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "停掉的", message: "问题" });
+    await client.approve(stopped.id);
+    await client.stop(stopped.id);
+    await assert.rejects(client.postMessage(stopped.id, { from: CLAUDE, body: "补一句" }), /停止/);
+  });
+
+  test("a message tried again after its reply was lost is not posted twice", async () => {
+    const created = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "重试", message: "问题" });
+    await client.approve(created.id);
+    await client.postMessage(created.id, { from: CLAUDE, body: "答案", costUsd: 0.1 });
+    await assert.rejects(client.postMessage(created.id, { from: CLAUDE, body: "答案", costUsd: 0.1 }), /已经发过/);
+    const t = await client.getThread(created.id);
+    assert.equal(t.messages.filter((m) => m.body === "答案").length, 1);
+    assert.equal(t.costUsd, 0.1);
+  });
+
+  test("keeps how far the asking AI has seen, and lists threads with news from the other side", async () => {
+    const created = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "看到哪了", message: "问题" });
+    await client.approve(created.id);
+    const unseen = async () => (await client.listThreads({ unseen: CODEX })).map((t) => t.id);
+    assert.ok(!(await unseen()).includes(created.id), "its own request and Achat's notes are not news");
+
+    const answered = await client.postMessage(created.id, { from: CLAUDE, body: "答案" });
+    assert.ok((await unseen()).includes(created.id));
+    assert.equal((await client.listThreads({ unseen: CLAUDE })).length, 0, "only the asker's threads");
+
+    await client.markSeen(created.id, answered.messages.at(-1)!.seq);
+    assert.ok(!(await unseen()).includes(created.id));
+    const t = await client.getThread(created.id);
+    assert.equal(t.askerSeen, answered.messages.at(-1)!.seq);
+    assert.equal(t.updatedAt, answered.updatedAt, "seeing a thread does not move it up the list");
+  });
+
   test("closes when the budget runs out", async () => {
     const t0 = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "预算", message: "问题" });
     await client.approve(t0.id, { budgetUsd: 0.5 });
@@ -109,6 +166,31 @@ describe("relay", () => {
     await assert.rejects(client.createRequest({ from: CODEX, to: CODEX, topic: "x", message: "y" }), /自己/);
     await assert.rejects(client.createRequest({ from: "nobody", to: CLAUDE, topic: "x", message: "y" }), /不认识/);
   });
+});
+
+test("threads from before the asking AI's place was kept count as seen", () => {
+  const path = join(mkdtempSync(join(tmpdir(), "achat-old-")), "achat.db");
+  const old = new DatabaseSync(path);
+  old.exec(`
+    CREATE TABLE threads (id TEXT PRIMARY KEY, topic TEXT NOT NULL, from_agent TEXT NOT NULL, to_agent TEXT NOT NULL,
+      status TEXT NOT NULL, max_rounds INTEGER NOT NULL, budget_usd REAL NOT NULL, rounds_used INTEGER NOT NULL DEFAULT 0,
+      cost_usd REAL NOT NULL DEFAULT 0, responder_session TEXT, quiet INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL REFERENCES threads(id),
+      seq INTEGER NOT NULL, sender TEXT, kind TEXT NOT NULL, body TEXT NOT NULL, redactions INTEGER NOT NULL DEFAULT 0,
+      cost_usd REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL, UNIQUE (thread_id, seq));
+    INSERT INTO threads VALUES ('t1', '旧的', '${CODEX}', '${CLAUDE}', 'active', 5, 5, 1, 0, NULL, 0, 'x', 'x');
+    INSERT INTO messages (thread_id, seq, sender, kind, body, created_at) VALUES
+      ('t1', 1, '${CODEX}', 'request', '问题', 'x'), ('t1', 2, '${CLAUDE}', 'message', '答案', 'x');
+  `);
+  old.close();
+  const store = new Store(path);
+  try {
+    assert.equal(store.getThread("t1")!.askerSeen, 2);
+    assert.equal(store.listThreads({ unseen: CODEX }).length, 0);
+  } finally {
+    store.close();
+  }
 });
 
 describe("relay limits", () => {
