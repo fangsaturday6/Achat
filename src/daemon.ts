@@ -7,6 +7,7 @@ import { agentIdFor } from "./device.js";
 import { checkLink } from "./link.js";
 import { startRelay } from "./relay/server.js";
 import { desktopAlert, desktopAsk, type Asker } from "./sidecar/dialog.js";
+import { historyFor } from "./sidecar/history.js";
 import { desktopNotify } from "./sidecar/notify.js";
 import { ClaudeRunner, CodexRunner, type AgentRunner } from "./sidecar/runners.js";
 import { ClaudeTaskOpener, type TaskOpener } from "./sidecar/tasks.js";
@@ -70,11 +71,35 @@ export class Activity {
   }
 }
 
+// Puts the date and time in front of each line, so the log shows how long
+// things took ("11-10 10:12:37 回答 …").
+export function stamped(write: (...args: unknown[]) => void, now: () => Date = () => new Date()): (...args: unknown[]) => void {
+  return (...args) => {
+    const d = now();
+    const p = (n: number): string => String(n).padStart(2, "0");
+    write(`${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`, ...args);
+  };
+}
+
 const activity = new Activity();
 const ask = activity.asker(desktopAsk);
 
 function runnerFor(client: AchatConfig["agents"][number]["client"]): AgentRunner {
   return activity.runner(client === "claude" ? new ClaudeRunner() : new CodexRunner());
+}
+
+// The first copy of the history takes a while; it is made on start, so the
+// first question only waits for what changed since.
+function prepareHistory(cfg: AchatConfig): void {
+  for (const kind of new Set(cfg.agents.map((a) => a.client))) {
+    const began = Date.now();
+    historyFor(kind)
+      .refresh()
+      .then(
+        () => console.log(`${kind === "claude" ? "Claude Code" : "Codex"} 的对话记录整理好了（${Math.round((Date.now() - began) / 1000)} 秒）`),
+        (err: Error) => console.error(`[achat] 整理对话记录：${err.message}`),
+      );
+  }
 }
 
 // Only Claude Code opens a conversation of its own to 动手, so far.
@@ -172,11 +197,14 @@ async function startCloudMode(cfg: AchatConfig, conn: Connection, wait: boolean)
 // account, the sidecar against the cloud. It notices when a pending link is
 // confirmed or the computer leaves its account, and switches over.
 export async function runDaemon(opts: { webDir: string; wait: boolean }): Promise<void> {
-  const begin = (cfg: AchatConfig): Promise<Running> => {
+  console.log = stamped(console.log.bind(console));
+  console.error = stamped(console.error.bind(console));
+  const begin =(cfg: AchatConfig): Promise<Running> => {
     const conn = connect(cfg);
     return conn.mode === "cloud" ? startCloudMode(cfg, conn, opts.wait) : startLocal(cfg, opts.webDir, opts.wait);
   };
   let running = await begin(loadConfig());
+  prepareHistory(loadConfig());
   let busy = false;
 
   // A copy installed from the service and run as the background service

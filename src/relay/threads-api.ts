@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { FILES_BODY_LIMIT, SHOWN_TYPES, type NewFile } from "../attachments.js";
 import type { AgentConfig } from "../config.js";
 import type { Thread, ThreadMode, ThreadStatus } from "../types.js";
 import { optNum, readJson, send, str } from "./http.js";
@@ -39,8 +40,27 @@ function modeOf(body: Record<string, unknown>): ThreadMode | undefined {
   return body.mode === undefined || body.mode === null ? undefined : (body.mode as ThreadMode);
 }
 
-// Handles /api/agents, /api/events and /api/threads/*; returns false for
-// other paths.
+// Starting a conversation and saying something in one may carry files.
+export function takesFiles(method: string, pathname: string): boolean {
+  const parts = pathname.split("/").filter(Boolean).slice(1);
+  return method === "POST" && parts[0] === "threads" && (parts.length === 1 || (parts.length === 3 && parts[2] === "messages"));
+}
+
+// Files as sent: a name, maybe a type, and the bytes in base64.
+function filesOf(body: Record<string, unknown>): NewFile[] {
+  const raw = body.files;
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new RelayError(400, "files 需要是文件的列表");
+  return raw.map((f: unknown) => {
+    const file = f as Record<string, unknown> | null;
+    if (!file || typeof file.name !== "string" || typeof file.data !== "string") throw new RelayError(400, "每个文件需要 name 和 data");
+    if (!/^[A-Za-z0-9+/\s]*={0,2}\s*$/.test(file.data)) throw new RelayError(400, "文件内容需要是 base64");
+    return { name: file.name, type: typeof file.type === "string" ? file.type : "", data: Buffer.from(file.data, "base64") };
+  });
+}
+
+// Handles /api/agents, /api/events, /api/threads/* and /api/files/*;
+// returns false for other paths.
 export async function threadsApi(
   req: IncomingMessage,
   res: ServerResponse,
@@ -80,6 +100,24 @@ export async function threadsApi(
     return true;
   }
 
+  // A file is for whoever can read its conversation. Only pictures show in
+  // the page; anything else is downloaded, so it cannot run as a page there.
+  if (method === "GET" && parts[0] === "files" && parts.length === 2) {
+    const file = service.file(parts[1]);
+    if (!file || !readable(viewer, service.getThread(file.threadId))) throw new RelayError(404, "找不到这个文件");
+    const shown = SHOWN_TYPES.has(file.type);
+    res.writeHead(200, {
+      "content-type": shown ? file.type : "application/octet-stream",
+      "content-length": String(file.data.length),
+      "content-disposition": `${shown ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "default-src 'none'; sandbox",
+      "cache-control": "private, max-age=31536000, immutable",
+    });
+    res.end(file.data);
+    return true;
+  }
+
   if (parts[0] !== "threads") return false;
 
   if (parts.length === 1 && method === "GET") {
@@ -102,7 +140,7 @@ export async function threadsApi(
   }
 
   if (parts.length === 1 && method === "POST") {
-    const body = await readJson(req);
+    const body = await readJson(req, FILES_BODY_LIMIT);
     const from = str(body, "from");
     const to = str(body, "to");
     if (!viewer.actsAs(from) && from !== viewer.person) throw new RelayError(403, "只能以这台电脑上的 AI 的身份发请求");
@@ -111,7 +149,7 @@ export async function threadsApi(
       res,
       201,
       service.createRequest(
-        { from, to, topic: str(body, "topic"), message: str(body, "message"), mode: modeOf(body), byPerson: from === viewer.person },
+        { from, to, topic: str(body, "topic"), message: str(body, "message"), mode: modeOf(body), byPerson: from === viewer.person, files: filesOf(body) },
         { autoApprove },
       ),
     );
@@ -144,7 +182,7 @@ export async function threadsApi(
   }
   if (method !== "POST") return false;
 
-  const body = await readJson(req);
+  const body = await readJson(req, takesFiles(method, url.pathname) ? FILES_BODY_LIMIT : undefined);
   const forbid = (message: string): never => {
     throw new RelayError(403, message);
   };
@@ -211,6 +249,7 @@ export async function threadsApi(
           sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
           mode: modeOf(body),
           byPerson,
+          files: filesOf(body),
         }),
       );
       return true;

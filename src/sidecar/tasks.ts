@@ -71,6 +71,9 @@ export interface TaskStart {
   // A conversation that worked on this thread before: the new one carries on
   // from it, in its folder.
   from?: TaskRecord;
+  // Folders outside its own it may read without asking, such as where the
+  // thread's files are kept.
+  readDirs?: string[];
 }
 
 // Opens a Claude Code conversation for a task; resolves once it is started.
@@ -106,6 +109,7 @@ export function claudeTaskArgs(start: TaskStart): string[] {
     ...(start.from ? ["--resume", start.from.sessionId, "--fork-session"] : []),
     "-n",
     `Achat · ${start.topic}`,
+    ...(start.readDirs?.length ? ["--add-dir", ...start.readDirs] : []),
     "--permission-mode",
     "acceptEdits",
     "--append-system-prompt",

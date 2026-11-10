@@ -1,7 +1,9 @@
+import { randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { Message, MessageKind, Scope, Thread, ThreadMode, ThreadStatus } from "../types.js";
+import type { NewFile } from "../attachments.js";
+import type { Attachment, Message, MessageKind, Scope, Thread, ThreadMode, ThreadStatus } from "../types.js";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS threads (
@@ -45,6 +47,18 @@ CREATE TABLE IF NOT EXISTS thread_reads (
   seq INTEGER NOT NULL,
   PRIMARY KEY (reader, thread_id)
 );
+-- Pictures and other files sent with a message.
+CREATE TABLE IF NOT EXISTS files (
+  id TEXT PRIMARY KEY,
+  message_id INTEGER NOT NULL REFERENCES messages(id),
+  thread_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  data BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS files_by_thread ON files (thread_id, message_id, position);
 CREATE INDEX IF NOT EXISTS threads_to ON threads (to_agent, status);
 CREATE INDEX IF NOT EXISTS threads_from ON threads (from_agent, created_at);
 `;
@@ -120,6 +134,7 @@ function toMessage(row: MessageRow): Message {
     redactions: row.redactions,
     costUsd: row.cost_usd,
     byPerson: row.by_person === 1,
+    files: [],
     createdAt: row.created_at,
   };
 }
@@ -141,6 +156,7 @@ export interface NewMessage {
   redactions?: number;
   costUsd?: number;
   byPerson?: boolean;
+  files?: NewFile[];
 }
 
 export interface ThreadPatch {
@@ -288,18 +304,46 @@ export class Store {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(threadId, next.seq, m.sender, m.kind, m.body, m.redactions ?? 0, m.costUsd ?? 0, m.byPerson ? 1 : 0, now);
-    const row = this.db
-      .prepare("SELECT * FROM messages WHERE id = ?")
-      .get(Number(result.lastInsertRowid)) as unknown as MessageRow;
-    return toMessage(row);
+    const messageId = Number(result.lastInsertRowid);
+    const insert = this.db.prepare(
+      "INSERT INTO files (id, message_id, thread_id, position, name, type, size, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    (m.files ?? []).forEach((f, position) =>
+      insert.run(`f_${randomBytes(9).toString("base64url")}`, messageId, threadId, position, f.name, f.type, f.data.length, f.data),
+    );
+    const row = this.db.prepare("SELECT * FROM messages WHERE id = ?").get(messageId) as unknown as MessageRow;
+    return this.withFiles(threadId, [toMessage(row)])[0];
   }
 
   messages(threadId: string, afterSeq = 0): Message[] {
-    return (
-      this.db
-        .prepare("SELECT * FROM messages WHERE thread_id = ? AND seq > ? ORDER BY seq")
-        .all(threadId, afterSeq) as unknown as MessageRow[]
-    ).map(toMessage);
+    const rows = this.db
+      .prepare("SELECT * FROM messages WHERE thread_id = ? AND seq > ? ORDER BY seq")
+      .all(threadId, afterSeq) as unknown as MessageRow[];
+    return this.withFiles(threadId, rows.map(toMessage));
+  }
+
+  // Fills in each message's files, without their bytes.
+  private withFiles(threadId: string, messages: Message[]): Message[] {
+    if (!messages.length) return messages;
+    const rows = this.db
+      .prepare("SELECT id, message_id, name, type, size FROM files WHERE thread_id = ? AND message_id >= ? ORDER BY message_id, position")
+      .all(threadId, messages[0].id) as unknown as (Attachment & { message_id: number })[];
+    const byMessage = new Map<number, Attachment[]>();
+    for (const { message_id, ...f } of rows) {
+      if (!byMessage.has(message_id)) byMessage.set(message_id, []);
+      byMessage.get(message_id)!.push(f);
+    }
+    for (const m of messages) m.files = byMessage.get(m.id) ?? [];
+    return messages;
+  }
+
+  file(id: string): (Attachment & { threadId: string; data: Uint8Array }) | null {
+    const row = this.db.prepare("SELECT id, thread_id, name, type, size, data FROM files WHERE id = ?").get(id) as
+      | (Attachment & { thread_id: string; data: Uint8Array })
+      | undefined;
+    if (!row) return null;
+    const { thread_id, ...f } = row;
+    return { ...f, threadId: thread_id };
   }
 
   readSeq(reader: string, threadId: string): number {
@@ -363,7 +407,7 @@ export class Store {
     const row = this.db
       .prepare("SELECT * FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 1")
       .get(threadId) as MessageRow | undefined;
-    return row ? toMessage(row) : null;
+    return row ? this.withFiles(threadId, [toMessage(row)])[0] : null;
   }
 
   countSentSince(from: string, since: string, to?: string): number {

@@ -67,7 +67,16 @@ export interface Message {
   costUsd: number;
   // Written by the person on the web page, not by their AI.
   byPerson: boolean;
+  // Pictures and other files sent with it; the bytes are fetched one by one.
+  files: Attachment[];
   createdAt: string;
+}
+
+export interface Attachment {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
 }
 
 export interface ThreadDetail extends Thread {

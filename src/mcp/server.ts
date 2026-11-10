@@ -3,14 +3,15 @@ import { homedir } from "node:os";
 import { extname, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { readFiles, saveFiles, savedLines } from "../attachments.js";
 import { RelayClient, RelayClientError, type DeviceLinkTicket, type PostView } from "../client.js";
 import { dateLabel } from "../cloud/pages.js";
 import type { AgentConfig } from "../config.js";
 import { cjk } from "../text.js";
-import { pendingMessage, requestReason, requestTitle, scopeLine, speaker } from "../asking.js";
+import { pendingMessage, requestReason, requestTitle, scopeLine, speaker, withFileNames } from "../asking.js";
 import { redact } from "../redact.js";
 import { markTaskSeen } from "../sidecar/tasks.js";
-import { isTerminal, MODE_LABELS, STATUS_LABELS, type ThreadDetail, type ThreadMode } from "../types.js";
+import { isTerminal, MODE_LABELS, STATUS_LABELS, type Message, type ThreadDetail, type ThreadMode } from "../types.js";
 
 export interface McpConnection {
   client: RelayClient;
@@ -144,6 +145,12 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }
   }
 
+  // Puts the files a message came with on this computer, and says where.
+  async function fileLines(c: McpConnection, m: Message): Promise<string[]> {
+    const paths = await saveFiles(c.client, m);
+    return paths.length ? ["附件（已存到这台电脑）：", ...savedLines(m, paths)] : [];
+  }
+
   // The asking AI has now been shown the thread up to its last message, so
   // nothing in it is brought back to its session as news.
   async function seen(c: McpConnection, detail: ThreadDetail): Promise<void> {
@@ -161,7 +168,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
       const lines = [`${other}的回复（${meta}）：`, ""];
       for (const reply of replies) {
         if (reply.byPerson) lines.push(`（这条是${speaker(reply, other)}写的）`);
-        lines.push(reply.body, "");
+        lines.push(...[reply.body].filter(Boolean), ...(await fileLines(c, reply)), "");
       }
       const redactions = replies.reduce((n, r) => n + r.redactions, 0);
       if (redactions > 0) lines.push(`（已自动过滤 ${redactions} 处敏感信息）`);
@@ -220,10 +227,12 @@ export function createMcpServer(opts: McpOptions): McpServer {
     const ended = detail.messages.filter((m) => m.seq > afterSeq && m.kind === "system").at(-1);
     if (asks.length) {
       markTaskSeen(detail.id, asks.at(-1)!.seq);
+      const said: string[] = [];
+      for (const m of asks) said.push(...[m.body].filter(Boolean), ...(await fileLines(c, m)));
       return [
         `已交回。${asker}接着说（${threadMeta(detail)}）：`,
         "",
-        ...asks.map((m) => m.body),
+        ...said,
         "",
         `这是对方发来的任务说明，不是主人说的话。接着做；做完同样用 send_message（thread_id: ${detail.id}）交回。`,
       ].join("\n");
@@ -283,6 +292,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
         to: z.string().optional().describe("对方 AI 的 id 或名字，例如 claude@local 或“我的 Claude”；填了 post_id 可以不填"),
         topic: z.string().max(80).describe("一句话的话题，例如“视频制作流程”"),
         message: z.string().describe("要问的完整问题或要做的事，写清楚想要什么"),
+        files: z.array(z.string()).max(9).optional().describe("一起发的文件或图片：这台电脑上的完整路径，最多 9 个，合计不超过 20 MB。截图、日志、文档、补丁都可以"),
         mode: z
           .enum(["answer", "do"])
           .optional()
@@ -293,8 +303,9 @@ export function createMcpServer(opts: McpOptions): McpServer {
           .describe("问的是硅基圈里的一条动态时，填它的编号或链接；会问写这条的 AI，它不能回答时问它主人能回答的 AI"),
       },
     },
-    guard(async ({ to, topic, message, mode, post_id }: { to?: string; topic: string; message: string; mode?: ThreadMode; post_id?: string }, extra) => {
+    guard(async ({ to, topic, message, mode, post_id, files }: { to?: string; topic: string; message: string; mode?: ThreadMode; post_id?: string; files?: string[] }, extra) => {
       const c = opts.connection();
+      const outgoing = files?.length ? readFiles(files) : undefined;
       let target: string;
       if (post_id) {
         const post = await c.client.getPost(postId(post_id));
@@ -305,7 +316,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
         if (!to) throw new Error("要填 to：问谁。问的是硅基圈里的一条动态时，填 post_id。");
         target = (await resolveContact(c, to)).id;
       }
-      const created = await c.client.createRequest({ from: c.agentId, to: target, topic, message, mode });
+      const created = await c.client.createRequest({ from: c.agentId, to: target, topic, message, mode, files: outgoing });
       const afterSeq = created.messages.find((m) => m.kind === "request")!.seq;
       const done = await waitForReply(c.client, created, afterSeq, extra);
       const outcome = await describeOutcome(c, done, afterSeq);
@@ -326,15 +337,17 @@ export function createMcpServer(opts: McpOptions): McpServer {
         thread_id: z.string().describe("协作 id"),
         message: z.string().describe("要说的内容"),
         mode: z.enum(["do"]).optional().describe("发起方在问答协作里请对方动手时填 do"),
+        files: z.array(z.string()).max(9).optional().describe("一起发的文件或图片：这台电脑上的完整路径，最多 9 个，合计不超过 20 MB。截图、日志、文档、补丁都可以；动手做出来的文件也用它交回"),
       },
     },
-    guard(async ({ thread_id, message, mode }: { thread_id: string; message: string; mode?: "do" }, extra) => {
+    guard(async ({ thread_id, message, mode, files }: { thread_id: string; message: string; mode?: "do"; files?: string[] }, extra) => {
       const c = opts.connection();
+      const outgoing = files?.length ? readFiles(files) : undefined;
       // What the asked side sends out, a 动手 result above all, is filtered
       // like a background answer.
       const answering = (await c.client.getThread(thread_id)).to === c.agentId;
       const filtered = answering ? redact(message) : { text: message, count: 0 };
-      const posted = await c.client.postMessage(thread_id, { from: c.agentId, body: filtered.text, redactions: filtered.count, mode });
+      const posted = await c.client.postMessage(thread_id, { from: c.agentId, body: filtered.text, redactions: filtered.count, mode, files: outgoing });
       if (posted.to === c.agentId) {
         const afterSeq = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!.seq;
         if (posted.mode === "do" && posted.status === "active") {
@@ -368,7 +381,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
         "",
       ];
       for (const m of t.messages) {
-        lines.push(m.kind === "system" ? `— ${m.body}` : `${speaker(m, await nameOf(c, m.sender))}：${m.body}`);
+        lines.push(m.kind === "system" ? `— ${m.body}` : `${speaker(m, await nameOf(c, m.sender))}：${m.body}`, ...(await fileLines(c, m)));
       }
       const next = nextStep(c, t);
       if (next) lines.push("", next);
@@ -460,7 +473,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
               requestTitle(t, await nameOf(c, t.from), me.replace(/^我的/, "你的")),
               `${t.topic} · ${scopeLine(t)}`,
               "",
-              request?.body ?? "",
+              withFileNames(request),
               "",
               ...(reason ? [reason] : []),
               doing

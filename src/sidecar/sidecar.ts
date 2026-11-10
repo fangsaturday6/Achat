@@ -1,4 +1,6 @@
-import { pendingMessage, requestReason, requestTitle, scopeLine, speaker } from "../asking.js";
+import { mkdirSync } from "node:fs";
+import { filesDir, saveFiles, savedLines } from "../attachments.js";
+import { pendingMessage, requestReason, requestTitle, scopeLine, speaker, withFileNames } from "../asking.js";
 import { RelayClientError, type RelayClient } from "../client.js";
 import type { AgentClient, AgentConfig } from "../config.js";
 import { redact } from "../redact.js";
@@ -56,10 +58,13 @@ export interface SidecarOptions {
 }
 
 // Only AIs that run on a computer answer, so the owner is Claude or Codex.
+// The history is a plain copy, one .md per conversation, whose first lines
+// name the project, the dates and the original transcript.
+const FINDING =
+  "先搜关键词找到对话（几个关键词可以用 | 一次搜），再读相关的段落。工具输出被截短时，要看全文就按标注的行号读原始记录的那一行。只读这些，不读别的文件。";
 const HISTORY_RULE: Record<AgentClient, string> = {
-  claude: "2. 你只能读取本机的 Claude Code 对话记录（当前目录下的 .jsonl 文件），用 Grep、Glob、Read 查找相关内容。",
-  codex:
-    "2. 你只能读取本机的 Codex 对话记录（当前目录下按日期存放的 .jsonl 文件），只用 rg、ls、cat、sed 这类只读命令查找相关内容，不要读当前目录以外的文件。",
+  claude: `2. 当前目录是本机 Claude Code 对话记录整理成的文字，一个 .md 是一个对话，开头写着项目、时间和原始记录的位置。用 Grep、Glob、Read：${FINDING}`,
+  codex: `2. 当前目录是本机 Codex 对话记录整理成的文字，按日期存放，一个 .md 是一个对话，开头写着项目、时间和原始记录的位置。只用 rg、ls、cat、sed 这类只读命令：${FINDING}`,
 };
 
 export function responderSystemPrompt(owner: AgentConfig, from: AgentConfig): string {
@@ -93,7 +98,8 @@ export function doerSystemPrompt(owner: AgentConfig, from: AgentConfig, threadId
 // The first message of a 动手 conversation: the whole thread so far, since a
 // 动手 asked for mid-thread builds on the 问答 before it. A later one carries
 // on from an earlier conversation and only needs what came after `since`.
-export function doerPrompt(thread: ThreadDetail, names: (id: string | null) => string, since = 0): string {
+// `saved`: where each message's files are on this computer, by seq.
+export function doerPrompt(thread: ThreadDetail, names: (id: string | null) => string, since = 0, saved = new Map<number, string[]>()): string {
   const spoken = thread.messages.filter((m) => m.kind !== "system" && m.seq > since);
   const lines = since
     ? [`${names(thread.from)}在 Achat 协作「${thread.topic}」（${thread.id}）里接着说：`, ""]
@@ -101,20 +107,27 @@ export function doerPrompt(thread: ThreadDetail, names: (id: string | null) => s
   for (const m of spoken) {
     const who = m.sender === thread.to ? "你之前说" : speaker(m, names(m.sender));
     lines.push(`${who}：`, "<message>", m.body, "</message>", "");
+    const paths = saved.get(m.seq);
+    if (paths?.length) lines.push(FILES_HERE, ...savedLines(m, paths), "");
   }
   lines.push(`照上面最后一条做。做完一步，用 achat 的 send_message（thread_id: ${thread.id}）把结果交回去。`);
   return lines.join("\n");
 }
 
+// Said before the paths of the files a message came with.
+const FILES_HERE = "一起发来的文件，已存到这台电脑，可以直接打开（图片也能看）：";
+
 // `added`: what this side said in the thread after the background's last
 // answer, such as the person telling the other AI from the foreground that
-// the work is done. The background session has not seen it.
+// the work is done. The background session has not seen it. `saved`: where
+// the message's files are on this computer.
 export function responderPrompt(
   thread: ThreadDetail,
   message: Message,
   from: AgentConfig,
   first: boolean,
   added: Message[] = [],
+  saved: string[] = [],
 ): string {
   const lines: string[] = [];
   if (first) lines.push(`话题：${thread.topic}`, "");
@@ -129,6 +142,7 @@ export function responderPrompt(
     message.body,
     "</message>",
   );
+  if (saved.length) lines.push("", FILES_HERE, ...savedLines(message, saved));
   return lines.join("\n");
 }
 
@@ -311,7 +325,7 @@ export class Sidecar {
         mode: t.mode,
         title: requestTitle(t, from, to),
         topic: t.topic,
-        body: pendingMessage(t)?.body ?? "",
+        body: withFileNames(pendingMessage(t)),
         ...(requestReason(t) ? { reason: requestReason(t)! } : {}),
         scope: scopeLine(t),
       });
@@ -407,12 +421,18 @@ export class Sidecar {
   private async openTask(thread: ThreadDetail, owner: AgentConfig, from: AgentConfig, opener: TaskOpener, before?: TaskRecord): Promise<void> {
     const names = (id: string | null): string => (id === thread.from ? from.name : id === thread.to ? owner.name : (id ?? "Achat"));
     const ownLast = thread.messages.filter((m) => m.sender === thread.to).at(-1)?.seq ?? 0;
+    const since = before ? Math.max(this.tasks.seen(thread.id), ownLast) : 0;
+    // Files that come later are kept in the same folder, which it may read.
+    mkdirSync(filesDir(thread.id), { recursive: true, mode: 0o700 });
+    const saved = new Map<number, string[]>();
+    for (const m of thread.messages.filter((m) => m.seq > since)) saved.set(m.seq, await saveFiles(this.relay, m));
     const rec = await opener.open({
       threadId: thread.id,
       topic: thread.topic,
-      prompt: doerPrompt(thread, names, before ? Math.max(this.tasks.seen(thread.id), ownLast) : 0),
+      prompt: doerPrompt(thread, names, since, saved),
       systemPrompt: doerSystemPrompt(owner, from, thread.id),
       from: before,
+      readDirs: [filesDir(thread.id)],
     });
     this.tasks.set(thread.id, rec);
     this.tasks.markSeen(thread.id, thread.messages.at(-1)?.seq ?? 0);
@@ -460,13 +480,17 @@ export class Sidecar {
       }
 
       this.log(`回答 ${threadId}（第 ${thread.roundsUsed + 1} 轮）`);
+      const saved = await saveFiles(this.relay, last);
       let out: RunOutput;
       try {
         out = await runner.run({
-          prompt: responderPrompt(thread, last, from, !thread.responderSession, added),
+          prompt: responderPrompt(thread, last, from, !thread.responderSession, added, saved),
           systemPrompt: responderSystemPrompt(owner, from),
           sessionId: thread.responderSession ?? undefined,
           budgetUsd: left,
+          // Files from earlier rounds stay readable in a session that goes on.
+          // A relay from before files sends messages without them.
+          readDirs: thread.messages.some((m) => m.files?.length) ? [filesDir(thread.id)] : undefined,
         });
       } catch (err) {
         if (!(err instanceof BudgetExceededError)) throw err;

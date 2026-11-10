@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { test, type TestContext } from "node:test";
+import { RelayClient } from "../src/client.js";
 import { Sidecar } from "../src/sidecar/sidecar.js";
 import type { ThreadDetail } from "../src/types.js";
 import { CLAUDE, CODEX, ScriptedRunner, startTestRelay, until } from "./helpers.js";
@@ -168,4 +171,29 @@ test("stopping while the relay is out of reach leaves the thread for the next st
   await answering;
 
   assert.equal((await client.getThread(id)).status, "active");
+});
+
+// A connection can die without either side hearing about it, after a laptop
+// sleeps or a proxy drops it. The relay says something every 25 seconds, so
+// a stream that stays silent much longer is dead and is opened again.
+test("an event stream that goes silent is dropped and opened again", async (t) => {
+  let connections = 0;
+  const server = createServer((_req, res) => {
+    connections += 1;
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.flushHeaders();
+    // The first connection stays open and says nothing.
+    if (connections > 1) res.write(`data: ${JSON.stringify({ type: "thread.created", threadId: "t1" })}\n\n`);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const seen: string[] = [];
+  const stop = new RelayClient(url, "token").subscribe(undefined, (e) => seen.push(e.threadId), undefined, { idleMs: 100, retryMs: 10 });
+  t.after(stop);
+  await until(async () => seen.length > 0);
+  assert.equal(connections, 2);
 });

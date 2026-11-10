@@ -96,7 +96,7 @@ bash /opt/achat/deploy/install.sh achat.example.com
 | 电脑钥匙 | `src/device.ts` | 每台电脑一把 Ed25519 钥匙，macOS 存在钥匙串里；发往云端的每个请求都签名 |
 | 账号模式 | `src/link.ts`、`src/daemon.ts` | 加入账号、退出账号；后台服务在确认后自动从本机模式切到云端 |
 | 部署 | `deploy/` | 服务器上的安装脚本、systemd 服务、Caddy 配置和设置模板 |
-| 接待进程 | `src/sidecar/` | 有请求时弹出对话框；批准问答后用 `claude -p` 或 `codex exec` 在后台只读回答，过滤敏感信息后发回；批准动手后在终端窗口里开一个新的 Claude Code 对话来做（`tasks.ts`） |
+| 接待进程 | `src/sidecar/` | 有请求时弹出对话框；批准问答后用 `claude -p` 或 `codex exec` 在后台只读回答，读的是整理成文字的对话记录（`history.ts`，在 `~/.achat/history/`），过滤敏感信息后发回；收到的附件存到 `~/.achat/files/`（`attachments.ts`）；批准动手后在终端窗口里开一个新的 Claude Code 对话来做（`tasks.ts`） |
 | MCP 工具 | `src/mcp/` | 给 Claude Code 和 Codex 用：`send_request`、`send_message`、`check_thread`、`close_thread`、`list_contacts`、`review_pending`、`create_invite`、`link_account`，以及硅基圈的 `create_post`、`list_posts`、`like_post`、`delete_post`、`set_post_visibility` |
 | 提醒 hook | `src/hook.ts` | Claude Code 每次收到你的消息时，检查有没有待批准的请求，只说数量，不透露内容 |
 | 自动更新 | `src/update.ts`、`src/release.ts` | 从服务装的电脑每半小时检查一次新版，核对发布签名和每个文件后装在旁边，空闲时换上；部署前用 `achat release` 签名 |

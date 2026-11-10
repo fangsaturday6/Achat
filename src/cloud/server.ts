@@ -4,18 +4,20 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
+import { FILES_BODY_LIMIT } from "../attachments.js";
 import type { AgentClient, AgentConfig, RemoteClient } from "../config.js";
 import { checkSignature, deviceIdFor, pairingCode, SIGNATURE_WINDOW_MS } from "../device.js";
 import { parseJson, readBody, send, serveStatic, str } from "../relay/http.js";
 import { RelayError, RelayService, SWEEP_EVERY_MS, type RelaySettings } from "../relay/service.js";
 import { Store } from "../relay/store.js";
-import { threadsApi, type Viewer } from "../relay/threads-api.js";
+import { takesFiles, threadsApi, type Viewer } from "../relay/threads-api.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { RelayClient } from "../client.js";
 import { createMcpServer } from "../mcp/server.js";
 import { plainText, renderMarkdown, splitTitle } from "../markdown.js";
 import { redact } from "../redact.js";
+import { withFileNames } from "../asking.js";
 import { cjk } from "../text.js";
 import { MANIFEST, RELEASE_FILES, SIGNATURE, type Release } from "../release.js";
 import { AccountStore, CLIENT_LABEL, hashSecret, type Account, type AgentRecord, type Device, type Invite } from "./accounts.js";
@@ -774,8 +776,8 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     const parts = url.pathname.split("/").filter(Boolean).slice(1);
     const shape = parts.map((part, i) => (i === 1 && WITH_ID.has(parts[0]) ? ":id" : part));
     const route = `${method} /${shape.join("/")}`;
-    // A picture comes as base64 inside JSON; everything else is small.
-    const raw = await readBody(req, route === "POST /post-images" ? 8_000_000 : undefined);
+    // Pictures and files come as base64 inside JSON; everything else is small.
+    const raw = await readBody(req, route === "POST /post-images" ? 8_000_000 : takesFiles(method, url.pathname) ? FILES_BODY_LIMIT : undefined);
 
     // Routes that work without logging in.
     switch (route) {
@@ -994,7 +996,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     if (!receiver.emailNotify) return;
     if (accounts.countRequestEmails(receiver.id, from.accountId, ms() - DAY) >= REQUEST_EMAILS_PER_DAY) return;
     accounts.logRequestEmail(receiver.id, from.accountId);
-    const question = thread.messages.find((m) => m.kind === "request")?.body ?? "";
+    const question = withFileNames(thread.messages.find((m) => m.kind === "request"));
     await opts.mailer.send(
       requestEmail(receiver.email, {
         fromName: accounts.agentConfig(from, receiver.id).name,
@@ -1032,7 +1034,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
         fromName,
         toName: accounts.agentConfig(to, receiver.id).name.replace(/^我的/, "你的"),
         topic: thread.topic,
-        question: asked?.body ?? "",
+        question: withFileNames(asked),
         link: `${publicUrl}/#/t/${thread.id}`,
         settingsLink: `${publicUrl}/#/me`,
       }),
@@ -1057,7 +1059,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
           fromName: responderName,
           toName: askerName,
           topic: thread.topic,
-          question: message.body,
+          question: withFileNames(message),
           link: `${publicUrl}/#/t/${thread.id}`,
           settingsLink: `${publicUrl}/#/me`,
         }),

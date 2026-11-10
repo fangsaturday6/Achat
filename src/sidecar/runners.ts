@@ -1,9 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { secretStore } from "../device.js";
+import { historyFor } from "./history.js";
 
 export interface RunInput {
   prompt: string;
@@ -11,6 +9,8 @@ export interface RunInput {
   // The headless session to continue; absent for the first round.
   sessionId?: string;
   budgetUsd: number;
+  // More folders it may read, such as where the thread's files are kept.
+  readDirs?: string[];
 }
 
 export interface RunOutput {
@@ -41,15 +41,15 @@ export class LoginExpiredError extends Error {
   }
 }
 
-const LOGIN_TROUBLE = /not logged in|\/login|log ?in again|oauth|access token|refresh token|failed to authenticate|authentication_error|invalid (api key|bearer token)|unauthori[sz]ed|\b401\b/i;
+// How long Claude waits for a request to start replying before trying again.
+// It covers only the wait for the first reply, so long answers are not cut.
+const API_TIMEOUT_MS = 90_000;
+
+const LOGIN_TROUBLE =/not logged in|\/login|log ?in again|oauth|access token|refresh token|failed to authenticate|authentication_error|invalid (api key|bearer token)|unauthori[sz]ed|\b401\b/i;
 
 // The long-lived credential from `achat claude-token`, if the person made one.
 export function claudeToken(): string | null {
   return secretStore("claude-token").load();
-}
-
-export function claudeProjectsDir(): string {
-  return process.env.ACHAT_CLAUDE_PROJECTS ?? join(homedir(), ".claude", "projects");
 }
 
 interface ProcessResult {
@@ -110,6 +110,8 @@ interface ClaudeJsonResult {
 
 // Runs `claude -p` with only Read, Grep and Glob, no MCP servers and a dollar
 // cap. dontAsk denies anything that is not pre-approved instead of prompting.
+// It works in the plain copy of the history, and may open the originals for
+// output the copy cut short.
 export class ClaudeRunner implements AgentRunner {
   constructor(
     private command = process.env.ACHAT_CLAUDE_BIN ?? "claude",
@@ -117,7 +119,9 @@ export class ClaudeRunner implements AgentRunner {
   ) {}
 
   async run(input: RunInput): Promise<RunOutput> {
-    const dir = claudeProjectsDir();
+    const history = historyFor("claude");
+    await history.refresh();
+    const dir = history.dir;
     const sessionId = input.sessionId ?? randomUUID();
     const args = [
       "-p",
@@ -129,7 +133,8 @@ export class ClaudeRunner implements AgentRunner {
       "Read,Grep,Glob",
       "--strict-mcp-config",
       "--add-dir",
-      dir,
+      history.source,
+      ...(input.readDirs ?? []),
       "--max-budget-usd",
       Math.max(0.01, input.budgetUsd).toFixed(2),
       "--append-system-prompt",
@@ -144,7 +149,13 @@ export class ClaudeRunner implements AgentRunner {
       input: input.prompt,
       timeoutMs: this.timeoutMs,
       name: "claude",
-      env: token ? { CLAUDE_CODE_OAUTH_TOKEN: token } : undefined,
+      env: {
+        // Claude waits 10 minutes by default for a request to start
+        // replying, as long as the round itself; a request stuck on a dead
+        // connection is better sent again on a new one.
+        API_TIMEOUT_MS: String(API_TIMEOUT_MS),
+        ...(token ? { CLAUDE_CODE_OAUTH_TOKEN: token } : {}),
+      },
     });
 
     let parsed: ClaudeJsonResult | null = null;
@@ -161,10 +172,6 @@ export class ClaudeRunner implements AgentRunner {
     }
     return { text: parsed.result, sessionId: parsed.session_id ?? sessionId, costUsd: parsed.total_cost_usd ?? 0 };
   }
-}
-
-export function codexSessionsDir(): string {
-  return process.env.ACHAT_CODEX_SESSIONS ?? join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "sessions");
 }
 
 type CodexEvent =
@@ -186,8 +193,9 @@ export class CodexRunner implements AgentRunner {
   ) {}
 
   async run(input: RunInput): Promise<RunOutput> {
-    const dir = codexSessionsDir();
-    mkdirSync(dir, { recursive: true });
+    const history = historyFor("codex");
+    await history.refresh();
+    const dir = history.dir;
     const common = [
       "--json",
       "--ignore-user-config",

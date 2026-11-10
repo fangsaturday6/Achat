@@ -233,6 +233,20 @@ button.item { width: 100%; border: none; background: none; text-align: left; }
   font: inherit; font-size: 14px; line-height: 20px; color: var(--ink);
 }
 .write-row { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+/* Above the text box, as in WeChat: ＋ sends files or pictures. */
+.main-foot.write-foot:has(> .write-tools) { padding-top: 6px; }
+.write-tools { height: 32px; margin-left: -6px; display: flex; gap: 4px; align-items: center; }
+.write-tool { width: 32px; height: 32px; color: var(--rail-icon); }
+/* What is about to be sent: pictures as 64px squares, other files as cards. */
+.tray { padding-top: 6px; display: flex; flex-wrap: wrap; gap: 10px; }
+.tray-item { position: relative; flex-shrink: 0; }
+.tray-image { width: 64px; height: 64px; border-radius: 4px; object-fit: cover; display: block; background: var(--field); }
+.tray-file { width: 208px; height: 64px; padding: 0 12px; border-radius: 4px; background: var(--panel); display: flex; gap: 10px; align-items: center; }
+.tray-remove {
+  position: absolute; top: -7px; right: -7px; width: 18px; height: 18px; padding: 0; border: none; border-radius: 9px;
+  background: #4c4c4c; color: #ffffff; display: flex; align-items: center; justify-content: center;
+}
+.main.drop-over { outline: 2px dashed var(--accent); outline-offset: -6px; }
 .card-actions { padding-top: 2px; display: flex; gap: 10px; justify-content: flex-end; }
 .with-avatar .grow { flex: 1; min-width: 0; }
 .empty-mark { font-size: 40px; line-height: 1; font-weight: 500; color: #d6d6d6; user-select: none; }
@@ -253,6 +267,25 @@ button.item { width: 100%; border: none; background: none; text-align: left; }
 .msg.right .msg-col { align-items: flex-end; }
 .msg-col > .bubble, .msg-col > .bubble-wrap { max-width: 100%; }
 .msg-name { font-size: 12px; line-height: 17px; color: var(--muted); }
+/* Files in a conversation: a picture as it is, anything else a card to download. */
+.image-btn { padding: 0; border: none; border-radius: 4px; background: none; display: flex; }
+.msg-image { max-width: min(240px, 100%); max-height: 240px; min-width: 40px; min-height: 40px; border-radius: 4px; display: block; background: var(--field); }
+.file-card {
+  width: 240px; max-width: 100%; padding: 12px; border: none; border-radius: 4px; background: var(--panel);
+  display: flex; gap: 12px; align-items: center; text-align: left;
+}
+.card .file-card { background: var(--field); }
+.card-files { display: flex; flex-wrap: wrap; gap: 6px; }
+.file-type {
+  width: 34px; height: 42px; flex-shrink: 0; padding-bottom: 6px; border-radius: 3px; background: var(--accent);
+  color: #ffffff; display: flex; align-items: flex-end; justify-content: center; font: 500 11px/13px var(--mono);
+}
+.file-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.file-name { overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.tray-file .file-name { display: block; white-space: nowrap; text-overflow: ellipsis; }
+.file-size { font-size: 12px; line-height: 17px; color: var(--muted); }
+.lightbox { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, 0.8); display: flex; align-items: center; justify-content: center; cursor: zoom-out; }
+.lightbox img { max-width: 92vw; max-height: 92vh; }
 /* A request card is a bubble too: it grows with its text up to the bubble's
    60%, and never gets narrower than 360px so its scope line and buttons fit. */
 .msg-col:has(> .card) { min-width: min(360px, var(--col-max)); }

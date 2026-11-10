@@ -1,9 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { cleanName, filesProblem, typeOf, type NewFile } from "../attachments.js";
 import type { AchatConfig, AgentConfig } from "../config.js";
 import {
   isTerminal,
   MODE_LABELS,
+  type Attachment,
   type Message,
   type RelayEvent,
   type Scope,
@@ -61,6 +63,7 @@ export interface CreateRequestInput {
   mode?: ThreadMode;
   // Written by the person on the web page, not by their AI.
   byPerson?: boolean;
+  files?: NewFile[];
 }
 
 // Where the relay looks up the AIs it carries messages between: the fixed
@@ -81,6 +84,7 @@ export interface PostMessageInput {
   // person approves again.
   mode?: ThreadMode;
   byPerson?: boolean;
+  files?: NewFile[];
 }
 
 // Owns the thread state machine. Every state change goes through here so the
@@ -155,6 +159,20 @@ export class RelayService {
     return said === true || this.agents.get(agent)?.client === "person";
   }
 
+  // Names without folders, types by the name, and no more than a message may carry.
+  private checkFiles(files: NewFile[] = []): NewFile[] {
+    const problem = filesProblem(files);
+    if (problem) throw new RelayError(400, problem);
+    return files.map((f) => {
+      const name = cleanName(f.name);
+      return { name, type: typeOf(name, f.type), data: f.data };
+    });
+  }
+
+  file(id: string): (Attachment & { threadId: string; data: Uint8Array }) | null {
+    return this.store.file(id);
+  }
+
   getThread(id: string): ThreadDetail {
     const thread = this.requireThread(id);
     return { ...thread, messages: this.store.messages(id) };
@@ -209,8 +227,9 @@ export class RelayService {
     if (mode === "do") this.requireDoer(input.to);
     const topic = input.topic.trim();
     const message = input.message.trim();
+    const files = this.checkFiles(input.files);
     if (!topic || topic.length > 80) throw new RelayError(400, "话题需要在 1 到 80 个字之间");
-    if (!message || message.length > 8000) throw new RelayError(400, "消息需要在 1 到 8000 个字之间");
+    if ((!message && !files.length) || message.length > 8000) throw new RelayError(400, "消息需要在 1 到 8000 个字之间");
 
     const since = new Date(this.now().getTime() - DAY_MS).toISOString();
     if (this.store.countSentSince(input.from, since) >= this.config.limits.sentPerDay) {
@@ -235,7 +254,7 @@ export class RelayService {
       );
       const msg = this.store.addMessage(
         thread.id,
-        { sender: input.from, kind: "request", body: message, byPerson: this.byPerson(input.from, input.byPerson) },
+        { sender: input.from, kind: "request", body: message, byPerson: this.byPerson(input.from, input.byPerson), files },
         now,
       );
       if (!opts.autoApprove) return { ...thread, messages: [msg] };
@@ -422,7 +441,8 @@ export class RelayService {
     // allowance is used up: a request of its own, which the person approves.
     const asks = !fromResponder && (upgrade || thread.status !== "active" || this.spent(thread));
     const body = input.body.trim();
-    if (!body || body.length > 20000) throw new RelayError(400, "消息需要在 1 到 20000 个字之间");
+    const files = this.checkFiles(input.files);
+    if ((!body && !files.length) || body.length > 20000) throw new RelayError(400, "消息需要在 1 到 20000 个字之间");
 
     const lastSpoken = this.store
       .messages(id)
@@ -430,7 +450,8 @@ export class RelayService {
       .at(-1);
     // A call tried again after its reply was lost must not post twice. Asking
     // to go on may repeat a question that was never answered.
-    if (!asks && lastSpoken?.sender === input.from && lastSpoken.body === body) {
+    const sameFiles = (m: Message): boolean => m.files.map((f) => `${f.name}:${f.size}`).join() === files.map((f) => `${f.name}:${f.data.length}`).join();
+    if (!asks && lastSpoken?.sender === input.from && lastSpoken.body === body && sameFiles(lastSpoken)) {
       throw new RelayError(409, "这条已经发过了");
     }
     if (!asks && !fromResponder && lastSpoken?.sender === input.from) {
@@ -449,6 +470,7 @@ export class RelayService {
           redactions: input.redactions ?? 0,
           costUsd: fromResponder ? (input.costUsd ?? 0) : 0,
           byPerson: this.byPerson(input.from, input.byPerson),
+          files,
         },
         now,
       );

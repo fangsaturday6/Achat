@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import type { OutgoingFile } from "./attachments.js";
 import type { AgentClient, AgentConfig } from "./config.js";
 import { signRequest, type DeviceKey } from "./device.js";
 import type { RelayEvent, Scope, ThreadDetail, ThreadMode, ThreadStatus, ThreadSummary } from "./types.js";
@@ -124,12 +125,13 @@ export class RelayClient {
     return signRequest(this.auth, method, url.pathname + url.search, body);
   }
 
-  private async call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  // `bytes`: the reply is a file, not JSON.
+  private async call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, bytes = false): Promise<T> {
     const patience = this.patience;
-    if (!patience) return this.send<T>(method, path, body, signal);
+    if (!patience) return this.send<T>(method, path, body, signal, bytes);
     for (let pause = patience.retryMs, told = false; ; pause = Math.min(pause * 2, MAX_RETRY_MS), told = true) {
       try {
-        return await this.send<T>(method, path, body, signal);
+        return await this.send<T>(method, path, body, signal, bytes);
       } catch (err) {
         if (err instanceof RelayClientError && !COME_BACK_LATER.has(err.status)) throw err;
         if (!told) patience.onWait((err as Error).message);
@@ -138,7 +140,7 @@ export class RelayClient {
     }
   }
 
-  private async send<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  private async send<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, bytes = false): Promise<T> {
     const text = body === undefined ? "" : JSON.stringify(body);
     const res = await fetch(this.baseUrl + path, {
       method,
@@ -146,6 +148,7 @@ export class RelayClient {
       body: body === undefined ? undefined : text,
       signal,
     });
+    if (bytes && res.ok) return Buffer.from(await res.arrayBuffer()) as T;
     const reply = await res.text();
     let data: { error?: string } | null = null;
     try {
@@ -252,8 +255,21 @@ export class RelayClient {
     return this.call("GET", `/api/threads/${encodeURIComponent(id)}`);
   }
 
-  createRequest(input: { from: string; to: string; topic: string; message: string; mode?: ThreadMode; byPerson?: boolean }): Promise<ThreadDetail> {
+  createRequest(input: {
+    from: string;
+    to: string;
+    topic: string;
+    message: string;
+    mode?: ThreadMode;
+    byPerson?: boolean;
+    files?: OutgoingFile[];
+  }): Promise<ThreadDetail> {
     return this.call("POST", "/api/threads", input);
+  }
+
+  // The bytes of a file sent in a conversation.
+  file(id: string): Promise<Buffer> {
+    return this.call("GET", `/api/files/${encodeURIComponent(id)}`, undefined, undefined, true);
   }
 
   approve(id: string, scope: Partial<Scope> & { mode?: ThreadMode } = {}): Promise<ThreadDetail> {
@@ -300,7 +316,16 @@ export class RelayClient {
 
   postMessage(
     id: string,
-    input: { from: string; body: string; costUsd?: number; redactions?: number; sessionId?: string; mode?: ThreadMode; byPerson?: boolean },
+    input: {
+      from: string;
+      body: string;
+      costUsd?: number;
+      redactions?: number;
+      sessionId?: string;
+      mode?: ThreadMode;
+      byPerson?: boolean;
+      files?: OutgoingFile[];
+    },
   ): Promise<ThreadDetail> {
     return this.call("POST", `/api/threads/${encodeURIComponent(id)}/messages`, input);
   }
@@ -313,7 +338,14 @@ export class RelayClient {
 
   // Follows the relay's event stream and reconnects after a drop. Returns a
   // function that stops it.
-  subscribe(agent: string | undefined, onEvent: (e: RelayEvent) => void, onConnect?: () => void): () => void {
+  // `idleMs`: the relay says something every 25 seconds, so a stream silent
+  // for this long died without either side hearing, and is opened again.
+  subscribe(
+    agent: string | undefined,
+    onEvent: (e: RelayEvent) => void,
+    onConnect?: () => void,
+    { idleMs = 60_000, retryMs = 2000 }: { idleMs?: number; retryMs?: number } = {},
+  ): () => void {
     const controller = new AbortController();
     const q = new URLSearchParams();
     if (typeof this.auth === "string") q.set("token", this.auth);
@@ -322,15 +354,23 @@ export class RelayClient {
 
     const loop = async (): Promise<void> => {
       while (!controller.signal.aborted) {
+        const silent = new AbortController();
+        let quiet: ReturnType<typeof setTimeout> | undefined;
+        const heard = (): void => {
+          clearTimeout(quiet);
+          quiet = setTimeout(() => silent.abort(), idleMs);
+        };
         try {
           // Signed again on every reconnect: a signature is only accepted once.
           const headers = typeof this.auth === "string" ? {} : this.headers("GET", path, "");
-          const res = await fetch(this.baseUrl + path, { signal: controller.signal, headers });
+          heard();
+          const res = await fetch(this.baseUrl + path, { signal: AbortSignal.any([controller.signal, silent.signal]), headers });
           if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
           onConnect?.();
           const decoder = new TextDecoder();
           let buffer = "";
           for await (const chunk of res.body) {
+            heard();
             buffer += decoder.decode(chunk as Uint8Array, { stream: true });
             let index: number;
             while ((index = buffer.indexOf("\n\n")) >= 0) {
@@ -346,8 +386,10 @@ export class RelayClient {
           }
         } catch {
           if (controller.signal.aborted) return;
+        } finally {
+          clearTimeout(quiet);
         }
-        await new Promise((r) => setTimeout(r, 2000));
+        await new Promise((r) => setTimeout(r, retryMs));
       }
     };
     void loop();

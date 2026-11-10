@@ -24,6 +24,14 @@ export function requestReason(t: ThreadDetail): string | null {
   return t.messages.filter((m) => m.kind === "system").at(-1)?.body ?? null;
 }
 
+// A message's words, with the names of the files sent with it, for a person
+// to read: "看下这张图\n[附件] 报错.png、日志.txt".
+export function withFileNames(m: Message | undefined): string {
+  if (!m) return "";
+  const names = (m.files ?? []).map((f) => f.name).join("、");
+  return names ? [m.body, `[附件] ${names}`].filter(Boolean).join("\n") : m.body;
+}
+
 // What the person decides on: the asker's latest message.
 export function pendingMessage(t: ThreadDetail): Message | undefined {
   return t.messages.filter((m) => m.kind !== "system" && m.sender === t.from).at(-1);

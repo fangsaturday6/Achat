@@ -45,8 +45,8 @@ export function parseJson(raw: Buffer): Record<string, unknown> {
   }
 }
 
-export async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
-  return parseJson(await readBody(req));
+export async function readJson(req: IncomingMessage, limit?: number): Promise<Record<string, unknown>> {
+  return parseJson(await readBody(req, limit));
 }
 
 export function str(body: Record<string, unknown>, key: string): string {

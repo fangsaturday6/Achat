@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -20,7 +20,7 @@ function fakeClaude(dir: string, reply: object): string {
 const fs = require("node:fs");
 let input = "";
 process.stdin.on("data", (d) => (input += d)).on("end", () => {
-  fs.writeFileSync(${JSON.stringify(join(dir, "call.json"))}, JSON.stringify({ args: process.argv.slice(2), input, headless: process.env.ACHAT_HEADLESS, token: process.env.CLAUDE_CODE_OAUTH_TOKEN, cwd: process.cwd() }));
+  fs.writeFileSync(${JSON.stringify(join(dir, "call.json"))}, JSON.stringify({ args: process.argv.slice(2), input, headless: process.env.ACHAT_HEADLESS, token: process.env.CLAUDE_CODE_OAUTH_TOKEN, apiTimeout: process.env.API_TIMEOUT_MS, cwd: process.cwd(), files: fs.readdirSync(process.cwd(), { recursive: true }) }));
   const args = process.argv.slice(2);
   const flag = args.includes("--resume") ? "--resume" : "--session-id";
   const sid = args[args.indexOf(flag) + 1];
@@ -32,9 +32,19 @@ process.stdin.on("data", (d) => (input += d)).on("end", () => {
   return bin;
 }
 
-test("runs claude read-only, with the prompt on stdin and a budget cap", async () => {
+// One conversation in the person's Claude Code history.
+function claudeHistory(dir: string): void {
+  mkdirSync(join(dir, "-Users-me-shop"), { recursive: true });
+  writeFileSync(
+    join(dir, "-Users-me-shop", "s1.jsonl"),
+    JSON.stringify({ type: "user", cwd: "/Users/me/shop", timestamp: "2026-11-06T06:03:00Z", message: { content: "上线商城" } }) + "\n",
+  );
+}
+
+test("runs claude read-only on a plain copy of the history, with the prompt on stdin and a budget cap", async () => {
   const dir = mkdtempSync(join(tmpdir(), "achat-runner-"));
   process.env.ACHAT_CLAUDE_PROJECTS = dir;
+  claudeHistory(dir);
   const bin = fakeClaude(dir, { type: "result", result: "答案", total_cost_usd: 0.03, is_error: false });
   const runner = new ClaudeRunner(bin);
 
@@ -44,8 +54,17 @@ test("runs claude read-only, with the prompt on stdin and a budget cap", async (
   assert.equal(first.costUsd, 0.03);
   assert.equal(call.input, "问题");
   assert.equal(call.headless, "1");
-  assert.equal(call.cwd, realpathSync(dir)); // on macOS the temp folder is reached through a symlink
+  // It works in the plain copy, made before it starts, and may open the originals.
+  const copies = join(process.env.ACHAT_HOME!, "history", "claude");
+  assert.equal(call.cwd, realpathSync(copies)); // on macOS the temp folder is reached through a symlink
+  assert.ok(call.files.includes(join("-Users-me-shop", "s1.md")));
+  assert.ok(readFileSync(join(copies, "-Users-me-shop", "s1.md"), "utf8").includes("上线商城"));
   const args: string[] = call.args;
+  assert.equal(args[args.indexOf("--add-dir") + 1], dir);
+  // Folders it is given, such as the thread's files, are readable too.
+  await runner.run({ prompt: "看附件", systemPrompt: "规则", budgetUsd: 0.5, readDirs: ["/achat/files/t1"] });
+  const withFiles: string[] = JSON.parse(readFileSync(join(dir, "call.json"), "utf8")).args;
+  assert.deepEqual(withFiles.slice(withFiles.indexOf("--add-dir") + 1, withFiles.indexOf("--add-dir") + 3), [dir, "/achat/files/t1"]);
   assert.equal(args[args.indexOf("--tools") + 1], "Read,Grep,Glob");
   assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk");
   assert.equal(args[args.indexOf("--max-budget-usd") + 1], "0.50");
@@ -57,6 +76,17 @@ test("runs claude read-only, with the prompt on stdin and a budget cap", async (
   assert.equal(call2.args[call2.args.indexOf("--resume") + 1], first.sessionId);
   assert.ok(!call2.args.includes("--session-id"));
   assert.equal(second.sessionId, first.sessionId);
+  delete process.env.ACHAT_CLAUDE_PROJECTS;
+});
+
+// A request stuck on a dead connection is given up after 90 seconds and sent
+// again on a new one, instead of waiting out the whole round.
+test("claude gives up on a request that gets no reply within 90 seconds", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "achat-runner-"));
+  process.env.ACHAT_CLAUDE_PROJECTS = dir;
+  const bin = fakeClaude(dir, { type: "result", result: "答案", is_error: false });
+  await new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0.1 });
+  assert.equal(JSON.parse(readFileSync(join(dir, "call.json"), "utf8")).apiTimeout, "90000");
   delete process.env.ACHAT_CLAUDE_PROJECTS;
 });
 
@@ -142,9 +172,19 @@ const CODEX_TURN = [
   { type: "turn.completed", usage: { input_tokens: 100, output_tokens: 7 } },
 ];
 
-test("runs codex in the read-only sandbox without the person's config", async () => {
+test("runs codex in the read-only sandbox without the person's config, on a plain copy of the history", async () => {
   const dir = mkdtempSync(join(tmpdir(), "achat-runner-"));
   process.env.ACHAT_CODEX_SESSIONS = dir;
+  mkdirSync(join(dir, "2026", "11", "08"), { recursive: true });
+  writeFileSync(
+    join(dir, "2026", "11", "08", "rollout-1.jsonl"),
+    [
+      { type: "session_meta", payload: { cwd: "/Users/me/video" } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "做个产品视频" }] } },
+    ]
+      .map((e) => JSON.stringify(e))
+      .join("\n") + "\n",
+  );
   const runner = new CodexRunner(fakeCodex(dir, CODEX_TURN));
 
   const first = await runner.run({ prompt: "问题", systemPrompt: "规则\n第二行", budgetUsd: 5 });
@@ -152,7 +192,9 @@ test("runs codex in the read-only sandbox without the person's config", async ()
   assert.deepEqual(first, { text: "答案", sessionId: "thread-1", costUsd: 0 });
   assert.equal(call.input, "问题");
   assert.equal(call.headless, "1");
-  assert.equal(call.cwd, realpathSync(dir));
+  const copies = join(process.env.ACHAT_HOME!, "history", "codex");
+  assert.equal(call.cwd, realpathSync(copies));
+  assert.ok(readFileSync(join(copies, "2026", "11", "08", "rollout-1.md"), "utf8").includes("做个产品视频"));
   const args: string[] = call.args;
   assert.deepEqual(args.slice(0, 2), ["exec", "--json"]);
   for (const a of ["--ignore-user-config", 'sandbox_mode="read-only"', 'web_search="disabled"', "features.multi_agent=false"]) {

@@ -218,6 +218,26 @@ describe("cloud", () => {
     assert.deepEqual(await askerNews(wangLaptop.client), []);
   });
 
+  test("a file sent in a conversation is for its two sides only, and may be bigger than other requests", async () => {
+    const outsider = await logIn(cloud, mailer, "qian@example.com", "老钱");
+    const outsiderPc = await addComputer(cloud, outsider, "PC", ["claude"]);
+    // Over the 1 MB other requests may carry.
+    const picture = Buffer.alloc(2 * 1024 * 1024, 7);
+    const t = await wangLaptop.client.createRequest({
+      from: wangLaptop.agent("codex"),
+      to: fangMac.agent("claude"),
+      topic: "看图",
+      message: "看看这张",
+      files: [{ name: "大图.png", data: picture.toString("base64") }],
+    });
+    const id = t.messages[0].files[0].id;
+    assert.deepEqual(await fangMac.client.file(id), picture);
+    const onPage = (b: Browser) => fetch(`${cloud.url}/api/files/${id}`, { headers: { cookie: b.cookie } });
+    assert.equal((await onPage(fang)).headers.get("content-type"), "image/png");
+    await assert.rejects(outsiderPc.client.file(id), /找不到这个文件/);
+    assert.equal((await onPage(outsider)).status, 404);
+  });
+
   test("the event stream only carries the account's own threads", async () => {
     const outsider = await logIn(cloud, mailer, "sun@example.com", "老孙");
     const outsiderPc = await addComputer(cloud, outsider, "PC", ["codex"]);

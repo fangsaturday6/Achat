@@ -36,7 +36,15 @@ const ICONS = {
   // 问答 and 动手, as in docs/ui.md.
   ask: "M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-8l-4 3.5V17H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM9.8 8.6a2.2 2.2 0 1 1 3.2 2c-.6.3-1 .8-1 1.4M12 14.4h.01",
   wrench: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z",
+  // Sending files or pictures, beside the text box.
+  attach: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM12 8v8M8 12h8",
 };
+
+// What a message may carry, as the relay checks it.
+const MAX_FILES = 9;
+const MAX_FILES_BYTES = 20 * 1024 * 1024;
+// Pictures shown in the conversation; other files are cards to download.
+const SHOWN_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
 const MODE = { answer: "问答", do: "动手" };
 
@@ -494,7 +502,7 @@ function people() {
 
 function preview(t) {
   const last = t.lastMessage;
-  const text = t.status === "pending" || !last || last.kind === "system" ? t.topic : last.body;
+  const text = t.status === "pending" || !last || last.kind === "system" ? t.topic : messageText(last);
   return [t.status === "pending" && isMine(t.to) ? h("span", { class: "tag-pending" }, "[待批准] ") : null, text];
 }
 
@@ -600,8 +608,26 @@ function otherSide(t) {
 // The content column: a title bar, the body, and an optional bar at the bottom.
 // `flush` drops the body's side padding; `backAlways` shows the back button on
 // wide screens too, for pages one level down that have no list beside them.
-function showMain(title, body, { right, foot, back, center, onContent, flush, backAlways } = {}) {
+// `drop`: takes files dragged onto the conversation.
+function showMain(title, body, { right, foot, back, center, onContent, flush, backAlways, drop } = {}) {
   const main = document.getElementById("main");
+  main.ondragover = drop
+    ? (e) => {
+        if (![...(e.dataTransfer?.types ?? [])].includes("Files")) return;
+        e.preventDefault();
+        main.classList.add("drop-over");
+      }
+    : null;
+  main.ondragleave = (e) => {
+    if (!main.contains(e.relatedTarget)) main.classList.remove("drop-over");
+  };
+  main.ondrop = drop
+    ? (e) => {
+        e.preventDefault();
+        main.classList.remove("drop-over");
+        drop([...(e.dataTransfer?.files ?? [])]);
+      }
+    : null;
   const backLink = back ? h("a", { class: `back-btn icon-btn${backAlways ? " always" : ""}`, href: back, "aria-label": "返回" }, icon("left", 20, 1.8)) : null;
   const head = title === null ? null : h("header", { class: "main-head" }, backLink, h("h1", {}, title), right ?? null);
   const bodyEl = h("div", { class: `main-body${center ? " center" : ""}${onContent ? " on-content" : ""}${flush ? " flush" : ""}` }, body);
@@ -660,11 +686,13 @@ function writerName(m) {
 // A request: the question, and while it waits, its scope. The person who
 // decides changes the scope and answers right here, under the request.
 function requestCard(t, m, waiting) {
-  if (!waiting) return h("article", { class: "card", "aria-label": `请求：${t.topic}` }, h("p", {}, m.body));
+  // The question, and the files that came with it.
+  const asked = [m.body ? h("p", {}, m.body) : null, m.files.length ? h("div", { class: "card-files" }, ...m.files.map(fileTile)) : null];
+  if (!waiting) return h("article", { class: "card", "aria-label": `请求：${t.topic}` }, ...asked);
   const spend = t.mode === "do" ? "" : ` · $${t.scope.budgetUsd.toFixed(2)}`;
   if (!isMine(t.to)) {
     const scope = h("div", { class: "scope" }, `${agentName(t.to)} · `, modeChip(t.mode), ` · ${t.scope.maxRounds} 轮${spend}`);
-    return h("article", { class: "card", "aria-label": `请求：${t.topic}` }, h("p", {}, m.body), scope);
+    return h("article", { class: "card", "aria-label": `请求：${t.topic}` }, ...asked, scope);
   }
   const budget = h(
     "span",
@@ -693,25 +721,169 @@ function requestCard(t, m, waiting) {
     "同意",
   );
   const error = state.error ? h("p", { class: "error", role: "alert" }, state.error) : null;
-  return h("article", { class: "card", "aria-label": `请求：${t.topic}` }, h("p", {}, m.body), scope, error, h("div", { class: "card-actions" }, decline, approve));
+  return h("article", { class: "card", "aria-label": `请求：${t.topic}` }, ...asked, scope, error, h("div", { class: "card-actions" }, decline, approve));
 }
 
-// The bottom of a conversation, as in WeChat: what the person writes, the
+// --- files in a conversation
+
+function sizeLabel(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+// "PDF", "ZIP": what the file is, on its icon.
+function fileTypeIcon(name) {
+  const ext = /\.([A-Za-z0-9]{1,5})$/.exec(name)?.[1]?.toUpperCase() ?? "";
+  return h("span", { class: "file-type", "aria-hidden": "true" }, ext.length <= 4 ? ext : ext.slice(0, 4));
+}
+
+function fileText(name, size) {
+  return h("span", { class: "file-text" }, h("span", { class: "file-name" }, name), h("span", { class: "file-size" }, sizeLabel(size)));
+}
+
+// A file's bytes as an address the page can show or save. Fetched once, with
+// the same credentials as the API, which an <img src> could not send.
+const fileUrls = new Map();
+function fileUrl(id) {
+  if (!fileUrls.has(id)) {
+    const loading = fetch(`/api/files/${encodeURIComponent(id)}`, { headers: cloud ? {} : { "x-achat-token": token } })
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.blob();
+      })
+      .then((blob) => URL.createObjectURL(blob));
+    loading.catch(() => fileUrls.delete(id));
+    fileUrls.set(id, loading);
+  }
+  return fileUrls.get(id);
+}
+
+// A picture at full size over the page; a click or Esc closes it.
+function showImage(src, name) {
+  const close = () => {
+    view.remove();
+    document.removeEventListener("keydown", onKey);
+  };
+  const onKey = (e) => e.key === "Escape" && close();
+  const view = h("div", { class: "lightbox", role: "dialog", "aria-label": name, onclick: close }, h("img", { src, alt: name }));
+  document.addEventListener("keydown", onKey);
+  document.body.append(view);
+}
+
+async function saveFile(f) {
+  const link = h("a", { href: await fileUrl(f.id), download: f.name });
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+// A file in the conversation: a picture shown as it is, anything else a card
+// that downloads it, as in WeChat.
+function fileTile(f) {
+  if (SHOWN_TYPES.has(f.type)) {
+    const img = h("img", { class: "msg-image", alt: f.name });
+    fileUrl(f.id).then(
+      (src) => (img.src = src),
+      () => button.replaceWith(fileCard(f)),
+    );
+    const button = h("button", { type: "button", class: "image-btn", "aria-label": `看大图：${f.name}`, onclick: () => img.src && showImage(img.src, f.name) }, img);
+    return button;
+  }
+  return fileCard(f);
+}
+
+function fileCard(f) {
+  const card = h("button", { type: "button", class: "file-card", "aria-label": `下载 ${f.name}` }, fileText(f.name, f.size), fileTypeIcon(f.name));
+  card.addEventListener("click", busy(card, () => saveFile(f).catch(() => toast("下载失败，再点一次"))));
+  return card;
+}
+
+// The words of a message in a list: what it said, or what it sent.
+function messageText(m) {
+  if (m.body || !m.files?.length) return m.body;
+  return m.files.every((f) => SHOWN_TYPES.has(f.type)) ? "[图片]" : `[文件] ${m.files.find((f) => !SHOWN_TYPES.has(f.type)).name}`;
+}
+
+// A picture waiting to be sent, shown from the person's own copy.
+const previews = new WeakMap();
+function previewOf(file) {
+  if (!previews.has(file)) previews.set(file, URL.createObjectURL(file));
+  return previews.get(file);
+}
+
+// A file waiting to be sent, read into base64 for the API.
+function fileData(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({ name: file.name, type: file.type, data: String(reader.result).replace(/^data:[^,]*,/, "") });
+    reader.onerror = () => reject(new Error(`读不了 ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+// The bottom of a conversation, as in WeChat: ＋ to pick files or pictures
+// (they can also be pasted or dragged in), what the person writes, the
 // rounds and money so far on the left, 停止 and 发送 on the right.
 function writeBox({ label, status, extra, send }) {
   const box = h("textarea", { class: "write", "aria-label": label, rows: "3" });
   const error = h("p", { class: "error", role: "alert", hidden: true });
   const button = h("button", { type: "button", class: "btn primary" }, "发送");
+  const picked = [];
+  const tray = h("div", { class: "tray", "aria-label": "要发的文件", hidden: true });
+  const showError = (message) => {
+    error.textContent = message;
+    error.hidden = false;
+  };
+  const paint = () => {
+    tray.replaceChildren(
+      ...picked.map((file, i) => {
+        const remove = h("button", { type: "button", class: "tray-remove", "aria-label": `不发${file.name}` }, icon("close", 10, 3));
+        remove.addEventListener("click", () => {
+          picked.splice(i, 1);
+          paint();
+        });
+        const shown = SHOWN_TYPES.has(file.type)
+          ? h("img", { class: "tray-image", src: previewOf(file), alt: file.name })
+          : h("span", { class: "tray-file" }, fileTypeIcon(file.name), fileText(file.name, file.size));
+        return h("div", { class: "tray-item" }, shown, remove);
+      }),
+    );
+    tray.hidden = !picked.length;
+  };
+  const take = (files) => {
+    if (!files.length) return;
+    const all = [...picked, ...files];
+    if (all.length > MAX_FILES) return showError(`一次最多 ${MAX_FILES} 个文件`);
+    if (all.reduce((n, f) => n + f.size, 0) > MAX_FILES_BYTES) return showError("文件太大，一次最多 20 MB");
+    error.hidden = true;
+    picked.push(...files);
+    paint();
+    box.focus();
+  };
+  const chooser = h("input", { type: "file", multiple: true, hidden: true });
+  chooser.addEventListener("change", () => {
+    take([...chooser.files]);
+    chooser.value = "";
+  });
+  const plus = h("button", { type: "button", class: "icon-btn write-tool", "aria-label": "发送文件或图片", title: "发送文件或图片" }, icon("attach", 22));
+  plus.addEventListener("click", () => chooser.click());
+  // A screenshot pasted in is a picture to send, as in WeChat.
+  box.addEventListener("paste", (e) => {
+    const files = [...(e.clipboardData?.files ?? [])];
+    if (!files.length) return;
+    e.preventDefault();
+    take(files.map((f) => (f.type.startsWith("image/") && /^image\.\w+$/.test(f.name) ? new File([f], f.name.replace(/^image/, "截图"), { type: f.type }) : f)));
+  });
   const go = async () => {
     const text = box.value.trim();
-    if (!text || button.disabled) return;
+    if ((!text && !picked.length) || button.disabled) return;
     button.disabled = true;
     error.hidden = true;
     try {
-      await send(text);
+      await send(text, await Promise.all(picked.map(fileData)));
     } catch (err) {
-      error.textContent = err.message;
-      error.hidden = false;
+      showError(err.message);
       button.disabled = false;
     }
   };
@@ -726,11 +898,13 @@ function writeBox({ label, status, extra, send }) {
   const foot = h(
     "footer",
     { class: "main-foot write-foot" },
+    h("div", { class: "write-tools" }, plus, chooser),
+    tray,
     box,
     error,
     h("div", { class: "write-row" }, status, h("div", { class: "buttons" }, ...(extra ?? []), button)),
   );
-  return { foot, box };
+  return { foot, box, take };
 }
 
 function renderThread(t) {
@@ -739,12 +913,12 @@ function renderThread(t) {
   // Between one's own: the person, or else the AI that answers, on the right.
   const onRight = (sender) => (ownPair ? sender === (startedByMe ? t.from : t.to) : isMine(sender));
   // One person can have several AIs, so each message says which one wrote it.
-  const row = (m, content) =>
+  const row = (m, ...content) =>
     h(
       "div",
       { class: `msg${onRight(m.sender) ? " right" : ""}` },
       avatar(agentName(m.sender), 34),
-      h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, writerName(m)), content),
+      h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, writerName(m)), ...content),
     );
   const log = h("div", { class: "log", role: "log", "aria-label": "对话原文" }, h("span", { class: "event" }, shortTime(t.createdAt)));
   // While pending, the asker's latest message is what the person decides on.
@@ -753,8 +927,9 @@ function renderThread(t) {
     if (m.kind === "system") log.append(h("span", { class: "event" }, m.body));
     else if (m.kind === "request" || m === waiting) log.append(row(m, requestCard(t, m, m === waiting)));
     else {
-      const bubble = h("div", { class: "bubble" }, m.body);
-      log.append(row(m, m.redactions > 0 ? h("div", { class: "bubble-wrap" }, bubble, h("span", { class: "muted" }, `已过滤 ${m.redactions} 处`)) : bubble));
+      const bubble = m.body ? h("div", { class: "bubble" }, m.body) : null;
+      const said = bubble && m.redactions > 0 ? h("div", { class: "bubble-wrap" }, bubble, h("span", { class: "muted" }, `已过滤 ${m.redactions} 处`)) : bubble;
+      log.append(row(m, said, ...m.files.map(fileTile)));
     }
   }
   const lastSpoken = t.messages.filter((m) => m.kind !== "system").at(-1);
@@ -770,23 +945,26 @@ function renderThread(t) {
   const side = isMine(t.from) ? t.from : isMine(t.to) ? t.to : null;
   const writes = side && (t.status === "active" || t.status === "closed" || (t.status === "expired" && side === t.from));
   let foot = null;
+  let drop;
   if (writes) {
     const stop = t.status === "active" ? [h("button", { type: "button", class: "btn danger", onclick: () => act(() => api("POST", `/api/threads/${t.id}/stop`, {})) }, "停止")] : [];
     const status = h("span", { class: "muted" }, t.status === "active" ? usage : `${usage} · ${STATUS[t.status]}`);
-    foot = writeBox({
+    ({ foot, take: drop } = writeBox({
       label: `发给${agentName(side === t.from ? t.to : t.from)}`,
       status,
       extra: stop,
-      send: async (text) => {
-        await api("POST", `/api/threads/${t.id}/messages`, { from: side, body: text, byPerson: true });
+      send: async (text, files) => {
+        await api("POST", `/api/threads/${t.id}/messages`, { from: side, body: text, byPerson: true, files });
         await refresh();
       },
-    }).foot;
+    }));
   } else if (t.status !== "pending") {
     foot = h("footer", { class: "main-foot" }, h("span", { class: "muted" }, `${usage} · ${STATUS[t.status]}`));
   }
-  const body = showMain(t.topic, log, { foot, back: "#/" });
+  const body = showMain(t.topic, log, { foot, back: "#/", drop });
   body.scrollTop = body.scrollHeight;
+  // Pictures arrive after the first layout; the newest stays in view.
+  for (const img of log.querySelectorAll("img")) img.addEventListener("load", () => (body.scrollTop = body.scrollHeight), { once: true });
 }
 
 // The first sentence names a conversation the person starts on the web.
@@ -802,15 +980,16 @@ function renderCompose(to) {
   const seat = mySeat();
   if (!target || !seat || target.canReceive === false) return showEmpty();
   const chip = target.client === "claude" ? modeChip("answer", () => {}) : modeChip("answer");
-  const { foot, box } = writeBox({
+  const { foot, box, take } = writeBox({
     label: `发给${target.name}`,
     status: chip,
-    send: async (text) => {
-      const t = await api("POST", "/api/threads", { from: seat, to, topic: topicOf(text), message: text, mode: chip.dataset.mode });
+    send: async (text, files) => {
+      const topic = topicOf(text) || files[0].name.slice(0, 20);
+      const t = await api("POST", "/api/threads", { from: seat, to, topic, message: text, mode: chip.dataset.mode, files });
       location.hash = `#/t/${t.id}`;
     },
   });
-  showMain(target.name, h("div"), { foot, back: "#/" });
+  showMain(target.name, h("div"), { foot, back: "#/", drop: take });
   box.focus();
 }
 
