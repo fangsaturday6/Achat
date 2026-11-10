@@ -5,6 +5,7 @@ import type { AchatConfig, AgentConfig } from "../config.js";
 import {
   isTerminal,
   MODE_LABELS,
+  personWaiting,
   type Attachment,
   type Message,
   type RelayEvent,
@@ -424,7 +425,9 @@ export class RelayService {
   // The asker waits for each answer, since every question costs the other side
   // a round in the background. The asked side can add to a thread at any time,
   // even after it ended on its own, for example to say the work is done; that
-  // is not a round. Only a thread a person stopped or declined is shut.
+  // is not a round. What the asked side's person says there is for the AI
+  // that asked, whose next word answers them. Only a thread a person stopped
+  // or declined is shut.
   postMessage(id: string, input: PostMessageInput): ThreadDetail {
     const thread = this.requireThread(id);
     if (input.from !== thread.from && input.from !== thread.to) {
@@ -437,24 +440,26 @@ export class RelayService {
     const upgrade = checkMode(input.mode) === "do" && thread.mode !== "do";
     if (upgrade && fromResponder) throw new RelayError(400, "只有发起方可以请对方动手");
     if (upgrade) this.requireDoer(thread.to);
+    const spoken = this.store.messages(id).filter((m) => m.kind !== "system");
+    const lastSpoken = spoken.at(-1);
+    const personSays = this.byPerson(input.from, input.byPerson);
+    // The other side's person spoke since the asker last did: the asker's next
+    // word answers them, and their AI is not asked anything.
+    const toPerson = !fromResponder && !upgrade && personWaiting(thread, spoken) !== null;
     // The asker asking to 动手, or to go on once the thread ended or its
     // allowance is used up: a request of its own, which the person approves.
-    const asks = !fromResponder && (upgrade || thread.status !== "active" || this.spent(thread));
+    const asks = !fromResponder && !toPerson && (upgrade || thread.status !== "active" || this.spent(thread));
     const body = input.body.trim();
     const files = this.checkFiles(input.files);
     if ((!body && !files.length) || body.length > 20000) throw new RelayError(400, "消息需要在 1 到 20000 个字之间");
 
-    const lastSpoken = this.store
-      .messages(id)
-      .filter((m) => m.kind !== "system")
-      .at(-1);
     // A call tried again after its reply was lost must not post twice. Asking
     // to go on may repeat a question that was never answered.
     const sameFiles = (m: Message): boolean => m.files.map((f) => `${f.name}:${f.size}`).join() === files.map((f) => `${f.name}:${f.data.length}`).join();
     if (!asks && lastSpoken?.sender === input.from && lastSpoken.body === body && sameFiles(lastSpoken)) {
       throw new RelayError(409, "这条已经发过了");
     }
-    if (!asks && !fromResponder && lastSpoken?.sender === input.from) {
+    if (!asks && !fromResponder && lastSpoken?.sender === input.from && !lastSpoken.toPerson) {
       throw new RelayError(409, "还没轮到你说话，先等对方回复");
     }
 
@@ -469,14 +474,18 @@ export class RelayService {
           body,
           redactions: input.redactions ?? 0,
           costUsd: fromResponder ? (input.costUsd ?? 0) : 0,
-          byPerson: this.byPerson(input.from, input.byPerson),
+          byPerson: personSays,
+          toPerson,
           files,
         },
         now,
       );
       let t = thread;
       if (fromResponder) {
-        const answers = lastSpoken?.sender === thread.from;
+        // The first word from the asked AI after the asker's latest question
+        // answers it; the person's own words are not a round.
+        const lastAsk = spoken.findLastIndex((m) => m.sender === thread.from && !m.toPerson);
+        const answers = !personSays && lastAsk >= 0 && !spoken.slice(lastAsk + 1).some((m) => m.sender === thread.to && !m.byPerson);
         const roundsUsed = thread.roundsUsed + (answers ? 1 : 0);
         const costUsd = Math.round((thread.costUsd + (input.costUsd ?? 0)) * 10000) / 10000;
         let status: ThreadStatus = thread.status;

@@ -79,6 +79,35 @@ test("runs claude read-only on a plain copy of the history, with the prompt on s
   delete process.env.ACHAT_CLAUDE_PROJECTS;
 });
 
+test("asked about one thread, claude reads only the conversations that mention it, in a folder of their own", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "achat-runner-"));
+  process.env.ACHAT_CLAUDE_PROJECTS = dir;
+  mkdirSync(join(dir, "-Users-me-shop"), { recursive: true });
+  const say = (content: string): string =>
+    JSON.stringify({ type: "user", cwd: "/Users/me/shop", timestamp: "2026-11-06T06:03:00Z", message: { content } }) + "\n";
+  writeFileSync(join(dir, "-Users-me-shop", "asked.jsonl"), say("请求已发出（协作 t_abc123）"));
+  writeFileSync(join(dir, "-Users-me-shop", "other.jsonl"), say("别的私事"));
+  const bin = fakeClaude(dir, { type: "result", result: "答案", total_cost_usd: 0.01, is_error: false });
+
+  await new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 1, only: "t_abc123", readDirs: ["/achat/files/t_abc123"] });
+  const call = JSON.parse(readFileSync(join(dir, "call.json"), "utf8"));
+  assert.notEqual(call.cwd, realpathSync(join(process.env.ACHAT_HOME!, "history", "claude")));
+  assert.ok(call.files.includes(join("-Users-me-shop", "asked.md")));
+  assert.ok(!call.files.some((f: string) => f.includes("other")), "other conversations are not there");
+  const args: string[] = call.args;
+  assert.ok(!args.includes(dir), "nor are the original transcripts");
+  assert.equal(args[args.indexOf("--add-dir") + 1], "/achat/files/t_abc123");
+  assert.equal(args[args.indexOf("--tools") + 1], "Read,Grep,Glob");
+
+  // Asked again after the conversation was written to, it reads what is there now.
+  writeFileSync(join(dir, "-Users-me-shop", "other.jsonl"), say("后来也提到了 t_abc123"));
+  await new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 1, only: "t_abc123" });
+  const again = JSON.parse(readFileSync(join(dir, "call.json"), "utf8"));
+  assert.ok(again.files.includes(join("-Users-me-shop", "other.md")));
+  assert.ok(!again.args.includes("--add-dir"), "no folder to add");
+  delete process.env.ACHAT_CLAUDE_PROJECTS;
+});
+
 // A request stuck on a dead connection is given up after 90 seconds and sent
 // again on a new one, instead of waiting out the whole round.
 test("claude gives up on a request that gets no reply within 90 seconds", async () => {

@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS messages (
   redactions INTEGER NOT NULL DEFAULT 0,
   cost_usd REAL NOT NULL DEFAULT 0,
   by_person INTEGER NOT NULL DEFAULT 0,
+  to_person INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   UNIQUE (thread_id, seq)
 );
@@ -95,6 +96,7 @@ interface MessageRow {
   redactions: number;
   cost_usd: number;
   by_person: number;
+  to_person: number;
   created_at: string;
 }
 
@@ -134,6 +136,7 @@ function toMessage(row: MessageRow): Message {
     redactions: row.redactions,
     costUsd: row.cost_usd,
     byPerson: row.by_person === 1,
+    toPerson: row.to_person === 1,
     files: [],
     createdAt: row.created_at,
   };
@@ -156,6 +159,7 @@ export interface NewMessage {
   redactions?: number;
   costUsd?: number;
   byPerson?: boolean;
+  toPerson?: boolean;
   files?: NewFile[];
 }
 
@@ -201,6 +205,7 @@ export class Store {
     add("threads", "reminded", "INTEGER NOT NULL DEFAULT 0");
     add("threads", "reply_mailed", "INTEGER NOT NULL DEFAULT 0");
     add("messages", "by_person", "INTEGER NOT NULL DEFAULT 0");
+    add("messages", "to_person", "INTEGER NOT NULL DEFAULT 0");
   }
 
   close(): void {
@@ -300,10 +305,10 @@ export class Store {
       .get(threadId) as { seq: number };
     const result = this.db
       .prepare(
-        `INSERT INTO messages (thread_id, seq, sender, kind, body, redactions, cost_usd, by_person, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (thread_id, seq, sender, kind, body, redactions, cost_usd, by_person, to_person, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(threadId, next.seq, m.sender, m.kind, m.body, m.redactions ?? 0, m.costUsd ?? 0, m.byPerson ? 1 : 0, now);
+      .run(threadId, next.seq, m.sender, m.kind, m.body, m.redactions ?? 0, m.costUsd ?? 0, m.byPerson ? 1 : 0, m.toPerson ? 1 : 0, now);
     const messageId = Number(result.lastInsertRowid);
     const insert = this.db.prepare(
       "INSERT INTO files (id, message_id, thread_id, position, name, type, size, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -377,15 +382,16 @@ export class Store {
   }
 
   // Threads where the asked side said something before `before` that the
-  // asking AI has not been shown and nobody was mailed about: the latest such
-  // message of each.
+  // asking AI has not been shown, nobody was mailed about, and the asking side
+  // has not answered since: the latest such message of each.
   unseenReplies(before: string): { thread: Thread; message: Message }[] {
     const rows = this.db
       .prepare(
         `SELECT t.*, m.seq AS reply_seq FROM threads t
          JOIN messages m ON m.thread_id = t.id AND m.sender = t.to_agent
          WHERE m.seq > t.asker_seen AND m.seq > t.reply_mailed AND m.created_at <= ?
-           AND m.seq = (SELECT MAX(seq) FROM messages WHERE thread_id = t.id AND sender = t.to_agent)`,
+           AND m.seq = (SELECT MAX(seq) FROM messages WHERE thread_id = t.id AND sender = t.to_agent)
+           AND NOT EXISTS (SELECT 1 FROM messages a WHERE a.thread_id = t.id AND a.sender = t.from_agent AND a.seq > m.seq)`,
       )
       .all(before) as unknown as (ThreadRow & { reply_seq: number })[];
     return rows.map((row) => ({

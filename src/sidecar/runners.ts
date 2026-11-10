@@ -11,6 +11,9 @@ export interface RunInput {
   budgetUsd: number;
   // More folders it may read, such as where the thread's files are kept.
   readDirs?: string[];
+  // A thread id: it reads only the conversations that mention it, in a folder
+  // of their own, instead of the whole history.
+  only?: string;
 }
 
 export interface RunOutput {
@@ -121,7 +124,9 @@ export class ClaudeRunner implements AgentRunner {
   async run(input: RunInput): Promise<RunOutput> {
     const history = historyFor("claude");
     await history.refresh();
-    const dir = history.dir;
+    const dir = input.only ? history.about(input.only) : history.dir;
+    // The originals, for output the copy cut short; not when it may read one thread only.
+    const readable = [...(input.only ? [] : [history.source]), ...(input.readDirs ?? [])];
     const sessionId = input.sessionId ?? randomUUID();
     const args = [
       "-p",
@@ -132,9 +137,7 @@ export class ClaudeRunner implements AgentRunner {
       "--tools",
       "Read,Grep,Glob",
       "--strict-mcp-config",
-      "--add-dir",
-      history.source,
-      ...(input.readDirs ?? []),
+      ...(readable.length ? ["--add-dir", ...readable] : []),
       "--max-budget-usd",
       Math.max(0.01, input.budgetUsd).toFixed(2),
       "--append-system-prompt",
@@ -195,7 +198,7 @@ export class CodexRunner implements AgentRunner {
   async run(input: RunInput): Promise<RunOutput> {
     const history = historyFor("codex");
     await history.refresh();
-    const dir = history.dir;
+    const dir = input.only ? history.about(input.only) : history.dir;
     const common = [
       "--json",
       "--ignore-user-config",

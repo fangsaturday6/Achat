@@ -44,10 +44,15 @@ export function scopeLine(t: Thread): string {
   return t.mode === "do" ? rounds : `${rounds} · $${t.scope.budgetUsd.toFixed(2)}`;
 }
 
+// Whose an AI is, from its name: "老王" for 老王的 Codex, "我" for 我的 Claude.
+export function ownerOf(name: string): string {
+  return name.replace(/的.*$/, "");
+}
+
 // Who wrote a message: the AI's name, or for one the person wrote on the web
 // page, the person: "老王本人", or "你的主人本人" when it is the reader's own.
 export function speaker(m: Message, name: string): string {
   if (!m.byPerson) return name;
-  const owner = name.replace(/的.*$/, "");
+  const owner = ownerOf(name);
   return owner === "我" ? "你的主人本人" : `${owner}本人`;
 }

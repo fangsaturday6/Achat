@@ -1,6 +1,6 @@
-import { createReadStream, mkdirSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { copyFileSync, createReadStream, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { createInterface } from "node:readline";
 import type { Transform } from "node:stream";
 import zlib from "node:zlib";
@@ -171,7 +171,7 @@ class Transcript {
 
   // Null when the transcript is from a folder left out.
   text(leaveOut: string[]): string | null {
-    if (this.cwd && leaveOut.includes(this.cwd)) return null;
+    if (this.cwd && leaveOut.some((d) => this.cwd === d || this.cwd!.startsWith(d + sep))) return null;
     const head = [
       `项目：${this.cwd ?? "未知"}`,
       ...(this.first ? [`时间：${this.first} 到 ${this.last}`] : []),
@@ -218,7 +218,8 @@ function walk(root: string, name: RegExp): string[] {
 
 // Keeps `dir` a plain copy of every transcript under `source`: a transcript
 // is read again only when it changed, and a copy goes when its transcript
-// does. `leaveOut`: working folders whose conversations are not copied.
+// does. `leaveOut`: working folders, and the folders in them, whose
+// conversations are not copied. `aboutDir`: where folders made by `about` go.
 export class HistoryDigest {
   private running: Promise<void> | null = null;
 
@@ -227,7 +228,30 @@ export class HistoryDigest {
     readonly source: string,
     readonly dir: string,
     private leaveOut: string[] = [],
+    readonly aboutDir = `${dir}-about`,
   ) {}
+
+  // A folder holding only the copies that mention `text`, such as a thread id,
+  // for an AI that may read nothing else. Made afresh each time from the
+  // copies as they are; refresh first for the latest.
+  about(text: string): string {
+    const folder = join(this.aboutDir, text.replace(/[^\w-]/g, "_"));
+    rmSync(folder, { recursive: true, force: true });
+    mkdirSync(folder, { recursive: true, mode: 0o700 });
+    for (const copy of walk(this.dir, /\.md$/)) {
+      let content: string;
+      try {
+        content = readFileSync(copy, "utf8");
+      } catch {
+        continue; // removed while looking
+      }
+      if (!content.includes(text)) continue;
+      const to = join(folder, relative(this.dir, copy));
+      mkdirSync(dirname(to), { recursive: true, mode: 0o700 });
+      copyFileSync(copy, to);
+    }
+    return folder;
+  }
 
   // One run at a time; asking during a run waits for it.
   refresh(): Promise<void> {
@@ -276,10 +300,11 @@ const digests = new Map<string, HistoryDigest>();
 export function historyFor(kind: HistoryKind): HistoryDigest {
   const source = kind === "claude" ? claudeProjectsDir() : codexSessionsDir();
   const dir = join(achatHome(), "history", kind);
+  const about = join(achatHome(), "about", kind);
   const key = `${kind}\n${source}\n${dir}`;
   let h = digests.get(key);
   if (!h) {
-    h = new HistoryDigest(kind, source, dir, [dir, source]);
+    h = new HistoryDigest(kind, source, dir, [dir, source, about], about);
     digests.set(key, h);
   }
   return h;

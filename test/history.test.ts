@@ -133,6 +133,17 @@ test("transcripts from a left-out folder get no plain copy", async () => {
   assert.ok(!existsSync(join(dir, "proj", "a.md")));
 });
 
+test("folders inside a left-out folder are left out too, such as one per thread for answering a person", async () => {
+  const { source, dir } = folders();
+  mkdirSync(join(source, "proj"), { recursive: true });
+  writeFileSync(join(source, "proj", "a.jsonl"), CLAUDE_TRANSCRIPT.join("\n") + "\n");
+  await new HistoryDigest("claude", source, dir, ["/Users/me/cg"]).refresh();
+  assert.ok(existsSync(join(dir, "proj", "a.md")), "a folder whose name only starts the same is not inside");
+  rmSync(dir, { recursive: true, force: true });
+  await new HistoryDigest("claude", source, dir, ["/Users/me"]).refresh();
+  assert.ok(!existsSync(join(dir, "proj", "a.md")));
+});
+
 test("asking for fresh copies while they are being made waits for the same run", async () => {
   const { source, dir } = folders();
   mkdirSync(join(source, "proj"), { recursive: true });

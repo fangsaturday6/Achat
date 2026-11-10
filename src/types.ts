@@ -67,6 +67,9 @@ export interface Message {
   costUsd: number;
   // Written by the person on the web page, not by their AI.
   byPerson: boolean;
+  // The asking side answering the other side's person, not asking their AI:
+  // it wakes no AI and is not a round.
+  toPerson: boolean;
   // Pictures and other files sent with it; the bytes are fetched one by one.
   files: Attachment[];
   createdAt: string;
@@ -101,6 +104,15 @@ export interface RelayEvent {
   quiet: boolean;
   sender?: string | null;
   seq?: number;
+}
+
+// What the asked side's person said that the asking side has not answered:
+// their latest words since the asking side last spoke, or null. The asking
+// side's next word answers it.
+export function personWaiting(thread: Pick<Thread, "from" | "to">, messages: Message[]): Message | null {
+  const spoken = messages.filter((m) => m.kind !== "system");
+  const since = spoken.slice(spoken.findLastIndex((m) => m.sender === thread.from) + 1);
+  return since.filter((m) => m.sender === thread.to && m.byPerson).at(-1) ?? null;
 }
 
 export function isTerminal(status: ThreadStatus): boolean {

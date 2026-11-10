@@ -17,7 +17,7 @@ import { RelayClient } from "../client.js";
 import { createMcpServer } from "../mcp/server.js";
 import { plainText, renderMarkdown, splitTitle } from "../markdown.js";
 import { redact } from "../redact.js";
-import { withFileNames } from "../asking.js";
+import { ownerOf, withFileNames } from "../asking.js";
 import { cjk } from "../text.js";
 import { MANIFEST, RELEASE_FILES, SIGNATURE, type Release } from "../release.js";
 import { AccountStore, CLIENT_LABEL, hashSecret, type Account, type AgentRecord, type Device, type Invite } from "./accounts.js";
@@ -1051,7 +1051,9 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
       if (service.readSeq(asker.accountId, thread.id) >= message.seq) continue;
       const person = accounts.account(asker.accountId)!;
       if (!person.emailNotify) continue;
-      const responderName = accounts.agentConfig(responder, person.id).name;
+      // The other side's person, when they wrote it themself.
+      const agentName = accounts.agentConfig(responder, person.id).name;
+      const responderName = message.byPerson ? ownerOf(agentName) : agentName;
       const askerName = accounts.agentConfig(asker, person.id).name.replace(/^我的/, "你的").replace(/^我$/, "你");
       await opts.mailer.send(
         requestEmail(person.email, {

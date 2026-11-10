@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { RelayClient } from "./client.js";
+import { ownerOf } from "./asking.js";
 import { cjk } from "./text.js";
 import type { ThreadSummary } from "./types.js";
 
@@ -51,8 +52,11 @@ export async function userPromptHook(client: RelayClient, agentId: string, input
     const agents = await client.agents().catch(() => []);
     const name = (id: string) => agents.find((a) => a.id === id)?.name ?? id;
     for (const t of here) {
+      // The other side's person, when they wrote the news themself.
+      const last = t.lastMessage;
+      const who = last && (last.sender === t.to ? last.byPerson : last.toPerson) ? `${ownerOf(name(t.to))}本人` : name(t.to);
       lines.push(
-        `Achat：${cjk(name(t.to), "在你之前发起的协作")}「${t.topic}」（${t.id}）里有新消息。` +
+        `Achat：${cjk(who, "在你之前发起的协作")}「${t.topic}」（${t.id}）里有新消息。` +
           "先用 achat 的 check_thread 看完整内容，把原文转给主人，再接着做这件事。",
       );
     }

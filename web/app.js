@@ -683,6 +683,18 @@ function writerName(m) {
   return isMine(m.sender) ? "我" : ownerOf(agentName(m.sender));
 }
 
+// Who is writing an answer now: the asked AI after a question, or the AI that
+// asked after the other side's person spoke to it. A person answers in their
+// own time, so nobody is shown for one.
+function answerer(t) {
+  const last = t.messages.filter((m) => m.kind !== "system").at(-1);
+  if (!last) return null;
+  if (t.status === "active" && last.sender === t.from && !last.toPerson) return t.to;
+  const asker = state.agents.get(t.from);
+  if ((t.status === "active" || t.status === "closed") && last.sender === t.to && last.byPerson && asker?.client !== "person") return t.from;
+  return null;
+}
+
 // A request: the question, and while it waits, its scope. The person who
 // decides changes the scope and answers right here, under the request.
 function requestCard(t, m, waiting) {
@@ -932,9 +944,9 @@ function renderThread(t) {
       log.append(row(m, said, ...m.files.map(fileTile)));
     }
   }
-  const lastSpoken = t.messages.filter((m) => m.kind !== "system").at(-1);
-  if (t.status === "active" && lastSpoken?.sender === t.from) {
-    log.append(row({ sender: t.to }, h("div", { class: "bubble", role: "img", "aria-label": `${agentName(t.to)}正在回答` }, h("span", { class: "typing" }, h("i"), h("i"), h("i")))));
+  const answering = answerer(t);
+  if (answering) {
+    log.append(row({ sender: answering }, h("div", { class: "bubble", role: "img", "aria-label": `${agentName(answering)}正在回答` }, h("span", { class: "typing" }, h("i"), h("i"), h("i")))));
   }
   if (t.status === "pending" && !isMine(t.to)) log.append(h("span", { class: "event" }, cjk("等", ownerOf(agentName(t.to)), "批准")));
 

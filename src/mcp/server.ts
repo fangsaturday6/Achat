@@ -8,10 +8,10 @@ import { RelayClient, RelayClientError, type DeviceLinkTicket, type PostView } f
 import { dateLabel } from "../cloud/pages.js";
 import type { AgentConfig } from "../config.js";
 import { cjk } from "../text.js";
-import { pendingMessage, requestReason, requestTitle, scopeLine, speaker, withFileNames } from "../asking.js";
+import { ownerOf, pendingMessage, requestReason, requestTitle, scopeLine, speaker, withFileNames } from "../asking.js";
 import { redact } from "../redact.js";
 import { markTaskSeen } from "../sidecar/tasks.js";
-import { isTerminal, MODE_LABELS, STATUS_LABELS, type Message, type ThreadDetail, type ThreadMode } from "../types.js";
+import { isTerminal, MODE_LABELS, personWaiting, STATUS_LABELS, type Message, type ThreadDetail, type ThreadMode } from "../types.js";
 
 export interface McpConnection {
   client: RelayClient;
@@ -175,7 +175,9 @@ export function createMcpServer(opts: McpOptions): McpServer {
       lines.push(
         "请把上面的回复完整转给主人：步骤、提示词、命令、路径照原文给出，不要压缩成摘要；你的理解或建议放在原文后面另外说。",
       );
-      if (detail.status === "active") {
+      if (personWaiting(detail, detail.messages)) {
+        lines.push(personAsks(detail, other));
+      } else if (detail.status === "active") {
         lines.push(`要继续追问，用 send_message（thread_id: ${detail.id}）；问完了用 close_thread。`);
       } else {
         lines.push(ended_(detail, ended?.body));
@@ -204,6 +206,12 @@ export function createMcpServer(opts: McpOptions): McpServer {
           : `${other}还在回复（协作 ${detail.id}）。${NO_NEED_TO_WAIT}`;
       }
     }
+  }
+
+  // The other side's person asked the AI that asked: it answers them, and
+  // their AI is not woken.
+  function personAsks(t: ThreadDetail, other: string): string {
+    return `${ownerOf(other)}本人在问你，回他用 send_message（thread_id: ${t.id}），不会叫醒${other}。`;
   }
 
   // A thread that ended can go on: the asker asks in it again, and the other
@@ -332,6 +340,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
       description:
         "在已经开始的 Achat 协作里接着说。你是发起方时是追问，会等对方回复；问答聊着要对方动手做事时，mode 填 do，对方的主人要再同意一次。" +
         "你是被问的一方时是补充，比如告诉对方事情做完了，发完就返回；你在动手时是交回结果，发完会等对方接着说。" +
+        "对方本人在协作里问你时，用它回他，发完就返回，不会叫醒对方的 AI。" +
         "不知道是哪条协作时，先调用 check_thread 不填 thread_id。",
       inputSchema: {
         thread_id: z.string().describe("协作 id"),
@@ -356,7 +365,13 @@ export function createMcpServer(opts: McpOptions): McpServer {
         }
         return text(`已发给${await nameOf(c, posted.from)}（协作 ${posted.id}）。它会在当初发起这次协作的会话里看到，不用等回复。`);
       }
-      const afterSeq = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!.seq;
+      const said = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!;
+      if (said.toPerson) {
+        await seen(c, posted);
+        const other = await nameOf(c, posted.to);
+        return text(`已回给${ownerOf(other)}本人（协作 ${posted.id}），不用等回复。要问${other}，再用 send_message。`);
+      }
+      const afterSeq = said.seq;
       const done = await waitForReply(c.client, posted, afterSeq, extra);
       const outcome = await describeOutcome(c, done, afterSeq);
       await seen(c, done);
@@ -383,7 +398,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
       for (const m of t.messages) {
         lines.push(m.kind === "system" ? `— ${m.body}` : `${speaker(m, await nameOf(c, m.sender))}：${m.body}`, ...(await fileLines(c, m)));
       }
-      const next = nextStep(c, t);
+      const next = nextStep(c, t, await nameOf(c, t.to));
       if (next) lines.push("", next);
       await seen(c, t);
       return text(lines.join("\n"));
@@ -391,12 +406,13 @@ export function createMcpServer(opts: McpOptions): McpServer {
   );
 
   // What the caller can do in a thread, so it does not open a new one for the same matter.
-  function nextStep(c: McpConnection, t: ThreadDetail): string | null {
+  function nextStep(c: McpConnection, t: ThreadDetail, other: string): string | null {
     if (t.to === c.agentId) {
       if (t.mode === "do" && t.status === "active") return "做完一步，用 send_message 把结果交回这里。";
       return t.status === "active" || t.status === "closed" ? "要补充（比如告诉对方做完了），用 send_message 发在这里。" : null;
     }
     if (t.from !== c.agentId) return null;
+    if ((t.status === "active" || t.status === "closed") && personWaiting(t, t.messages)) return personAsks(t, other);
     if (t.status === "closed" || t.status === "expired") return "这次协作已经结束了；要接着问，直接用 send_message 发在这里，对方的主人同意后接着答。";
     if (t.status !== "active") return null;
     const lastSpoken = t.messages.filter((m) => m.kind !== "system").at(-1);
