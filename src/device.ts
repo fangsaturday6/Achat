@@ -4,6 +4,7 @@ import {
   createPrivateKey,
   createPublicKey,
   generateKeyPairSync,
+  randomInt,
   sign,
   verify,
   type KeyObject,
@@ -178,7 +179,10 @@ export function signRequest(
   body = "",
   now = Date.now(),
 ): Record<string, string> {
-  const time = String(now);
+  // Ed25519 signs the same text the same way, and the cloud takes a signature
+  // once. A random fraction of a millisecond keeps two identical requests in
+  // the same millisecond apart, even from two processes sharing the key.
+  const time = `${now}.${String(randomInt(1e12)).padStart(12, "0")}`;
   const signature = sign(null, Buffer.from(canonical(method, pathAndQuery, time, body)), key.privateKey);
   return {
     "x-achat-device": key.deviceId,
@@ -200,6 +204,7 @@ export function checkSignature(
   now = Date.now(),
 ): string | null {
   if (!headers.time || !headers.signature) return "缺少签名";
+  // Milliseconds, with a fraction from newer computers; the text as sent is signed.
   const time = Number(headers.time);
   if (!Number.isFinite(time) || Math.abs(now - time) > SIGNATURE_WINDOW_MS) return "签名已过期，检查这台电脑的时间是否准确";
   try {

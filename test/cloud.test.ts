@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash, sign } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -140,6 +141,32 @@ describe("cloud", () => {
       body: body.replace('"y"', '"z"'),
     });
     assert.equal(tampered.status, 401);
+  });
+
+  test("two identical requests in the same millisecond are both accepted", async (t) => {
+    // The receiving process and an MCP process share the computer's key and
+    // can ask for the same thing at the same moment.
+    const frozen = Date.now();
+    t.mock.method(Date, "now", () => frozen);
+    const other = new RelayClient(cloud.url, fangMac.key);
+    const replies = await Promise.all([fangMac.client.me(), fangMac.client.me(), other.me()]);
+    assert.deepEqual(
+      replies.map((r) => r.device?.id),
+      [fangMac.key.deviceId, fangMac.key.deviceId, fangMac.key.deviceId],
+    );
+  });
+
+  test("a computer not yet updated still signs whole milliseconds", async () => {
+    const time = String(Date.now());
+    const text = ["achat-v1", "GET", "/api/me", time, createHash("sha256").update("").digest("hex")].join("\n");
+    const res = await fetch(cloud.url + "/api/me", {
+      headers: {
+        "x-achat-device": fangMac.key.deviceId,
+        "x-achat-time": time,
+        "x-achat-signature": sign(null, Buffer.from(text), fangMac.key.privateKey).toString("base64"),
+      },
+    });
+    assert.equal(res.status, 200);
   });
 
   test("one person's own AIs talk without approval", async () => {
