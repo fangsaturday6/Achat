@@ -249,6 +249,7 @@ export async function threadsApi(
           sessionId: typeof body.sessionId === "string" ? body.sessionId : undefined,
           mode: modeOf(body),
           byPerson,
+          reply: body.reply === true,
           files: filesOf(body),
         }),
       );

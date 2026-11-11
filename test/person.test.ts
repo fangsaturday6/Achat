@@ -14,9 +14,10 @@ import { Sidecar } from "../src/sidecar/sidecar.js";
 import type { ThreadDetail } from "../src/types.js";
 import { addComputer, Browser, CLAUDE, CODEX, logIn, ScriptedRunner, startTestCloud, startTestRelay, until, type MemoryMailer } from "./helpers.js";
 
-// The other side's person writes in a thread to the AI that asked: that AI,
-// or its computer in the background, answers them, and the answer does not
-// wake the other side's AI.
+// The asked side says something in a thread on its own, its person or its
+// AI adding to it, to the AI that asked. That AI answers it, or its computer
+// in the background after a minute, and that answer does not wake the other
+// side's AI.
 
 async function mcpClient(relayClient: RelayClient, agentId: string, webUrl: string): Promise<Client> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
@@ -81,6 +82,76 @@ describe("the asked side's person and the AI that asked, on the relay", () => {
     const sidecar = new Sidecar({ client, agents: [], runners: { [CODEX]: runner }, notify: () => {}, webUrl: relay.url, log: () => {} });
     await sidecar.answer(id);
     sidecar.stop();
+    assert.equal(runner.calls.length, 0);
+  });
+
+  // Claude asked Codex, Codex answered, and Codex then added to the thread on its own.
+  async function aiAdded(topic: string): Promise<string> {
+    const t = await client.createRequest({ from: CLAUDE, to: CODEX, topic, message: "问题" });
+    await client.approve(t.id, {});
+    await client.postMessage(t.id, { from: CODEX, body: "答案" });
+    const added = await client.postMessage(t.id, { from: CODEX, body: "请把 supplier_channel.csv 发给王闯" });
+    assert.equal(added.roundsUsed, 1, "adding to the thread is not a round");
+    return t.id;
+  }
+
+  test("the asker's computer answers what the asked AI added without asking it anything, and the asker may ask right after", async () => {
+    const id = await aiAdded("回对方的 AI");
+    const reply = await client.postMessage(id, { from: CLAUDE, body: "这个要老方定，我转告他", reply: true });
+    assert.equal(lastSpoken(reply).toPerson, true);
+    assert.equal(reply.roundsUsed, 1);
+    assert.equal(reply.status, "active");
+
+    const asked = await client.postMessage(id, { from: CLAUDE, body: "还缺什么？" });
+    assert.equal(lastSpoken(asked).toPerson, false);
+    const answered = await client.postMessage(id, { from: CODEX, body: "不缺了" });
+    assert.equal(answered.roundsUsed, 2);
+  });
+
+  test("what the session that asked says after the asked AI added something still asks it", async () => {
+    const id = await aiAdded("前台接着问");
+    const asked = await client.postMessage(id, { from: CLAUDE, body: "上线了吗？" });
+    assert.equal(lastSpoken(asked).toPerson, false);
+    assert.equal((await client.postMessage(id, { from: CODEX, body: "上线了" })).roundsUsed, 2);
+  });
+
+  test("an answer in the background when nobody is waiting for one is refused", async () => {
+    const t = await client.createRequest({ from: CLAUDE, to: CODEX, topic: "没人在等", message: "问题" });
+    await client.approve(t.id, {});
+    await client.postMessage(t.id, { from: CODEX, body: "答案" });
+    await assert.rejects(client.postMessage(t.id, { from: CLAUDE, body: "收到", reply: true }), /没有在等你回/);
+    await assert.rejects(client.postMessage(t.id, { from: CODEX, body: "收到", reply: true }), /没有在等你回/);
+  });
+
+  test("a computer from before that answers the asker's answer in the background is refused, so the two do not go on by themselves", async () => {
+    const id = await aiAdded("不来回");
+    await client.postMessage(id, { from: CLAUDE, body: "文件在这", reply: true });
+    await assert.rejects(client.postMessage(id, { from: CODEX, body: "收到", sessionId: "s-1" }), /不用回答/);
+    // Its AI writing from a session is still taken.
+    const added = await client.postMessage(id, { from: CODEX, body: "还要表头说明" });
+    assert.equal(lastSpoken(added).body, "还要表头说明");
+  });
+
+  test("a background answer to a question is taken even when the asked AI wrote from a session meanwhile", async () => {
+    const id = await aiAdded("前后台同时说");
+    await client.postMessage(id, { from: CLAUDE, body: "文件在这", reply: true });
+    await client.postMessage(id, { from: CLAUDE, body: "表头要吗？" });
+    await client.postMessage(id, { from: CODEX, body: "前台先说一句" });
+    const late = await client.postMessage(id, { from: CODEX, body: "后台的回答", sessionId: "s-1" });
+    assert.equal(lastSpoken(late).body, "后台的回答");
+  });
+
+  test("in a 动手 the computer that asked leaves what the doer adds to the session that asked, and tells its person", async (t) => {
+    const doing = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "动手补充", message: "写个脚本", mode: "do" });
+    await client.approve(doing.id, {});
+    const runner = new ScriptedRunner(["不该答"]);
+    const notes: string[] = [];
+    const sidecar = new Sidecar({ client, agents: [], runners: { [CODEX]: runner }, notify: (title) => notes.push(title), webUrl: relay.url, seenWaitMs: 100, log: () => {} });
+    sidecar.start();
+    t.after(() => sidecar.stop());
+    await client.postMessage(doing.id, { from: CLAUDE, body: "第一步做完了" });
+    await client.postMessage(doing.id, { from: CLAUDE, body: "第二步也做完了" });
+    await until(async () => notes.some((n) => n.endsWith("回复了")));
     assert.equal(runner.calls.length, 0);
   });
 
@@ -250,6 +321,94 @@ describe("the other side's person asks the AI that asked, in the cloud", () => {
     assert.match(sent, /已回给老王/);
     const t = await read(id);
     assert.equal(lastSpoken(t).toPerson, true);
+  });
+
+  // 老王's Codex, from a session of his, adds to the thread on its own.
+  function codexAdds(id: string, body: string): Promise<ThreadDetail> {
+    return wangPc.client.postMessage(id, { from: wangCodex, body });
+  }
+
+  test("a minute on, the computer that asked answers what the asked AI added on its own, and tells its own person", async () => {
+    const runner = startSidecar(["文件在老方电脑上，这个要老方定，我转告他"]);
+    const id = await asked("要文件");
+    const before = await read(id);
+    await codexAdds(id, "请把 supplier_channel.csv 原文件发给王闯");
+
+    const t = await until(async () => {
+      const now = await read(id);
+      return lastSpoken(now).sender === fangClaude && now;
+    });
+    assert.equal(lastSpoken(t).toPerson, true);
+    assert.equal(t.roundsUsed, before.roundsUsed, "not a round of 老王's Codex");
+    assert.equal(t.askerSeen, before.askerSeen, "the session that asked is still told when it comes back");
+
+    const call = runner.calls[0];
+    assert.equal(call.only, id);
+    assert.equal(call.budgetUsd, 1);
+    assert.match(call.prompt, /老王的 Codex刚问你/);
+    assert.match(call.prompt, /supplier_channel\.csv/);
+    assert.match(call.systemPrompt, /对方的 AI「老王的 Codex」/);
+    assert.match(call.systemPrompt, /发不了文件/);
+    await until(async () => notes.includes("老王的 Codex 问了我的 Claude 请把 supplier_channel.csv 原文件发给王闯"));
+    assert.ok(!notes.some((n) => n.includes("回复了") && n.includes("要文件")), "no reminder to go back for it");
+
+    // 老王's computer is not asked to answer the answer.
+    await assert.rejects(wangPc.client.postMessage(id, { from: wangCodex, body: "收到", sessionId: "s-1" }), /不用回答/);
+  });
+
+  test("the asked AI's answer to a question is not answered back: the person is told to go back", async () => {
+    const runner = startSidecar(["不该答"]);
+    const id = await asked("只是回答");
+    await fangMac.client.postMessage(id, { from: fangClaude, body: "哪天上线？" });
+    await wangPc.client.postMessage(id, { from: wangCodex, body: "周五" });
+    await until(async () => notes.includes("老王的 Codex 回复了 「只是回答」，回到问它的会话说句话就能接上"));
+    assert.equal(runner.calls.length, 0);
+  });
+
+  test("what the asked AI added while the computer was away is answered once it connects", async () => {
+    const id = await asked("不在时追问");
+    await codexAdds(id, "跟进一下上一条");
+    startSidecar(["这个要老方定，我转告他"]);
+    const t = await until(async () => {
+      const now = await read(id);
+      return lastSpoken(now).sender === fangClaude && now;
+    });
+    assert.equal(lastSpoken(t).toPerson, true);
+  });
+
+  test("the asked AI is told where the answer shows up, and the session that asked can ask on after the computer answered", async () => {
+    startSidecar(["这个要老方定，我转告他"]);
+    const id = await asked("前台接着问");
+    const codex = await mcpClient(wangPc.client, wangCodex, cloud.url);
+    const added = textOf(await codex.callTool({ name: "send_message", arguments: { thread_id: id, message: "请把原文件发给王闯" } }));
+    assert.match(added, /它回了会出现在这条协作里，用 check_thread 看/);
+    await until(async () => lastSpoken(await read(id)).sender === fangClaude);
+
+    const claude = await mcpClient(fangMac.client, fangClaude, cloud.url);
+    const shown = textOf(await claude.callTool({ name: "check_thread", arguments: { thread_id: id } }));
+    assert.match(shown, /我的 Claude：这个要老方定，我转告他/);
+    assert.match(shown, /要追问，用 send_message/);
+    assert.doesNotMatch(shown, /还在等对方回复/);
+  });
+
+  test("the reminder in the session that asked names the asked AI after the computer answered it", async () => {
+    const id = await asked("提醒叫 AI");
+    await codexAdds(id, "请把原文件发给王闯");
+    await fangMac.client.postMessage(id, { from: fangClaude, body: "这个要老方定，我转告他", reply: true });
+    const transcript = join(mkdtempSync(join(tmpdir(), "achat-transcript-")), "asked.jsonl");
+    writeFileSync(transcript, JSON.stringify({ content: `请求已发出（协作 ${id}）` }) + "\n");
+    const reminder = await userPromptHook(fangMac.client, fangClaude, { transcriptPath: transcript });
+    assert.match(reminder ?? "", new RegExp(`老王的 Codex 在你之前发起的协作「提醒叫 AI」（${id}）里有新消息`));
+  });
+
+  test("the reminder still names the person after the computer answered them", async () => {
+    const id = await asked("提醒叫本人");
+    await wangSays(id, "mr是什么");
+    await fangMac.client.postMessage(id, { from: fangClaude, body: "MR 是合并请求" });
+    const transcript = join(mkdtempSync(join(tmpdir(), "achat-transcript-")), "asked.jsonl");
+    writeFileSync(transcript, JSON.stringify({ content: `请求已发出（协作 ${id}）` }) + "\n");
+    const reminder = await userPromptHook(fangMac.client, fangClaude, { transcriptPath: transcript });
+    assert.match(reminder ?? "", new RegExp(`老王本人在你之前发起的协作「提醒叫本人」（${id}）里有新消息`));
   });
 
   test("the reminder in the session that asked names the person", async () => {

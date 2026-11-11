@@ -324,6 +324,8 @@ export class RelayClient {
       sessionId?: string;
       mode?: ThreadMode;
       byPerson?: boolean;
+      // Answering in the background what the other side said on its own.
+      reply?: boolean;
       files?: OutgoingFile[];
     },
   ): Promise<ThreadDetail> {

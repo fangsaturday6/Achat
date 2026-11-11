@@ -4,8 +4,10 @@ import { cleanName, filesProblem, typeOf, type NewFile } from "../attachments.js
 import type { AchatConfig, AgentConfig } from "../config.js";
 import {
   isTerminal,
+  latestAnswer,
   MODE_LABELS,
   personWaiting,
+  waitingForAsker,
   type Attachment,
   type Message,
   type RelayEvent,
@@ -85,6 +87,9 @@ export interface PostMessageInput {
   // person approves again.
   mode?: ThreadMode;
   byPerson?: boolean;
+  // The asker's computer answering in the background what the other side
+  // said on its own: it wakes no AI and is not a round.
+  reply?: boolean;
   files?: NewFile[];
 }
 
@@ -426,8 +431,9 @@ export class RelayService {
   // a round in the background. The asked side can add to a thread at any time,
   // even after it ended on its own, for example to say the work is done; that
   // is not a round. What the asked side's person says there is for the AI
-  // that asked, whose next word answers them. Only a thread a person stopped
-  // or declined is shut.
+  // that asked, whose next word answers them; what its AI adds on its own,
+  // the asker's computer may answer in the background without asking it
+  // anything. Only a thread a person stopped or declined is shut.
   postMessage(id: string, input: PostMessageInput): ThreadDetail {
     const thread = this.requireThread(id);
     if (input.from !== thread.from && input.from !== thread.to) {
@@ -443,9 +449,21 @@ export class RelayService {
     const spoken = this.store.messages(id).filter((m) => m.kind !== "system");
     const lastSpoken = spoken.at(-1);
     const personSays = this.byPerson(input.from, input.byPerson);
-    // The other side's person spoke since the asker last did: the asker's next
-    // word answers them, and their AI is not asked anything.
-    const toPerson = !fromResponder && !upgrade && personWaiting(thread, spoken) !== null;
+    // The other side's person spoke since the asker last did, or the asker's
+    // computer answers what the other side said on its own: an answer, and
+    // their AI is not asked anything.
+    if (input.reply && (fromResponder || !waitingForAsker(thread, spoken))) throw new RelayError(409, "对方没有在等你回");
+    const toPerson = !fromResponder && !upgrade && (input.reply === true || personWaiting(thread, spoken) !== null);
+    // The first word from the asked AI after the asker's latest question
+    // answers it; the person's own words are not a round.
+    const answers = fromResponder && !personSays && latestAnswer(thread, spoken) === undefined;
+    // A computer from before answers that wake no AI takes the asker's answer
+    // for a question and answers it in the background. Kept, it would be
+    // something said on its own, which the asker's computer answers in turn,
+    // and the two would go on by themselves.
+    if (fromResponder && input.sessionId && !answers && spoken.findLast((m) => m.sender === thread.from)?.toPerson) {
+      throw new RelayError(409, "对方是在回你，不用回答");
+    }
     // The asker asking to 动手, or to go on once the thread ended or its
     // allowance is used up: a request of its own, which the person approves.
     const asks = !fromResponder && !toPerson && (upgrade || thread.status !== "active" || this.spent(thread));
@@ -482,10 +500,6 @@ export class RelayService {
       );
       let t = thread;
       if (fromResponder) {
-        // The first word from the asked AI after the asker's latest question
-        // answers it; the person's own words are not a round.
-        const lastAsk = spoken.findLastIndex((m) => m.sender === thread.from && !m.toPerson);
-        const answers = !personSays && lastAsk >= 0 && !spoken.slice(lastAsk + 1).some((m) => m.sender === thread.to && !m.byPerson);
         const roundsUsed = thread.roundsUsed + (answers ? 1 : 0);
         const costUsd = Math.round((thread.costUsd + (input.costUsd ?? 0)) * 10000) / 10000;
         let status: ThreadStatus = thread.status;

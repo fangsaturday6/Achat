@@ -52,9 +52,14 @@ export async function userPromptHook(client: RelayClient, agentId: string, input
     const agents = await client.agents().catch(() => []);
     const name = (id: string) => agents.find((a) => a.id === id)?.name ?? id;
     for (const t of here) {
-      // The other side's person, when they wrote the news themself.
-      const last = t.lastMessage;
-      const who = last && (last.sender === t.to ? last.byPerson : last.toPerson) ? `${ownerOf(name(t.to))}本人` : name(t.to);
+      // The other side's person, when they wrote the news themself, also when
+      // this computer already answered it in the background.
+      let news = t.lastMessage;
+      if (news?.sender === t.from && news.toPerson) {
+        const detail = await client.getThread(t.id).catch(() => null);
+        news = detail?.messages.filter((m) => m.sender === t.to).at(-1) ?? null;
+      }
+      const who = news?.sender === t.to && news.byPerson ? `${ownerOf(name(t.to))}本人` : name(t.to);
       lines.push(
         `Achat：${cjk(who, "在你之前发起的协作")}「${t.topic}」（${t.id}）里有新消息。` +
           "先用 achat 的 check_thread 看完整内容，把原文转给主人，再接着做这件事。",

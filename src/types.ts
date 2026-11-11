@@ -67,8 +67,11 @@ export interface Message {
   costUsd: number;
   // Written by the person on the web page, not by their AI.
   byPerson: boolean;
-  // The asking side answering the other side's person, not asking their AI:
-  // it wakes no AI and is not a round.
+  // The asking side answering, not asking their AI: it wakes no AI and is
+  // not a round. Its next word after the other side's person spoke, or its
+  // computer answering in the background what the other side's AI added on
+  // its own. The name is from when only a person was answered; computers
+  // already out there read it by this name.
   toPerson: boolean;
   // Pictures and other files sent with it; the bytes are fetched one by one.
   files: Attachment[];
@@ -106,6 +109,15 @@ export interface RelayEvent {
   seq?: number;
 }
 
+// The asked AI's answer to the asking side's latest question: its first word
+// after that question, or undefined while it has not answered. The asking
+// side's answers to what the other side said on its own are not questions.
+// `spoken`: the thread's messages without the system notes.
+export function latestAnswer(thread: Pick<Thread, "from" | "to">, spoken: Message[]): Message | undefined {
+  const ask = spoken.findLastIndex((m) => m.sender === thread.from && !m.toPerson);
+  return spoken.slice(ask + 1).find((m) => m.sender === thread.to && !m.byPerson);
+}
+
 // What the asked side's person said that the asking side has not answered:
 // their latest words since the asking side last spoke, or null. The asking
 // side's next word answers it.
@@ -113,6 +125,18 @@ export function personWaiting(thread: Pick<Thread, "from" | "to">, messages: Mes
   const spoken = messages.filter((m) => m.kind !== "system");
   const since = spoken.slice(spoken.findLastIndex((m) => m.sender === thread.from) + 1);
   return since.filter((m) => m.sender === thread.to && m.byPerson).at(-1) ?? null;
+}
+
+// What the asked side said on its own that the asking side has not answered:
+// its person's words, or its AI adding to the thread, which is anything but
+// the answer to the latest question. The latest such message since the
+// asking side last spoke, or null. If the session that asked does not, its
+// computer answers it in the background.
+export function waitingForAsker(thread: Pick<Thread, "from" | "to">, messages: Message[]): Message | null {
+  const spoken = messages.filter((m) => m.kind !== "system");
+  const answer = latestAnswer(thread, spoken);
+  const since = spoken.slice(spoken.findLastIndex((m) => m.sender === thread.from) + 1);
+  return since.filter((m) => m.sender === thread.to && m !== answer).at(-1) ?? null;
 }
 
 export function isTerminal(status: ThreadStatus): boolean {

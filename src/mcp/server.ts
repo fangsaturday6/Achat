@@ -363,7 +363,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
           const done = await waitForReply(c.client, posted, afterSeq, extra, posted.from);
           return text(await describeFollowUp(c, done, afterSeq));
         }
-        return text(`已发给${await nameOf(c, posted.from)}（协作 ${posted.id}）。它会在当初发起这次协作的会话里看到，不用等回复。`);
+        return text(`已发给${await nameOf(c, posted.from)}（协作 ${posted.id}），不用等回复。它回了会出现在这条协作里，用 check_thread 看。`);
       }
       const said = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!;
       if (said.toPerson) {
@@ -416,7 +416,8 @@ export function createMcpServer(opts: McpOptions): McpServer {
     if (t.status === "closed" || t.status === "expired") return "这次协作已经结束了；要接着问，直接用 send_message 发在这里，对方的主人同意后接着答。";
     if (t.status !== "active") return null;
     const lastSpoken = t.messages.filter((m) => m.kind !== "system").at(-1);
-    if (lastSpoken?.sender === c.agentId) return "还在等对方回复。";
+    // What it answered the other side is not a question.
+    if (lastSpoken?.sender === c.agentId && !lastSpoken.toPerson) return "还在等对方回复。";
     return t.mode === "do"
       ? "要追问，用 send_message；问完了用 close_thread。"
       : "要追问，用 send_message；要对方动手做，send_message 填 mode: do；问完了用 close_thread。";
