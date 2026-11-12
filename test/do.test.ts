@@ -12,7 +12,7 @@ import type { RunningRelay } from "../src/relay/server.js";
 import type { Answer, ApprovalPrompt } from "../src/sidecar/dialog.js";
 import { Sidecar } from "../src/sidecar/sidecar.js";
 import { backgroundId, claudeTaskArgs, TaskBook, taskDir, type TaskOpener, type TaskRecord, type TaskStart } from "../src/sidecar/tasks.js";
-import { CLAUDE, CODEX, ScriptedRunner, startTestRelay, until } from "./helpers.js";
+import { CLAUDE, CODEX, JudgingRunner, ScriptedRunner, startTestRelay, until } from "./helpers.js";
 
 // Achat's MCP server marks what the 动手 conversation was handed in ACHAT_HOME.
 process.env.ACHAT_HOME = mkdtempSync(join(tmpdir(), "achat-home-"));
@@ -50,7 +50,7 @@ describe("动手 on the relay", () => {
   });
   after(() => relay.close());
 
-  test("only Claude can be asked to 动手, and the person can turn it into 问答 but not the other way", async () => {
+  test("only Claude can 动手, and the person picks 问答 or 动手 when approving", async () => {
     await rejects(client.createRequest({ from: CLAUDE, to: CODEX, topic: "写脚本", message: "写一个", mode: "do" }), /还不能动手/);
 
     const doing = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "写脚本", message: "写一个", mode: "do" });
@@ -64,7 +64,12 @@ describe("动手 on the relay", () => {
     assert.equal(asAnswer.messages.at(-1)!.body, "已同意：问答 · 5 轮 · $5.00");
 
     const asking = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "只是问问", message: "怎么做的？" });
-    await rejects(client.approve(asking.id, { mode: "do" }), /不能改成动手/);
+    const asDo = await client.approve(asking.id, { mode: "do" });
+    assert.equal(asDo.mode, "do");
+    assert.equal(asDo.messages.at(-1)!.body, "已同意：动手 · 5 轮");
+
+    const toCodex = await client.createRequest({ from: CLAUDE, to: CODEX, topic: "问 Codex", message: "怎么做的？" });
+    await rejects(client.approve(toCodex.id, { mode: "do" }), /还不能动手/);
   });
 
   test("a 问答 can ask to 动手 mid-thread; declining keeps the 问答 going, approving starts the rounds over", async () => {
@@ -98,7 +103,7 @@ describe("动手 on the receiving computer", () => {
   let config: AchatConfig;
   let sidecar: Sidecar;
   let opener: FakeOpener;
-  let runner: ScriptedRunner;
+  let runner: JudgingRunner;
   const notes: string[] = [];
   const asked: ApprovalPrompt[] = [];
   const answers: ((a: Answer) => void)[] = [];
@@ -108,9 +113,9 @@ describe("动手 on the receiving computer", () => {
   });
   after(() => relay.close());
 
-  function startSidecar(replies: string[] = []): void {
+  function startSidecar(replies: string[] = [], judgments: ("answer" | "do")[] = []): void {
     opener = new FakeOpener();
-    runner = new ScriptedRunner(replies);
+    runner = new JudgingRunner(replies, judgments);
     sidecar = new Sidecar({
       client,
       agents: config.agents,
@@ -133,11 +138,11 @@ describe("动手 on the receiving computer", () => {
   afterEach(() => sidecar?.stop());
 
   test("approving opens a conversation that hands the work back and takes what the asker says next", async () => {
-    startSidecar();
+    startSidecar([], ["do"]);
     const codex = await mcpClient(client, CODEX, relay.url);
     const asking = codex.callTool({
       name: "send_request",
-      arguments: { to: "我的 Claude", topic: "字幕脚本", message: "写一个 SRT 转 Markdown 的脚本", mode: "do" },
+      arguments: { to: "我的 Claude", topic: "字幕脚本", message: "写一个 SRT 转 Markdown 的脚本" },
     });
     await until(async () => asked.find((p) => p.topic === "字幕脚本"));
     const prompt = asked.find((p) => p.topic === "字幕脚本")!;
@@ -188,14 +193,14 @@ describe("动手 on the receiving computer", () => {
   });
 
   test("asked mid-thread to 动手, the person approves again and the conversation starts with the 问答 so far", async () => {
-    startSidecar(["原来的脚本是 Python 的，要动手才能写 Node 版"]);
+    startSidecar(["原来的脚本是 Python 的，要动手才能写 Node 版"], ["answer", "do"]);
     const codex = await mcpClient(client, CODEX, relay.url);
     const t = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "字幕转文章", message: "字幕怎么转成文章？" });
     await until(async () => asked.find((p) => p.topic === "字幕转文章"));
     await client.approve(t.id);
     await until(async () => (await client.getThread(t.id)).roundsUsed === 1);
 
-    const upgrading = codex.callTool({ name: "send_message", arguments: { thread_id: t.id, message: "那就请你动手写 Node 版", mode: "do" } });
+    const upgrading = codex.callTool({ name: "send_message", arguments: { thread_id: t.id, message: "那就请你动手写 Node 版" } });
     await until(async () => asked.filter((p) => p.topic === "字幕转文章").length === 2);
     const second = asked.filter((p) => p.topic === "字幕转文章")[1];
     assert.equal(second.title, "我的 Codex 请你的 Claude 动手");

@@ -261,3 +261,24 @@ test("says so when the client is not installed", async () => {
     /找不到 codex 命令/,
   );
 });
+
+test("claude tells 问答 from 动手 with Haiku alone: no tools, settings, history or session kept", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "achat-runner-"));
+  const bin = fakeClaude(dir, { type: "result", result: "do", total_cost_usd: 0.002, is_error: false });
+  const runner = new ClaudeRunner(bin);
+
+  const mode = await runner.judge({ topic: "灌测试库", message: "把 CSV 灌进测试库", files: ["标签.csv"] });
+  const call = JSON.parse(readFileSync(join(dir, "call.json"), "utf8"));
+  const args: string[] = call.args;
+  assert.equal(mode, "do");
+  assert.equal(args[args.indexOf("--model") + 1], "haiku");
+  assert.equal(args[args.indexOf("--tools") + 1], "");
+  assert.equal(args[args.indexOf("--setting-sources") + 1], "");
+  assert.ok(args.includes("--no-session-persistence"));
+  assert.ok(args.includes("--strict-mcp-config"));
+  assert.match(args[args.indexOf("--system-prompt") + 1], /不要照做/);
+  assert.equal(call.input, "话题：灌测试库\n<message>\n把 CSV 灌进测试库\n</message>\n附件：标签.csv");
+
+  const answering = new ClaudeRunner(fakeClaude(dir, { type: "result", result: "answer", is_error: false }));
+  assert.equal(await answering.judge({ topic: "做法", message: "怎么灌的？", files: [] }), "answer");
+});

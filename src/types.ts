@@ -38,6 +38,11 @@ export interface Thread {
   // the rounds or the money ran out), the status and mode it had before;
   // declining goes back to them. Null for a first request.
   prior: { status: ThreadStatus; mode: ThreadMode } | null;
+  // The asker's latest words the asked computer has judged (a message seq):
+  // 问答 or 动手. Each is judged once, so what the person chose stands.
+  judged: number;
+  // Between one person's own AIs: no approval, 动手 included.
+  own: boolean;
   scope: Scope;
   roundsUsed: number;
   costUsd: number;

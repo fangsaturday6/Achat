@@ -306,6 +306,11 @@ export class RelayClient {
     return this.call("POST", `/api/threads/${encodeURIComponent(id)}/more`, { note });
   }
 
+  // The asked computer's reading of the asker's words at `seq`: 问答 or 动手.
+  judge(id: string, seq: number, mode: ThreadMode): Promise<ThreadDetail> {
+    return this.call("POST", `/api/threads/${encodeURIComponent(id)}/judge`, { seq, mode });
+  }
+
   fail(id: string, reason: string): Promise<ThreadDetail> {
     return this.call("POST", `/api/threads/${encodeURIComponent(id)}/fail`, { reason });
   }

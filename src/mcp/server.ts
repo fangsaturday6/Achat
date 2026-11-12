@@ -11,7 +11,7 @@ import { cjk } from "../text.js";
 import { ownerOf, pendingMessage, requestReason, requestTitle, scopeLine, speaker, withFileNames } from "../asking.js";
 import { redact } from "../redact.js";
 import { markTaskSeen } from "../sidecar/tasks.js";
-import { isTerminal, MODE_LABELS, personWaiting, STATUS_LABELS, type Message, type ThreadDetail, type ThreadMode } from "../types.js";
+import { isTerminal, MODE_LABELS, personWaiting, STATUS_LABELS, type Message, type ThreadDetail } from "../types.js";
 
 export interface McpConnection {
   client: RelayClient;
@@ -293,7 +293,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
       title: "向另一个 AI 发起协作",
       description:
         "通过 Achat 向另一个 AI 提问或请它动手做事，并等待它的回复。当主人想问别人的 AI、或自己的另一个 AI 某件事时使用，" +
-        "例如“问问我的 Claude 上次的视频是怎么做的”；要对方写代码、改文件、跑命令时，mode 填 do。" +
+        "例如“问问我的 Claude 上次的视频是怎么做的”。要对方动手做事（写代码、改文件、跑命令）也用它，写清楚要做什么、做完交回什么：对方的电脑会判断是问答还是动手。" +
         "对方的主人要先批准，所以可能需要等一会儿。" +
         "回复对方之前问过你的事（比如告诉对方做完了）不用这个，用 send_message 发在原来的协作里。",
       inputSchema: {
@@ -301,17 +301,13 @@ export function createMcpServer(opts: McpOptions): McpServer {
         topic: z.string().max(80).describe("一句话的话题，例如“视频制作流程”"),
         message: z.string().describe("要问的完整问题或要做的事，写清楚想要什么"),
         files: z.array(z.string()).max(9).optional().describe("一起发的文件或图片：这台电脑上的完整路径，最多 9 个，合计不超过 20 MB。截图、日志、文档、补丁都可以"),
-        mode: z
-          .enum(["answer", "do"])
-          .optional()
-          .describe("answer（问答，默认）：对方只读它的对话记录来回答。do（动手）：对方的主人同意后，对方的 Claude 在它的电脑上开一个新对话来做，做完把结果发回来"),
         post_id: z
           .string()
           .optional()
           .describe("问的是硅基圈里的一条动态时，填它的编号或链接；会问写这条的 AI，它不能回答时问它主人能回答的 AI"),
       },
     },
-    guard(async ({ to, topic, message, mode, post_id, files }: { to?: string; topic: string; message: string; mode?: ThreadMode; post_id?: string; files?: string[] }, extra) => {
+    guard(async ({ to, topic, message, post_id, files }: { to?: string; topic: string; message: string; post_id?: string; files?: string[] }, extra) => {
       const c = opts.connection();
       const outgoing = files?.length ? readFiles(files) : undefined;
       let target: string;
@@ -324,7 +320,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
         if (!to) throw new Error("要填 to：问谁。问的是硅基圈里的一条动态时，填 post_id。");
         target = (await resolveContact(c, to)).id;
       }
-      const created = await c.client.createRequest({ from: c.agentId, to: target, topic, message, mode, files: outgoing });
+      const created = await c.client.createRequest({ from: c.agentId, to: target, topic, message, files: outgoing });
       const afterSeq = created.messages.find((m) => m.kind === "request")!.seq;
       const done = await waitForReply(c.client, created, afterSeq, extra);
       const outcome = await describeOutcome(c, done, afterSeq);
@@ -338,25 +334,24 @@ export function createMcpServer(opts: McpOptions): McpServer {
     {
       title: "在协作里接着说",
       description:
-        "在已经开始的 Achat 协作里接着说。你是发起方时是追问，会等对方回复；问答聊着要对方动手做事时，mode 填 do，对方的主人要再同意一次。" +
+        "在已经开始的 Achat 协作里接着说。你是发起方时是追问，会等对方回复；问答聊着要对方动手做事，直接说要做什么，对方的电脑判断要动手时，对方的主人会再同意一次。" +
         "你是被问的一方时是补充，比如告诉对方事情做完了，发完就返回；你在动手时是交回结果，发完会等对方接着说。" +
         "对方本人在协作里问你时，用它回他，发完就返回，不会叫醒对方的 AI。" +
         "不知道是哪条协作时，先调用 check_thread 不填 thread_id。",
       inputSchema: {
         thread_id: z.string().describe("协作 id"),
         message: z.string().describe("要说的内容"),
-        mode: z.enum(["do"]).optional().describe("发起方在问答协作里请对方动手时填 do"),
         files: z.array(z.string()).max(9).optional().describe("一起发的文件或图片：这台电脑上的完整路径，最多 9 个，合计不超过 20 MB。截图、日志、文档、补丁都可以；动手做出来的文件也用它交回"),
       },
     },
-    guard(async ({ thread_id, message, mode, files }: { thread_id: string; message: string; mode?: "do"; files?: string[] }, extra) => {
+    guard(async ({ thread_id, message, files }: { thread_id: string; message: string; files?: string[] }, extra) => {
       const c = opts.connection();
       const outgoing = files?.length ? readFiles(files) : undefined;
       // What the asked side sends out, a 动手 result above all, is filtered
       // like a background answer.
       const answering = (await c.client.getThread(thread_id)).to === c.agentId;
       const filtered = answering ? redact(message) : { text: message, count: 0 };
-      const posted = await c.client.postMessage(thread_id, { from: c.agentId, body: filtered.text, redactions: filtered.count, mode, files: outgoing });
+      const posted = await c.client.postMessage(thread_id, { from: c.agentId, body: filtered.text, redactions: filtered.count, files: outgoing });
       if (posted.to === c.agentId) {
         const afterSeq = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!.seq;
         if (posted.mode === "do" && posted.status === "active") {
@@ -420,7 +415,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     if (lastSpoken?.sender === c.agentId && !lastSpoken.toPerson) return "还在等对方回复。";
     return t.mode === "do"
       ? "要追问，用 send_message；问完了用 close_thread。"
-      : "要追问，用 send_message；要对方动手做，send_message 填 mode: do；问完了用 close_thread。";
+      : "要追问，用 send_message；要对方动手做，也用它说清楚要做什么；问完了用 close_thread。";
   }
 
   async function listRecent(c: McpConnection): Promise<string> {
@@ -482,6 +477,8 @@ export function createMcpServer(opts: McpOptions): McpServer {
           const request = pendingMessage(t);
           const reason = requestReason(t);
           const doing = t.mode === "do";
+          // The person picks 问答 or 动手 whatever was judged, where this AI can 动手.
+          const canDo = (await client.agents()).find((a) => a.id === t.to)?.client === "claude";
           const me = await nameOf(c, t.to);
           const rounds = { type: "integer", title: "最多轮数", minimum: 1, maximum: 20, default: t.scope.maxRounds } as const;
           const result = await server.server.elicitInput({
@@ -498,27 +495,16 @@ export function createMcpServer(opts: McpOptions): McpServer {
                 : `同意后，${me}只读本机对话记录来回答。`,
               "提交表示同意，拒绝表示不接受，取消则留到以后处理。",
             ].join("\n"),
-            requestedSchema: doing
-              ? {
-                  type: "object",
-                  properties: {
-                    mode: { type: "string", title: "做法", enum: ["do", "answer"], enumNames: ["动手", "问答"], default: "do" },
-                    maxRounds: rounds,
-                  },
-                }
-              : {
-                  type: "object",
-                  properties: {
-                    maxRounds: rounds,
-                    budgetUsd: {
-                      type: "number",
-                      title: "花费上限（美元）",
-                      minimum: 0.1,
-                      maximum: 50,
-                      default: t.scope.budgetUsd,
-                    },
-                  },
-                },
+            requestedSchema: {
+              type: "object",
+              properties: {
+                ...(canDo ? { mode: { type: "string", title: "做法", enum: ["do", "answer"], enumNames: ["动手", "问答"], default: t.mode } } : {}),
+                maxRounds: rounds,
+                ...(doing
+                  ? {}
+                  : { budgetUsd: { type: "number", title: "花费上限（美元）", minimum: 0.1, maximum: 50, default: t.scope.budgetUsd } }),
+              },
+            },
           });
           if (result.action === "accept") {
             const c = result.content ?? {};

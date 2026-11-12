@@ -6,7 +6,7 @@ import type { AgentClient, AgentConfig } from "../config.js";
 import { redact } from "../redact.js";
 import { cjk } from "../text.js";
 import { MIN_ROUND_BUDGET_USD } from "../relay/service.js";
-import { waitingForAsker, type Message, type RelayEvent, type ThreadDetail } from "../types.js";
+import { MODE_LABELS, waitingForAsker, type Message, type RelayEvent, type ThreadDetail, type ThreadMode } from "../types.js";
 import type { Alerter, Asker, Asking } from "./dialog.js";
 import type { Notifier } from "./notify.js";
 import { BudgetExceededError, LoginExpiredError, type AgentRunner, type RunOutput } from "./runners.js";
@@ -211,8 +211,11 @@ export class Sidecar {
   // Requests waiting for their dialog, and the one on screen.
   private queue: string[] = [];
   private showing: { id: string; asking: Asking | null } | null = null;
-  // Shown once already; "稍后" means the web page, not the same dialog again.
-  private shown = new Set<string>();
+  // Shown once already, up to which message; "稍后" means the web page, not
+  // the same dialog again. A request made later in the thread is new.
+  private shown = new Map<string, number>();
+  // The asker's words being judged 问答 or 动手, once each.
+  private judging = new Map<string, Promise<ThreadDetail>>();
   // Threads waiting for a login on this computer, since when, and the
   // clients the person was already told about.
   private waitingLogin = new Map<string, number>();
@@ -298,17 +301,12 @@ export class Sidecar {
   private onEvent(e: RelayEvent): void {
     if (e.type === "message.created" && this.mine(e.from) && e.sender === e.to) this.watchSeen(e.threadId);
     if (!this.mine(e.to)) return;
-    if (e.type === "thread.created" && e.status === "pending") {
-      if (!e.quiet) this.prompt(e.threadId);
-      return;
-    }
-    // A request inside a thread shown before: to 动手, or to go on once it
-    // ended or ran out.
-    if (e.status === "pending" && (e.type === "thread.updated" || (e.type === "message.created" && e.sender === e.from))) {
-      if (!e.quiet) {
-        this.shown.delete(e.threadId);
-        this.prompt(e.threadId);
-      }
+    // A request, or one inside a thread shown before: to 动手, or to go on
+    // once it ended or ran out. It is judged before it is shown; a quiet one
+    // is only judged, for the web page.
+    if (e.status === "pending" && (e.type === "thread.created" || e.type === "thread.updated" || (e.type === "message.created" && e.sender === e.from))) {
+      if (e.quiet) void this.judgeQuietly(e.threadId);
+      else this.prompt(e.threadId);
       return;
     }
     if (e.type === "thread.reminded") {
@@ -429,7 +427,7 @@ export class Sidecar {
   }
 
   private prompt(threadId: string): void {
-    if (this.shown.has(threadId) || this.queue.includes(threadId)) return;
+    if (this.showing?.id === threadId || this.queue.includes(threadId)) return;
     this.queue.push(threadId);
     void this.next();
   }
@@ -440,10 +438,12 @@ export class Sidecar {
     const id = this.queue.shift();
     if (!id) return;
     this.showing = { id, asking: null };
-    this.shown.add(id);
     try {
-      const t = await this.relay.getThread(id);
+      const t = await this.judged(await this.relay.getThread(id));
       if (t.status !== "pending") return;
+      const upTo = t.messages.at(-1)?.seq ?? 0;
+      if (this.shown.get(id) === upTo) return;
+      this.shown.set(id, upTo);
       const from = (await this.agent(t.from))?.name ?? t.from;
       const to = ((await this.agent(t.to))?.name ?? t.to).replace(/^我的/, "你的");
       const asking = this.opts.ask?.({
@@ -468,6 +468,45 @@ export class Sidecar {
     } finally {
       this.showing = null;
       void this.next();
+    }
+  }
+
+  // The asker's latest words, judged 问答 or 动手 by the AI they are for, if
+  // it can 动手. Each is judged once; what the relay made of it comes back. A
+  // judgment that fails is 问答, as before judging, and the person can still
+  // turn it into 动手.
+  private judged(t: ThreadDetail): Promise<ThreadDetail> {
+    const ask = t.messages.filter((m) => m.kind !== "system" && m.sender === t.from && !m.toPerson).at(-1);
+    const runner = this.opts.runners[t.to];
+    if (!ask || ask.seq <= t.judged || t.mode === "do" || !runner?.judge || !this.opts.doers?.[t.to]) return Promise.resolve(t);
+    const key = `${t.id}:${ask.seq}`;
+    let judging = this.judging.get(key);
+    if (!judging) {
+      judging = (async () => {
+        let mode: ThreadMode = "answer";
+        try {
+          mode = await runner.judge!({ topic: t.topic, message: ask.body, files: ask.files.map((f) => f.name) });
+        } catch (err) {
+          this.log(`${t.id} 没判断出是问答还是动手，按问答：${(err as Error).message}`);
+        }
+        this.log(`${t.id} 判断为${MODE_LABELS[mode]}`);
+        // An Achat service from before judging does not know it: the request
+        // goes on as it came.
+        return this.relay.judge(t.id, ask.seq, mode).catch((err: Error) => {
+          this.log(`${t.id} 的判断没有记下：${err.message}`);
+          return t;
+        });
+      })().finally(() => this.judging.delete(key));
+      this.judging.set(key, judging);
+    }
+    return judging;
+  }
+
+  private async judgeQuietly(threadId: string): Promise<void> {
+    try {
+      await this.judged(await this.relay.getThread(threadId));
+    } catch (err) {
+      if (!this.stopping.signal.aborted) this.log(`${threadId} 的判断：${(err as Error).message}`);
     }
   }
 
@@ -573,12 +612,16 @@ export class Sidecar {
     }
     this.inFlight.add(threadId);
     try {
-      const thread = await this.relay.getThread(threadId);
+      let thread = await this.relay.getThread(threadId);
       if (thread.status !== "active" || !this.mine(thread.to)) return;
       const spoken = thread.messages.filter((m) => m.kind !== "system");
       const last = spoken.at(-1);
       // What the asker said to this side's person is not a question for the AI here.
       if (!last || last.sender !== thread.from || last.toPerson) return;
+      // Asked to 动手 in a 问答: that is for the person to approve first,
+      // except between their own AIs.
+      thread = await this.judged(thread);
+      if (thread.status !== "active") return;
       const before = spoken.slice(0, -1);
       const previousAsk = before.findLastIndex((m) => m.sender === thread.from && !m.toPerson);
       const said = before.slice(previousAsk + 1).filter((m) => m.sender === thread.to);

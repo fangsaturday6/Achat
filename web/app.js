@@ -712,7 +712,9 @@ function requestCard(t, m, waiting) {
     " · $",
     h("input", { type: "number", min: "0.1", max: "50", step: "0.1", value: t.scope.budgetUsd.toFixed(2), "aria-label": "花费上限（美元）" }),
   );
-  const chip = t.mode === "do" ? modeChip("do", (mode) => (budget.hidden = mode === "do")) : modeChip("answer");
+  // The person picks 问答 or 动手, whatever was judged, where that AI can 动手.
+  const canDo = state.agents.get(t.to)?.client === "claude";
+  const chip = canDo ? modeChip(t.mode, (mode) => (budget.hidden = mode === "do")) : modeChip(t.mode);
   const rounds = h("input", { type: "number", min: "1", max: "20", value: String(t.scope.maxRounds), "aria-label": "最多轮数" });
   const scope = h("div", { class: "scope" }, `${agentName(t.to)} · `, chip, " · ", rounds, " 轮", budget);
   const decline = h("button", { type: "button", class: "btn", onclick: () => act(() => api("POST", `/api/threads/${t.id}/decline`, {})) }, "拒绝");
@@ -986,18 +988,17 @@ function topicOf(text) {
 }
 
 // A new conversation with one AI, started by the person on the web: nothing
-// above yet, the input box below. 动手 is offered where that AI can do it.
+// above yet, the input box below. The computer it is for judges whether it
+// is 问答 or 动手.
 function renderCompose(to) {
   const target = state.agents.get(to);
   const seat = mySeat();
   if (!target || !seat || target.canReceive === false) return showEmpty();
-  const chip = target.client === "claude" ? modeChip("answer", () => {}) : modeChip("answer");
   const { foot, box, take } = writeBox({
     label: `发给${target.name}`,
-    status: chip,
     send: async (text, files) => {
       const topic = topicOf(text) || files[0].name.slice(0, 20);
-      const t = await api("POST", "/api/threads", { from: seat, to, topic, message: text, mode: chip.dataset.mode, files });
+      const t = await api("POST", "/api/threads", { from: seat, to, topic, message: text, files });
       location.hash = `#/t/${t.id}`;
     },
   });

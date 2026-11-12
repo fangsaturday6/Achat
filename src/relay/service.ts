@@ -255,6 +255,7 @@ export class RelayService {
           mode,
           scope: this.config.defaults,
           quiet,
+          own: opts.autoApprove === true,
         },
         now,
       );
@@ -280,14 +281,14 @@ export class RelayService {
     return detail;
   }
 
-  // The person may turn a 动手 request into 问答, not the other way round.
-  // Approving a 动手 asked for mid-thread starts the rounds over.
+  // The person has the last word on 问答 or 动手, whatever was judged; only
+  // Claude can 动手. Approving a 动手 asked for mid-thread starts the rounds over.
   approve(id: string, scope?: Partial<Scope> & { mode?: ThreadMode }): ThreadDetail {
     const thread = this.requireThread(id);
     if (thread.status !== "pending") throw new RelayError(409, "这次协作已经处理过了");
     const finalScope = clampScope(scope, thread.scope);
     const mode = checkMode(scope?.mode) ?? thread.mode;
-    if (mode === "do" && thread.mode !== "do") throw new RelayError(400, "对方要的是问答，不能改成动手");
+    if (mode === "do" && thread.mode !== "do") this.requireDoer(thread.to);
     const now = this.stamp();
     const updated = this.store.transaction(() => {
       // A request inside the thread is a new allowance: rounds and money start over.
@@ -305,6 +306,42 @@ export class RelayService {
       return t;
     });
     this.emit("thread.updated", updated);
+    return this.getThread(id);
+  }
+
+  // The asked computer read the asker's words at `seq` and judged whether they
+  // ask to 动手. Each is judged once. 动手 turns a request waiting for approval
+  // into one to 动手; in a 问答 under way it is a request of its own, which the
+  // person approves, except between one person's own AIs.
+  judge(id: string, seq: number, mode: ThreadMode | undefined): ThreadDetail {
+    const thread = this.requireThread(id);
+    const judged = checkMode(mode);
+    if (!judged) throw new RelayError(400, '缺少 mode："answer"（问答）或 "do"（动手）');
+    if (!this.store.messages(id).some((m) => m.seq === seq && m.sender === thread.from && m.kind !== "system")) {
+      throw new RelayError(400, "seq 需要是发起方说的一句话");
+    }
+    if (seq <= thread.judged) return this.getThread(id);
+    const turns =
+      judged === "do" &&
+      thread.mode === "answer" &&
+      (thread.status === "pending" || thread.status === "active") &&
+      this.agents.get(thread.to)?.client === "claude";
+    const now = this.stamp();
+    const updated = this.store.transaction(() => {
+      if (!turns) return this.store.updateThread(id, { judged: seq }, now);
+      if (thread.status === "pending") return this.store.updateThread(id, { judged: seq, mode: "do" }, now);
+      if (thread.own) {
+        const t = this.store.updateThread(id, { judged: seq, mode: "do" }, now);
+        this.store.addMessage(id, { sender: null, kind: "system", body: `改成${this.scopeNote(t.scope, "do")}` }, now);
+        return t;
+      }
+      return this.store.updateThread(
+        id,
+        { judged: seq, status: "pending", mode: "do", prior: { status: thread.status, mode: thread.mode }, reminded: false },
+        now,
+      );
+    });
+    if (turns) this.emit("thread.updated", updated);
     return this.getThread(id);
   }
 

@@ -8,7 +8,8 @@ import { startCloud, type RunningCloud } from "../src/cloud/server.js";
 import { defaultConfig, type AchatConfig, type AgentClient } from "../src/config.js";
 import { ensureDeviceKey, FileKeyStore, type DeviceKey } from "../src/device.js";
 import { startRelay, type RunningRelay } from "../src/relay/server.js";
-import type { AgentRunner, RunInput, RunOutput } from "../src/sidecar/runners.js";
+import type { AgentRunner, JudgeInput, RunInput, RunOutput } from "../src/sidecar/runners.js";
+import type { ThreadMode } from "../src/types.js";
 
 export const CLAUDE = "claude@local";
 export const CODEX = "codex@local";
@@ -40,6 +41,24 @@ export class ScriptedRunner implements AgentRunner {
     if (next === undefined) throw new Error("没有准备好的回复");
     if (next instanceof Error) throw next;
     return { text: next, sessionId: input.sessionId ?? "session-1", costUsd: 0.05 };
+  }
+}
+
+// Also tells 问答 from 动手, in the order given; 问答 once they run out.
+export class JudgingRunner extends ScriptedRunner {
+  judged: JudgeInput[] = [];
+  constructor(
+    replies: (string | Error)[],
+    private judgments: (ThreadMode | Error)[] = [],
+  ) {
+    super(replies);
+  }
+
+  async judge(input: JudgeInput): Promise<ThreadMode> {
+    this.judged.push(input);
+    const next = this.judgments.shift() ?? "answer";
+    if (next instanceof Error) throw next;
+    return next;
   }
 }
 

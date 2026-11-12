@@ -233,6 +233,13 @@ export async function threadsApi(
       if (!viewer.actsAs(thread.to)) forbid("只有接收方可以申请接着聊");
       send(res, 200, service.askMore(id, str(body, "note")));
       return true;
+    case "judge": {
+      if (!viewer.actsAs(thread.to)) forbid("只有接收方可以判断问答还是动手");
+      const seq = optNum(body, "seq");
+      if (seq === undefined) throw new RelayError(400, "缺少 seq");
+      send(res, 200, service.judge(id, seq, modeOf(body)));
+      return true;
+    }
     case "messages": {
       const from = str(body, "from");
       // The person writes in a thread of their own AIs as themselves.

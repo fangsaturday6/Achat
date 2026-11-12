@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS threads (
   mode TEXT NOT NULL DEFAULT 'answer',
   prior_status TEXT,
   prior_mode TEXT,
+  judged INTEGER NOT NULL DEFAULT 0,
+  own INTEGER NOT NULL DEFAULT 0,
   max_rounds INTEGER NOT NULL,
   budget_usd REAL NOT NULL,
   rounds_used INTEGER NOT NULL DEFAULT 0,
@@ -73,6 +75,8 @@ interface ThreadRow {
   mode: string;
   prior_status: string | null;
   prior_mode: string | null;
+  judged: number;
+  own: number;
   max_rounds: number;
   budget_usd: number;
   rounds_used: number;
@@ -113,6 +117,8 @@ function toThread(row: ThreadRow): Thread {
     status: row.status as ThreadStatus,
     mode: asMode(row.mode),
     prior: row.prior_status ? { status: row.prior_status as ThreadStatus, mode: asMode(row.prior_mode) } : null,
+    judged: row.judged,
+    own: row.own === 1,
     scope: { maxRounds: row.max_rounds, budgetUsd: row.budget_usd },
     roundsUsed: row.rounds_used,
     costUsd: row.cost_usd,
@@ -150,6 +156,7 @@ export interface NewThread {
   mode: ThreadMode;
   scope: Scope;
   quiet: boolean;
+  own: boolean;
 }
 
 export interface NewMessage {
@@ -167,6 +174,7 @@ export interface ThreadPatch {
   status?: ThreadStatus;
   mode?: ThreadMode;
   prior?: { status: ThreadStatus; mode: ThreadMode } | null;
+  judged?: number;
   // Cleared whenever the thread becomes pending again.
   reminded?: boolean;
   scope?: Scope;
@@ -204,6 +212,8 @@ export class Store {
     add("threads", "prior_mode", "TEXT");
     add("threads", "reminded", "INTEGER NOT NULL DEFAULT 0");
     add("threads", "reply_mailed", "INTEGER NOT NULL DEFAULT 0");
+    add("threads", "judged", "INTEGER NOT NULL DEFAULT 0");
+    add("threads", "own", "INTEGER NOT NULL DEFAULT 0");
     add("messages", "by_person", "INTEGER NOT NULL DEFAULT 0");
     add("messages", "to_person", "INTEGER NOT NULL DEFAULT 0");
   }
@@ -215,10 +225,10 @@ export class Store {
   createThread(t: NewThread, now: string): Thread {
     this.db
       .prepare(
-        `INSERT INTO threads (id, topic, from_agent, to_agent, status, mode, max_rounds, budget_usd, quiet, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO threads (id, topic, from_agent, to_agent, status, mode, own, max_rounds, budget_usd, quiet, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(t.id, t.topic, t.from, t.to, t.mode, t.scope.maxRounds, t.scope.budgetUsd, t.quiet ? 1 : 0, now, now);
+      .run(t.id, t.topic, t.from, t.to, t.mode, t.own ? 1 : 0, t.scope.maxRounds, t.scope.budgetUsd, t.quiet ? 1 : 0, now, now);
     return this.getThread(t.id)!;
   }
 
@@ -273,6 +283,10 @@ export class Store {
     if (patch.prior !== undefined) {
       sets.push("prior_status = ?", "prior_mode = ?");
       params.push(patch.prior?.status ?? null, patch.prior?.mode ?? null);
+    }
+    if (patch.judged !== undefined) {
+      sets.push("judged = ?");
+      params.push(patch.judged);
     }
     if (patch.reminded !== undefined) {
       sets.push("reminded = ?");
