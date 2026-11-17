@@ -10,7 +10,7 @@ import { desktopAlert, desktopAsk, type Asker } from "./sidecar/dialog.js";
 import { historyFor } from "./sidecar/history.js";
 import { desktopNotify } from "./sidecar/notify.js";
 import { ClaudeRunner, CodexRunner, type AgentRunner } from "./sidecar/runners.js";
-import { ClaudeTaskOpener, type TaskOpener } from "./sidecar/tasks.js";
+import { ClaudeTaskOpener, CodexTaskOpener, type TaskOpener } from "./sidecar/tasks.js";
 import { Sidecar } from "./sidecar/sidecar.js";
 import { appDir, isInstalledCopy, setupWith, stageUpdate, switchTo, type Staged } from "./update.js";
 
@@ -102,9 +102,9 @@ function prepareHistory(cfg: AchatConfig): void {
   }
 }
 
-// Only Claude Code opens a conversation of its own to 动手, so far.
+// Claude Code and Codex each open a conversation of their own to 动手.
 function doersFor(cfg: AchatConfig, idOf: (a: AchatConfig["agents"][number]) => string): Record<string, TaskOpener> {
-  return Object.fromEntries(cfg.agents.filter((a) => a.client === "claude").map((a) => [idOf(a), new ClaudeTaskOpener()]));
+  return Object.fromEntries(cfg.agents.map((a) => [idOf(a), a.client === "claude" ? new ClaudeTaskOpener() : new CodexTaskOpener()]));
 }
 
 // Binds the local port, waiting for it while another copy holds it if asked.

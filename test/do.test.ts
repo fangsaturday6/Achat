@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync as readdir, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, describe, test } from "node:test";
@@ -10,8 +10,9 @@ import type { AchatConfig } from "../src/config.js";
 import { createMcpServer } from "../src/mcp/server.js";
 import type { RunningRelay } from "../src/relay/server.js";
 import type { Answer, ApprovalPrompt } from "../src/sidecar/dialog.js";
-import { Sidecar } from "../src/sidecar/sidecar.js";
-import { backgroundId, claudeTaskArgs, TaskBook, taskDir, type TaskOpener, type TaskRecord, type TaskStart } from "../src/sidecar/tasks.js";
+import { doerSystemPrompt, Sidecar } from "../src/sidecar/sidecar.js";
+import { backgroundId, claudeTaskArgs, codexSessionId, codexTaskArgs, CodexTaskOpener, TaskBook, taskDir, type TaskOpener, type TaskRecord, type TaskStart } from "../src/sidecar/tasks.js";
+import { codexCommand } from "../src/which.js";
 import { CLAUDE, CODEX, JudgingRunner, ScriptedRunner, startTestRelay, until } from "./helpers.js";
 
 // Achat's MCP server marks what the 动手 conversation was handed in ACHAT_HOME.
@@ -50,8 +51,9 @@ describe("动手 on the relay", () => {
   });
   after(() => relay.close());
 
-  test("only Claude can 动手, and the person picks 问答 or 动手 when approving", async () => {
-    await rejects(client.createRequest({ from: CLAUDE, to: CODEX, topic: "写脚本", message: "写一个", mode: "do" }), /还不能动手/);
+  test("Claude and Codex can 动手, and the person picks 问答 or 动手 when approving", async () => {
+    const toCodexDo = await client.createRequest({ from: CLAUDE, to: CODEX, topic: "画图", message: "画一张", mode: "do" });
+    assert.equal(toCodexDo.mode, "do");
 
     const doing = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "写脚本", message: "写一个", mode: "do" });
     assert.equal(doing.mode, "do");
@@ -69,7 +71,7 @@ describe("动手 on the relay", () => {
     assert.equal(asDo.messages.at(-1)!.body, "已同意：动手 · 5 轮");
 
     const toCodex = await client.createRequest({ from: CLAUDE, to: CODEX, topic: "问 Codex", message: "怎么做的？" });
-    await rejects(client.approve(toCodex.id, { mode: "do" }), /还不能动手/);
+    assert.equal((await client.approve(toCodex.id, { mode: "do" })).mode, "do");
   });
 
   test("a 问答 can ask to 动手 mid-thread; declining keeps the 问答 going, approving starts the rounds over", async () => {
@@ -243,4 +245,68 @@ test("what a conversation was handed only moves forward", () => {
   book.markSeen("t", 5);
   book.markSeen("t", 3);
   assert.equal(book.seen("t"), 5);
+});
+
+test("Codex works in its folder with nobody to approve commands: online only between one person's own AIs, and a later run resumes", () => {
+  const first = codexTaskArgs({ threadId: "t1", topic: "画图", prompt: "画", systemPrompt: "规则" });
+  assert.deepEqual(first.slice(0, 2), ["exec", "--skip-git-repo-check"]);
+  assert.ok(first.includes('sandbox_mode="workspace-write"'));
+  assert.ok(first.includes("sandbox_workspace_write.network_access=false"));
+  assert.ok(first.includes(`developer_instructions=${JSON.stringify("规则")}`));
+  assert.equal(first.at(-1), "-", "the prompt comes on stdin");
+  const own = codexTaskArgs({ threadId: "t1", topic: "画图", prompt: "画", systemPrompt: "规则", own: true });
+  assert.ok(own.includes("sandbox_workspace_write.network_access=true"));
+  const later = codexTaskArgs({ threadId: "t1", topic: "画图", prompt: "接着画", systemPrompt: "规则", from: { sessionId: "0199-abc", dir: "/x" } });
+  assert.deepEqual(later.slice(0, 2), ["exec", "resume"]);
+  assert.deepEqual(later.slice(-2), ["0199-abc", "-"]);
+  assert.equal(codexSessionId("OpenAI Codex v0.169\n--------\nworkdir: /x\nsession id: 01a1e4e6-9149-7ef2-a71d-01b8e8de82bc\n--------"), "01a1e4e6-9149-7ef2-a71d-01b8e8de82bc");
+  assert.equal(codexSessionId("ERROR: not logged in"), null);
+});
+
+test("Codex is told it cannot have commands approved, and Claude that it can ask", () => {
+  const from = { id: "x", name: "老王的 Claude", client: "claude" as const };
+  assert.match(doerSystemPrompt({ id: CODEX, name: "我的 Codex", client: "codex" }, from, "t1"), /没有人能替你确认命令/);
+  assert.match(doerSystemPrompt({ id: CLAUDE, name: "我的 Claude", client: "claude" }, from, "t1"), /照常让主人确认/);
+});
+
+test("the codex that runs is the one set, else a desktop app's, else the one on the PATH", () => {
+  const dir = mkdtempSync(join(tmpdir(), "achat-codex-"));
+  const bundled = join(dir, "codex");
+  writeFileSync(bundled, "");
+  assert.equal(codexCommand({ ACHAT_CODEX_BIN: "/opt/codex" }, [bundled]), "/opt/codex");
+  assert.equal(codexCommand({}, [join(dir, "missing"), bundled]), bundled);
+  assert.equal(codexCommand({}, [join(dir, "missing")]), "codex");
+});
+
+describe("a Codex conversation for 动手", () => {
+  // A stand-in for `codex exec`: prints the header with a session id, what it
+  // was asked on stdin, then works or fails as told.
+  function fakeCodex(after: string): string {
+    const dir = mkdtempSync(join(tmpdir(), "achat-fake-codex-"));
+    const bin = join(dir, "codex");
+    writeFileSync(bin, ["#!/bin/bash", 'echo "args: $*"', "echo 'session id: 0199aaaa-bbbb-cccc'", "echo user", "cat", "echo", after, ""].join("\n"));
+    chmodSync(bin, 0o755);
+    return bin;
+  }
+
+  test("starts in a folder of its own and resolves with the session once it is under way", async () => {
+    const scripts = mkdtempSync(join(tmpdir(), "achat-scripts-"));
+    const root = mkdtempSync(join(tmpdir(), "achat-root-"));
+    const opener = new CodexTaskOpener(fakeCodex("echo codex; echo 在画了"), scripts, root, false, 10_000);
+    const rec = await opener.open({ threadId: "t9", topic: "画小刘", prompt: "照设定图做 3D", systemPrompt: "规则" });
+    assert.equal(rec.sessionId, "0199aaaa-bbbb-cccc");
+    assert.equal(rec.dir, join(root, "画小刘"));
+    await until(async () => {
+      const logs = readdir(scripts).filter((f) => f.endsWith(".log"));
+      return logs.length === 1 && /在画了/.test(readFileSync(join(scripts, logs[0]), "utf8"));
+    });
+    const log = readFileSync(join(scripts, readdir(scripts).find((f) => f.endsWith(".log"))!), "utf8");
+    assert.match(log, /照设定图做 3D/, "the prompt went in on stdin");
+    assert.match(log, /args: exec /);
+  });
+
+  test("a run that fails at the start says why instead of waiting", async () => {
+    const opener = new CodexTaskOpener(fakeCodex("echo 'ERROR: model is not supported'; exit 1"), mkdtempSync(join(tmpdir(), "achat-scripts-")), mkdtempSync(join(tmpdir(), "achat-root-")), false, 10_000);
+    await assert.rejects(opener.open({ threadId: "t10", topic: "画", prompt: "画", systemPrompt: "规则" }), /打不开动手的对话：model is not supported/);
+  });
 });

@@ -1,12 +1,13 @@
-import { execFile, execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { achatHome } from "../config.js";
-import { onPath } from "../which.js";
+import { codexCommand, onPath } from "../which.js";
 
-// 动手: the receiving person's Claude Code does the work in a conversation of
-// its own, which the person can watch and step into. These records say which
+// 动手: the receiving person's Claude Code or Codex does the work in a
+// conversation of its own, which the person can watch and step into. These records say which
 // conversation works on a thread and in which folder (written by the
 // sidecar), and how far that conversation has been handed the thread
 // (written by Achat's MCP server inside it, when it passes on what the asker
@@ -74,9 +75,11 @@ export interface TaskStart {
   // Folders outside its own it may read without asking, such as where the
   // thread's files are kept.
   readDirs?: string[];
+  // Between one person's own AIs: Codex's commands may then go online.
+  own?: boolean;
 }
 
-// Opens a Claude Code conversation for a task; resolves once it is started.
+// Opens a Claude Code or Codex conversation for a task; resolves once it is started.
 export interface TaskOpener {
   open(start: TaskStart): Promise<TaskRecord>;
 }
@@ -144,19 +147,119 @@ export class ClaudeTaskOpener implements TaskOpener {
     const id = backgroundId(output);
     if (!id) throw new Error(`打不开动手的对话：${output.trim().split("\n").at(-1) || "claude --bg 没有给出会话"}`);
     const sessionId = await fullSessionId(claude, id, dir);
+    await showWindow(this.scripts, `${safe(start.threadId)}-${id}`, dir, [`exec ${[claude, "attach", id].map(shellQuote).join(" ")}`]);
+    return { sessionId, dir };
+  }
+}
 
-    const os = platform();
-    const desktop = os === "darwin" || (os === "linux" && Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY) && onPath("x-terminal-emulator"));
-    if (desktop) {
-      mkdirSync(this.scripts, { recursive: true, mode: 0o700 });
-      const script = join(this.scripts, `${start.threadId.replace(/[^\w-]/g, "_")}-${id}.command`);
-      writeFileSync(script, ["#!/bin/bash", `cd ${shellQuote(dir)} || exit 1`, `exec ${[claude, "attach", id].map(shellQuote).join(" ")}`, ""].join("\n"));
-      chmodSync(script, 0o700);
-      // The work goes on in the background even if no window opens.
-      await (os === "darwin" ? capture("open", [script], dir) : capture("x-terminal-emulator", ["-e", script], dir, false)).catch(() => "");
+// The arguments for `codex exec`, which reads the prompt from stdin. It runs
+// with the person's own Codex settings: their model, image generation, and
+// Achat, which it hands the work back with. Nobody is there to approve a
+// command, so it writes only inside its folder, and its commands go online
+// only between one person's own AIs. A later conversation resumes the earlier one.
+export function codexTaskArgs(start: TaskStart): string[] {
+  const common = [
+    "--skip-git-repo-check",
+    "-c",
+    'sandbox_mode="workspace-write"',
+    "-c",
+    `sandbox_workspace_write.network_access=${start.own === true}`,
+  ];
+  return start.from
+    ? ["exec", "resume", ...common, start.from.sessionId, "-"]
+    : ["exec", ...common, "-c", `developer_instructions=${JSON.stringify(start.systemPrompt)}`, "-"];
+}
+
+// "session id: 01a1e4e6-9149-…" in the header `codex exec` prints first.
+export function codexSessionId(output: string): string | null {
+  return output.match(/^session id:\s*([0-9a-f][0-9a-f-]{7,})\s*$/im)?.[1] ?? null;
+}
+
+// What `codex exec` prints once it is under way, and when it gave up.
+const CODEX_WORKING = /^(codex|exec|thinking|tool|mcp:.*ready)\b/m;
+const CODEX_FAILED = /^ERROR:\s*(.+)$/m;
+
+// Runs `codex exec` in the background with its output in a log next to the
+// task records, and shows the log in a terminal window. Closing the window
+// does not stop the work; `codex resume` in the folder steps into it.
+export class CodexTaskOpener implements TaskOpener {
+  constructor(
+    private command = codexCommand(),
+    private scripts = join(achatHome(), "tasks"),
+    private root = join(homedir(), "Achat"),
+    // False in tests: no terminal window.
+    private window = true,
+    // How long it may take to get under way.
+    private startMs = 90_000,
+  ) {}
+
+  async open(start: TaskStart): Promise<TaskRecord> {
+    const dir = start.from?.dir ?? taskDir(start.topic, start.threadId, this.root);
+    mkdirSync(dir, { recursive: true });
+    mkdirSync(this.scripts, { recursive: true, mode: 0o700 });
+    const name = `${safe(start.threadId)}-codex-${Date.now()}`;
+    const log = join(this.scripts, `${name}.log`);
+    const out = openSync(log, "a", 0o600);
+    const codex = commandPath(this.command);
+    const child = spawn(codex, codexTaskArgs(start), { cwd: dir, detached: true, stdio: ["pipe", out, out], env: { ...process.env, ACHAT_HEADLESS: undefined } });
+    closeSync(out);
+    let problem = "";
+    let ended = false;
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      problem = err.code === "ENOENT" ? `这台电脑上找不到 ${this.command} 命令` : err.message;
+    });
+    child.on("exit", (code) => {
+      ended = true;
+      if (code) problem ||= `codex 退出了（${code}）`;
+    });
+    child.stdin?.on("error", () => {});
+    child.stdin?.end(start.prompt);
+    child.unref();
+
+    // Under way once it starts working; a run that ends first, or says ERROR, did not start.
+    const until = Date.now() + this.startMs;
+    let sessionId: string | null = null;
+    for (;;) {
+      const output = readText(log);
+      sessionId ??= codexSessionId(output);
+      const failed = output.match(CODEX_FAILED)?.[1];
+      if (failed || problem) throw new Error(`打不开动手的对话：${failed?.trim() || problem}`);
+      if (sessionId && (CODEX_WORKING.test(output.slice(output.indexOf(sessionId))) || ended || Date.now() > until)) break;
+      if (Date.now() > until) throw new Error("打不开动手的对话：codex 没有开始");
+      await sleep(300);
+    }
+    if (this.window) {
+      const hint = `关掉窗口不影响干活。要插话：在这个文件夹里运行 codex resume ${sessionId}`;
+      await showWindow(this.scripts, name, dir, [`echo ${shellQuote(hint)}`, `exec tail -n +1 -f ${shellQuote(log)}`]);
     }
     return { sessionId, dir };
   }
+}
+
+function safe(threadId: string): string {
+  return threadId.replace(/[^\w-]/g, "_");
+}
+
+function readText(path: string): string {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+// Shows the work in a terminal window on the person's screen: on macOS
+// Terminal runs a .command file, on Linux desktops x-terminal-emulator.
+// Without a screen nothing opens, and the work goes on in the background.
+async function showWindow(scripts: string, name: string, dir: string, lines: string[]): Promise<void> {
+  const os = platform();
+  const desktop = os === "darwin" || (os === "linux" && Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY) && onPath("x-terminal-emulator"));
+  if (!desktop) return;
+  mkdirSync(scripts, { recursive: true, mode: 0o700 });
+  const script = join(scripts, `${name}.command`);
+  writeFileSync(script, ["#!/bin/bash", `cd ${shellQuote(dir)} || exit 1`, ...lines, ""].join("\n"));
+  chmodSync(script, 0o700);
+  await (os === "darwin" ? capture("open", [script], dir) : capture("x-terminal-emulator", ["-e", script], dir, false)).catch(() => "");
 }
 
 // The whole id, which a later conversation resumes from; the short one if

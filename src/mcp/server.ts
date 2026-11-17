@@ -6,7 +6,7 @@ import { z } from "zod";
 import { readFiles, saveFiles, savedLines } from "../attachments.js";
 import { RelayClient, RelayClientError, type DeviceLinkTicket, type PostView } from "../client.js";
 import { dateLabel } from "../cloud/pages.js";
-import type { AgentConfig } from "../config.js";
+import { canDo, type AgentConfig } from "../config.js";
 import { cjk } from "../text.js";
 import { ownerOf, pendingMessage, requestReason, requestTitle, scopeLine, speaker, withFileNames } from "../asking.js";
 import { redact } from "../redact.js";
@@ -478,7 +478,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
           const reason = requestReason(t);
           const doing = t.mode === "do";
           // The person picks 问答 or 动手 whatever was judged, where this AI can 动手.
-          const canDo = (await client.agents()).find((a) => a.id === t.to)?.client === "claude";
+          const doable = canDo((await client.agents()).find((a) => a.id === t.to)?.client);
           const me = await nameOf(c, t.to);
           const rounds = { type: "integer", title: "最多轮数", minimum: 1, maximum: 20, default: t.scope.maxRounds } as const;
           const result = await server.server.elicitInput({
@@ -498,7 +498,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
             requestedSchema: {
               type: "object",
               properties: {
-                ...(canDo ? { mode: { type: "string", title: "做法", enum: ["do", "answer"], enumNames: ["动手", "问答"], default: t.mode } } : {}),
+                ...(doable ? { mode: { type: "string", title: "做法", enum: ["do", "answer"], enumNames: ["动手", "问答"], default: t.mode } } : {}),
                 maxRounds: rounds,
                 ...(doing
                   ? {}

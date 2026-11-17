@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { secretStore } from "../device.js";
 import type { ThreadMode } from "../types.js";
+import { codexCommand } from "../which.js";
 import { historyFor } from "./history.js";
 
 export interface RunInput {
@@ -239,7 +240,7 @@ type CodexEvent =
 // only the round limit applies.
 export class CodexRunner implements AgentRunner {
   constructor(
-    private command = process.env.ACHAT_CODEX_BIN ?? "codex",
+    private command = codexCommand(),
     private timeoutMs = 10 * 60 * 1000,
   ) {}
 

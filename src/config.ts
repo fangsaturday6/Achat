@@ -12,6 +12,12 @@ export type RemoteClient = "doubao" | "workbuddy" | "other";
 // such seat; it starts conversations and speaks in them, and never answers.
 export type AiClient = AgentClient | RemoteClient | "person";
 
+// AIs that can 动手: open a conversation of their own on their person's
+// computer to do the work. web/app.js keeps the same list.
+export function canDo(client: AiClient | undefined): boolean {
+  return client === "claude" || client === "codex";
+}
+
 export interface AgentConfig {
   id: string;
   name: string;

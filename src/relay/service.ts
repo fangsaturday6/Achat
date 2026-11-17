@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { cleanName, filesProblem, typeOf, type NewFile } from "../attachments.js";
-import type { AchatConfig, AgentConfig } from "../config.js";
+import { canDo, type AchatConfig, type AgentConfig } from "../config.js";
 import {
   isTerminal,
   latestAnswer,
@@ -149,10 +149,10 @@ export class RelayService {
     return agent;
   }
 
-  // Only Claude Code opens a conversation of its own to do the work, so far.
+  // Claude Code and Codex open a conversation of their own to do the work.
   private requireDoer(id: string): void {
     const agent = this.requireAgent(id);
-    if (agent.client !== "claude") throw new RelayError(400, `${agent.name}还不能动手，只能问答`);
+    if (!canDo(agent.client)) throw new RelayError(400, `${agent.name}还不能动手，只能问答`);
   }
 
   // The rounds, or for 问答 the money, the person allowed are used up.
@@ -325,7 +325,7 @@ export class RelayService {
       judged === "do" &&
       thread.mode === "answer" &&
       (thread.status === "pending" || thread.status === "active") &&
-      this.agents.get(thread.to)?.client === "claude";
+      canDo(this.agents.get(thread.to)?.client);
     const now = this.stamp();
     const updated = this.store.transaction(() => {
       if (!turns) return this.store.updateThread(id, { judged: seq }, now);

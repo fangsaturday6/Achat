@@ -87,11 +87,11 @@ describe("问答 or 动手, judged by the asked computer: the relay", () => {
     assert.equal(judged.messages.at(-1)!.body, "改成动手 · 5 轮");
   });
 
-  test("only what the asker said is judged, and only Claude is judged into 动手", async () => {
+  test("only what the asker said is judged, and Codex can be judged into 动手 too", async () => {
     const t = await client.createRequest({ from: CLAUDE, to: CODEX, topic: "问 Codex", message: "帮我跑一下测试" });
     await rejects(client.judge(t.id, 99, "do"), /seq/);
     const judged = await client.judge(t.id, t.messages[0].seq, "do");
-    assert.equal(judged.mode, "answer");
+    assert.equal(judged.mode, "do");
     assert.equal(judged.judged, t.messages[0].seq);
   });
 });

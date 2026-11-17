@@ -47,6 +47,8 @@ const MAX_FILES_BYTES = 20 * 1024 * 1024;
 const SHOWN_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
 const MODE = { answer: "问答", do: "动手" };
+// AIs that can 动手, the same list as canDo in src/config.ts.
+const DOERS = new Set(["claude", "codex"]);
 
 const state = {
   me: null,
@@ -713,7 +715,7 @@ function requestCard(t, m, waiting) {
     h("input", { type: "number", min: "0.1", max: "50", step: "0.1", value: t.scope.budgetUsd.toFixed(2), "aria-label": "花费上限（美元）" }),
   );
   // The person picks 问答 or 动手, whatever was judged, where that AI can 动手.
-  const canDo = state.agents.get(t.to)?.client === "claude";
+  const canDo = DOERS.has(state.agents.get(t.to)?.client);
   const chip = canDo ? modeChip(t.mode, (mode) => (budget.hidden = mode === "do")) : modeChip(t.mode);
   const rounds = h("input", { type: "number", min: "1", max: "20", value: String(t.scope.maxRounds), "aria-label": "最多轮数" });
   const scope = h("div", { class: "scope" }, `${agentName(t.to)} · `, chip, " · ", rounds, " 轮", budget);
