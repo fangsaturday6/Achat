@@ -240,6 +240,30 @@ test("runs codex in the read-only sandbox without the person's config, on a plai
   delete process.env.ACHAT_CODEX_SESSIONS;
 });
 
+test("codex judges 问答 or 动手 from the asker's words alone, without keeping a session", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "achat-runner-"));
+  const bin = fakeCodex(dir, [
+    { type: "thread.started", thread_id: "judge-1" },
+    { type: "item.completed", item: { id: "item_0", type: "agent_message", text: "do" } },
+    { type: "turn.completed" },
+  ]);
+  const mode = await new CodexRunner(bin).judge({ topic: "画转面图", message: "画三张图交回", files: ["concept.png"] });
+  assert.equal(mode, "do");
+  const call = JSON.parse(readFileSync(join(dir, "call.json"), "utf8"));
+  assert.match(call.input, /画三张图交回/);
+  assert.match(call.input, /concept\.png/);
+  const args: string[] = call.args;
+  for (const a of ["--ignore-user-config", "--ephemeral", 'sandbox_mode="read-only"']) assert.ok(args.includes(a), a);
+  assert.ok(args.some((a) => a.startsWith("developer_instructions=") && a.includes("do")), "the judging rules go in as instructions");
+
+  const answering = fakeCodex(dir, [
+    { type: "thread.started", thread_id: "judge-2" },
+    { type: "item.completed", item: { id: "item_0", type: "agent_message", text: "answer" } },
+    { type: "turn.completed" },
+  ]);
+  assert.equal(await new CodexRunner(answering).judge({ topic: "做法", message: "怎么画的？", files: [] }), "answer");
+});
+
 test("a codex that is not logged in is told apart from other errors", async () => {
   const dir = mkdtempSync(join(tmpdir(), "achat-runner-"));
   process.env.ACHAT_CODEX_SESSIONS = dir;

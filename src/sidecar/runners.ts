@@ -248,28 +248,25 @@ export class CodexRunner implements AgentRunner {
     const history = historyFor("codex");
     await history.refresh();
     const dir = input.only ? history.about(input.only) : history.dir;
-    const common = [
-      "--json",
-      "--ignore-user-config",
-      "--skip-git-repo-check",
-      "-c",
-      'sandbox_mode="read-only"',
-      "-c",
-      'web_search="disabled"',
-      "-c",
-      "features.multi_agent=false",
-    ];
     const args = input.sessionId
-      ? ["exec", "resume", ...common, input.sessionId, "-"]
-      : ["exec", ...common, "-c", `developer_instructions=${JSON.stringify(input.systemPrompt)}`, "-"];
-    const { stdout, stderr, code } = await runProcess(this.command, args, {
-      cwd: dir,
-      input: input.prompt,
-      timeoutMs: this.timeoutMs,
-      name: "codex",
-    });
+      ? ["exec", "resume", ...CODEX_QUIET, input.sessionId, "-"]
+      : ["exec", ...CODEX_QUIET, "-c", `developer_instructions=${JSON.stringify(input.systemPrompt)}`, "-"];
+    const { text, sessionId } = await this.codex(args, dir, input.prompt, this.timeoutMs, input.sessionId);
+    return { text, sessionId, costUsd: 0 };
+  }
 
-    let sessionId = input.sessionId;
+  // Codex can 动手 too, so its computer judges what it is asked, the same way
+  // Claude does: the asker's words only, no history, read-only, one word back.
+  async judge(input: JudgeInput): Promise<ThreadMode> {
+    const files = input.files.length ? `\n附件：${input.files.join("、")}` : "";
+    const asked = `话题：${input.topic}\n<message>\n${input.message}\n</message>${files}`;
+    const args = ["exec", ...CODEX_QUIET, "--ephemeral", "-c", `developer_instructions=${JSON.stringify(JUDGE_PROMPT)}`, "-"];
+    const { text } = await this.codex(args, tmpdir(), asked, JUDGE_TIMEOUT_MS);
+    return /^\W*do\b/i.test(text) ? "do" : "answer";
+  }
+
+  private async codex(args: string[], cwd: string, input: string, timeoutMs: number, sessionId?: string): Promise<{ text: string; sessionId: string }> {
+    const { stdout, stderr, code } = await runProcess(this.command, args, { cwd, input, timeoutMs, name: "codex" });
     let text = "";
     let completed = false;
     let failure = "";
@@ -293,6 +290,21 @@ export class CodexRunner implements AgentRunner {
       }
       throw new Error(reason);
     }
-    return { text, sessionId, costUsd: 0 };
+    return { text, sessionId };
   }
 }
+
+// `codex exec` without the person's config.toml (no MCP servers, Achat
+// included, no hooks or profiles), in the read-only sandbox, with web search
+// and sub-agents off.
+const CODEX_QUIET = [
+  "--json",
+  "--ignore-user-config",
+  "--skip-git-repo-check",
+  "-c",
+  'sandbox_mode="read-only"',
+  "-c",
+  'web_search="disabled"',
+  "-c",
+  "features.multi_agent=false",
+];
