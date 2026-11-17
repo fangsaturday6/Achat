@@ -124,6 +124,19 @@ describe("updating people's computers", () => {
   });
 });
 
+test("a runner that judges still judges once wrapped, and judging counts as busy", async () => {
+  let now = 0;
+  const activity = new Activity(() => now);
+  assert.equal(activity.runner({ run: async () => ({ text: "", sessionId: "", costUsd: 0 }) }).judge, undefined, "nothing to judge with stays without");
+  let decide!: (m: "do" | "answer") => void;
+  const wrapped = activity.runner({ run: async () => ({ text: "", sessionId: "", costUsd: 0 }), judge: () => new Promise((r) => (decide = r)) });
+  const judging = wrapped.judge!({ topic: "画图", message: "画三张", files: [] });
+  now = 60_000;
+  assert.equal(activity.quietFor(30_000), false);
+  decide("do");
+  assert.equal(await judging, "do");
+});
+
 test("an update waits until nothing is being answered or asked", async () => {
   let now = 0;
   const activity = new Activity(() => now);

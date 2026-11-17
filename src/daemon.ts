@@ -46,17 +46,20 @@ export class Activity {
     return this.active === 0 && this.now() - this.last >= ms;
   }
 
+  // Counts what the runner is doing, judging included: a runner that can
+  // judge must still judge once wrapped, or every request stays 问答.
   runner(runner: AgentRunner): AgentRunner {
-    return {
-      run: async (input) => {
-        this.begin();
-        try {
-          return await runner.run(input);
-        } finally {
-          this.end();
-        }
-      },
+    const busy = async <T>(work: () => Promise<T>): Promise<T> => {
+      this.begin();
+      try {
+        return await work();
+      } finally {
+        this.end();
+      }
     };
+    const wrapped: AgentRunner = { run: (input) => busy(() => runner.run(input)) };
+    if (runner.judge) wrapped.judge = (input) => busy(() => runner.judge!(input));
+    return wrapped;
   }
 
   asker(ask: Asker): Asker {
