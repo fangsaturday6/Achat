@@ -208,3 +208,76 @@ test("the asked AI adds ten rounds with add_rounds when its person says so", asy
     await relay.close();
   }
 });
+
+// A sidecar whose dialog counts how often it was closed from outside.
+async function withLastRoundDialog(body: (ctx: { client: RelayClient; runner: HeldRunner; closes: () => number; asked: () => number; threadId: string }) => Promise<void>) {
+  const { relay, client, config } = await startTestRelay();
+  let asked = 0;
+  let closes = 0;
+  const runner = new HeldRunner(["先写分镜", "用 Midjourney 出的"]);
+  const sidecar = new Sidecar({
+    client,
+    agents: config.agents,
+    runners: { [CLAUDE]: runner },
+    choose: () => {
+      asked++;
+      let resolve!: (c: Choice) => void;
+      const answer = new Promise<Choice>((r) => (resolve = r));
+      return {
+        answer,
+        close: () => {
+          closes++;
+          resolve("stop");
+        },
+      };
+    },
+    notify: () => {},
+    webUrl: relay.url,
+    log: () => {},
+  });
+  sidecar.start();
+  try {
+    const t = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "视频制作流程", message: "第一步怎么做？" });
+    await client.approve(t.id, { maxRounds: 2, budgetUsd: 1 });
+    await until(async () => (await client.getThread(t.id)).roundsUsed === 1);
+    await client.postMessage(t.id, { from: CODEX, body: "封面图怎么出的？" });
+    await until(async () => asked === 1);
+    await body({ client, runner, closes: () => closes, asked: () => asked, threadId: t.id });
+  } finally {
+    sidecar.stop();
+    await relay.close();
+  }
+}
+
+test("the last-round dialog goes away once the rounds were added elsewhere, and 加 10 轮 is not added twice", async () => {
+  await withLastRoundDialog(async ({ client, runner, closes, threadId }) => {
+    await client.addRounds(threadId);
+    await until(async () => closes() === 1);
+    runner.letGo();
+    const done = await until(async () => {
+      const d = await client.getThread(threadId);
+      return d.roundsUsed === 2 ? d : null;
+    });
+    assert.equal(done.scope.maxRounds, 12);
+    assert.equal(done.status, "active");
+  });
+});
+
+test("the last-round dialog goes away once the thread was stopped", async () => {
+  await withLastRoundDialog(async ({ client, closes, threadId }) => {
+    await client.stop(threadId);
+    await until(async () => closes() === 1);
+  });
+});
+
+test("the last-round dialog stays when the last answer uses the rounds up, so 加 10 轮 can still be chosen", async () => {
+  await withLastRoundDialog(async ({ client, runner, closes, threadId }) => {
+    runner.letGo();
+    await until(async () => {
+      const d = await client.getThread(threadId);
+      return d.roundsUsed === 2 && d.status === "closed" ? d : null;
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(closes(), 0);
+  });
+});

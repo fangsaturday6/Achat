@@ -8,7 +8,7 @@ import { redact } from "../redact.js";
 import { cjk } from "../text.js";
 import { MIN_ROUND_BUDGET_USD } from "../relay/service.js";
 import { MODE_LABELS, MORE_SCOPE, waitingForAsker, type Message, type RelayEvent, type ThreadDetail, type ThreadMode } from "../types.js";
-import type { Alerter, Asker, Asking, Chooser } from "./dialog.js";
+import type { Alerter, Asker, Asking, Chooser, Choosing } from "./dialog.js";
 import type { Notifier } from "./notify.js";
 import { BudgetExceededError, LoginExpiredError, SessionLostError, type AgentRunner, type RunOutput } from "./runners.js";
 import { TaskBook, type TaskOpener, type TaskRecord } from "./tasks.js";
@@ -256,6 +256,7 @@ export class Sidecar {
   private shown = new Map<string, number>();
   // Last rounds already put to the person, by thread and question.
   private offered = new Set<string>();
+  private choosing = new Map<string, Choosing>();
   // The asker's words being judged 问答 or 动手, once each.
   private judging = new Map<string, Promise<ThreadDetail>>();
   // Threads waiting for a login on this computer, since when, and the
@@ -390,6 +391,10 @@ export class Sidecar {
       void this.offerMore(e.threadId, e.seq ?? 0);
       return;
     }
+    // Rounds added on the web or in Claude, or the thread stopped: the last-round
+    // dialog is no longer needed. Running out of rounds keeps it, the person can
+    // still add more then.
+    if (e.type === "thread.updated" && this.choosing.has(e.threadId)) void this.closeMoreIfDone(e.threadId);
     // A request, or one inside a thread shown before: to 动手, or to go on
     // once it ended or ran out. It is judged before it is shown; a quiet one
     // is only judged, for the web page.
@@ -541,9 +546,22 @@ export class Sidecar {
         this.opts.notify(title, t.topic, `${this.opts.webUrl}/#/t/${threadId}`);
         return;
       }
-      if ((await choosing.answer) === "more") await this.relay.addRounds(threadId);
+      this.choosing.set(threadId, choosing);
+      const answer = await choosing.answer;
+      this.choosing.delete(threadId);
+      if (answer === "more") await this.relay.addRounds(threadId);
     } catch (err) {
       if (!this.stopping.signal.aborted) this.log(`${threadId} 的加轮弹框：${(err as Error).message}`);
+    }
+  }
+
+  private async closeMoreIfDone(threadId: string): Promise<void> {
+    try {
+      const t = await this.relay.getThread(threadId);
+      const over = t.status === "stopped" || t.status === "declined" || t.status === "expired";
+      if (over || t.scope.maxRounds - t.roundsUsed > 1) this.choosing.get(threadId)?.close();
+    } catch (err) {
+      this.log(`${threadId} 的加轮弹框：${(err as Error).message}`);
     }
   }
 
