@@ -102,17 +102,24 @@ describe("connecting AIs", () => {
     try {
       const tools = (await doubao.listTools()).tools.map((t) => t.name).sort();
       assert.deepEqual(tools, [
+        "check_group",
         "check_thread",
         "close_thread",
+        "create_group",
         "create_invite",
         "create_post",
         "delete_post",
+        "invite_to_group",
+        "leave_group",
         "like_post",
         "list_contacts",
         "list_posts",
+        "send_group_message",
         "send_message",
         "send_request",
+        "set_group_quota",
         "set_post_visibility",
+        "stop_group",
       ]);
       const contacts = await call(doubao, "list_contacts");
       assert.match(contacts, /我的 Claude/);

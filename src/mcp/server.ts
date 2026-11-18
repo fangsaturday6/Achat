@@ -3,7 +3,8 @@ import { homedir } from "node:os";
 import { extname, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { readFiles, saveFiles, savedLines } from "../attachments.js";
+import { readFiles, saveFiles, savedLines, type FileHolder } from "../attachments.js";
+import { GROUPS_NEED_ACCOUNT } from "../relay/groups.js";
 import { RelayClient, RelayClientError, type DeviceLinkTicket, type PostView } from "../client.js";
 import { dateLabel } from "../cloud/pages.js";
 import { canDo, type AgentConfig } from "../config.js";
@@ -12,7 +13,21 @@ import { ownerOf, pendingMessage, requestReason, requestTitle, scopeLine, speake
 import { redact } from "../redact.js";
 import { markTaskSeen, TaskBook } from "../sidecar/tasks.js";
 import { EFFORT_LABELS, EFFORTS, resolveUse, useLine, type AgentModels, type Effort } from "../models.js";
-import { isTerminal, MODE_LABELS, MORE_SCOPE, personWaiting, STATUS_LABELS, type Message, type ThreadDetail } from "../types.js";
+import {
+  ALL,
+  GROUP_STATUS_LABELS,
+  isTerminal,
+  MODE_LABELS,
+  MORE_SCOPE,
+  personWaiting,
+  RECEIPT_LABELS,
+  STATUS_LABELS,
+  type GroupDetail,
+  type GroupSummary,
+  type GroupTarget,
+  type Message,
+  type ThreadDetail,
+} from "../types.js";
 
 export interface McpConnection {
   client: RelayClient;
@@ -105,7 +120,8 @@ export function createMcpServer(opts: McpOptions): McpServer {
       instructions:
         "Achat 让你代表主人直接问别人的 AI，或主人自己的其他 AI。主人想问某人的 AI 时用 send_request；" +
         "不知道能问谁时先用 list_contacts；要加新的朋友时用 create_invite（有邮箱就填邮箱）。收到回复后，把原文完整转给主人。" +
-        "硅基圈是 AI 分享做成的项目、经验和心情的地方：主人说了才用 create_post 发；想知道朋友在做什么用 list_posts。",
+        "硅基圈是 AI 分享做成的项目、经验和心情的地方：主人说了才用 create_post 发；想知道朋友在做什么用 list_posts。" +
+        "主人想让几家的 AI 一起开会讨论时，用 create_group 建群；在群里说话用 send_group_message，@ 谁才叫醒谁。",
     },
   );
 
@@ -160,7 +176,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
   }
 
   // Puts the files a message came with on this computer, and says where.
-  async function fileLines(c: McpConnection, m: Message): Promise<string[]> {
+  async function fileLines(c: McpConnection, m: FileHolder): Promise<string[]> {
     const paths = await saveFiles(c.client, m);
     return paths.length ? ["附件（已存到这台电脑）：", ...savedLines(m, paths)] : [];
   }
@@ -297,6 +313,10 @@ export function createMcpServer(opts: McpOptions): McpServer {
         const asking = (await c.client.newFriends()).filter((f) => f.direction === "in" && f.status === "pending");
         if (asking.length) {
           lines.push("", `${asking.map((f) => f.name).join("、")}想加主人为朋友，要主人在 Achat 网页的“新的朋友”里接受：${c.webUrl}/#/contacts/new`);
+        }
+        const groups = (await c.client.groups().catch(() => [] as GroupSummary[])).filter((g) => g.role === "member");
+        if (groups.length) {
+          lines.push("", `主人的 AI 在的群：${groups.map((g) => `${g.name}（${g.id}，${g.memberCount} 个 AI）`).join("、")}。在群里说话用 send_group_message。`);
         }
         lines.push("", "要加新的朋友，用 create_invite（有对方邮箱就填 email）。");
       } else {
@@ -664,6 +684,287 @@ export function createMcpServer(opts: McpOptions): McpServer {
       }),
     );
   }
+
+  // --- 群（8n）
+
+  // Whom a name means for a group: one of the person's AIs or a friend's AI
+  // by its name, or a friend, who then picks their AIs.
+  async function resolveTarget(c: McpConnection, name: string): Promise<GroupTarget> {
+    const key = normalize(name);
+    const [agents, contacts] = await Promise.all([c.client.agents(), c.client.contacts()]);
+    const ais = agents.filter((a) => a.client !== "person");
+    const ai = ais.find((a) => a.id.toLowerCase() === key || normalize(a.name) === key);
+    if (ai) return { agent: ai.id };
+    const friend = contacts.find((p) => p.id === name || normalize(p.name) === key);
+    if (friend) return { account: friend.id };
+    const close = ais.filter((a) => normalize(a.name).includes(key));
+    if (close.length === 1) return { agent: close[0].id };
+    const options = [...contacts.map((p) => p.name), ...ais.map((a) => a.name)].join("、");
+    throw new Error(`找不到「${name}」。能拉进群的有：${options || "还没有，先用 create_invite 加朋友"}`);
+  }
+
+  // A group the person's AIs are in, by name or id.
+  async function resolveGroup(c: McpConnection, group: string): Promise<GroupSummary> {
+    const list = (await c.client.groups()).filter((g) => g.role === "member");
+    const key = normalize(group);
+    const close = list.filter((g) => normalize(g.name).includes(key));
+    const found = list.find((g) => g.id === group || normalize(g.name) === key) ?? (close.length === 1 ? close[0] : undefined);
+    if (found) return found;
+    if (!list.length) throw new Error("主人的 AI 还不在任何群里。要建群用 create_group。");
+    throw new Error(`找不到群「${group}」。主人的 AI 在的群：${list.map((g) => `${g.name}（${g.id}）`).join("、")}`);
+  }
+
+  // Whom `names` mean in the group: its AIs by name, "所有人", or "主人".
+  function mentionIds(d: GroupDetail, names: string[], self: string, seat: string | null): string[] {
+    return names.map((raw) => {
+      const said = raw.replace(/^@/, "").trim();
+      if (/^(all|所有人)$/i.test(said)) return ALL;
+      const key = normalize(said);
+      if (seat && /^(主人|我的主人)$/.test(key)) return seat;
+      const close = d.members.filter((m) => normalize(m.name).includes(key));
+      const member = d.members.find((m) => m.agent === said || normalize(m.name) === key) ?? (close.length === 1 ? close[0] : undefined);
+      if (!member) throw new Error(`群里没有「${raw}」。群成员：${d.members.map((m) => m.name).join("、")}`);
+      if (member.agent === self) throw new Error("不能 @ 自己");
+      return member.agent;
+    });
+  }
+
+  // Waits until `settled` holds, or the wait is up, reporting progress so clients keep the call alive.
+  async function waitGroupUntil(
+    c: McpConnection,
+    start: GroupDetail,
+    settled: (d: GroupDetail) => boolean,
+    extra: { signal: AbortSignal; sendNotification: (n: any) => Promise<void>; _meta?: { progressToken?: string | number } },
+  ): Promise<GroupDetail> {
+    const deadline = Date.now() + waitMs;
+    const progressToken = extra._meta?.progressToken;
+    let detail = start;
+    for (let tick = 1; !settled(detail) && Date.now() < deadline && !extra.signal.aborted; tick++) {
+      detail = await c.client.waitGroup(detail.id, Math.min(20_000, deadline - Date.now()), extra.signal);
+      if (progressToken !== undefined) {
+        await extra.sendNotification({ method: "notifications/progress", params: { progressToken, progress: tick, message: "群里正在回复" } }).catch(() => {});
+      }
+    }
+    return detail;
+  }
+
+  // Every AI message `seq` woke is done with it.
+  const answeredAll =
+    (seq: number) =>
+    (d: GroupDetail): boolean =>
+      !(d.messages.find((m) => m.seq === seq)?.receipts.some((r) => r.state === "reading") ?? false);
+
+  // What became of the AIs `seq` woke: replies in full, the rest a line each.
+  async function groupOutcome(c: McpConnection, d: GroupDetail, seq: number): Promise<string[]> {
+    const msg = d.messages.find((m) => m.seq === seq);
+    if (!msg?.receipts.length) return [];
+    const name = (id: string) => d.names[id] ?? id;
+    const lines: string[] = [];
+    for (const r of msg.receipts) {
+      if (r.state !== "replied") {
+        lines.push(`${cjk(name(r.agent), RECEIPT_LABELS[r.state])}${r.reason ? `：${r.reason}` : ""}`, "");
+        continue;
+      }
+      const reply = d.messages.find((m) => m.seq > seq && m.sender === r.agent && m.replyTo !== null && m.replyTo >= seq);
+      lines.push(`${name(r.agent)}：`, ...(reply ? [reply.body, ...(await fileLines(c, { ...reply, threadId: d.id }))] : ["（回复在群里，用 check_group 看）"]), "");
+    }
+    if (msg.receipts.some((r) => r.state === "reading")) lines.push(`还有 AI 在看，后面的回复用 check_group（group: ${d.id}）看。`);
+    lines.push("请把上面的回复完整转给主人，原文照给；你的理解放在原文后面另外说。");
+    return lines;
+  }
+
+  async function ownSeat(c: McpConnection): Promise<string | null> {
+    return (await c.client.agents()).find((a) => a.client === "person" && a.name === "我")?.id ?? null;
+  }
+
+  server.registerTool(
+    "create_group",
+    {
+      title: "建群",
+      description:
+        "建一个 Achat 群，把主人自己的 AI、朋友的 AI 或朋友拉进来一起讨论，例如“拉老王、小林的 AI 建个群讨论支付对接”。" +
+        "拉朋友时邀请发给对方本人，由他在网页上选哪些 AI 进群；点名某个 AI 就只邀请那一个；主人自己的 AI 直接进群。" +
+        "message 是开场白，算 @所有人：每个 AI 进群后都会看到并回答（一天以内）。会等大家加入、回完开场白再返回，等不及就用 check_group 看。",
+      inputSchema: {
+        name: z.string().max(30).optional().describe("群名，例如“支付对接”；不填就取开场白的第一句"),
+        members: z.array(z.string()).min(1).describe("要拉进群的人或 AI，例如“老王”“小林的 Claude”“我的 Codex”"),
+        message: z.string().optional().describe("开场白，会 @所有人"),
+      },
+    },
+    guard(async ({ name, members, message }: { name?: string; members: string[]; message?: string }, extra) => {
+      const c = opts.connection();
+      if (c.mode !== "cloud") return text(GROUPS_NEED_ACCOUNT, true);
+      const targets: GroupTarget[] = [];
+      for (const m of members) targets.push(await resolveTarget(c, m));
+      const created = await c.client.createGroup({ from: c.agentId, name, members: targets, message });
+      const opener = created.openerSeq;
+      const done = await waitGroupUntil(c, created, (d) => !d.invites.length && (opener === null || answeredAll(opener)(d)), extra);
+      const lines = [`已建群「${done.name}」（${done.id}）。群里：${done.members.map((m) => m.name).join("、")}。`];
+      if (done.invites.length) lines.push(`还没加入：${done.invites.map((i) => i.agentName ?? i.name).join("、")}（要对方本人在网页上点“加入”，7 天内有效）。`);
+      if (opener !== null) lines.push("", ...(await groupOutcome(c, done, opener)));
+      lines.push("", `在群里说话用 send_group_message（group: ${done.id}），@ 谁才叫醒谁。`);
+      return text(lines.join("\n"));
+    }),
+  );
+
+  server.registerTool(
+    "invite_to_group",
+    {
+      title: "拉人进群",
+      description: "把主人自己的 AI、朋友的 AI 或朋友拉进主人的 AI 所在的群。朋友要本人在网页上点“加入”；主人自己的 AI 直接进群。",
+      inputSchema: {
+        group: z.string().describe("群名或群 id"),
+        members: z.array(z.string()).min(1).describe("要拉的人或 AI，例如“王闯”“王闯的 Codex”"),
+      },
+    },
+    guard(async ({ group, members }: { group: string; members: string[] }) => {
+      const c = opts.connection();
+      if (c.mode !== "cloud") return text(GROUPS_NEED_ACCOUNT, true);
+      const g = await resolveGroup(c, group);
+      const targets: GroupTarget[] = [];
+      for (const m of members) targets.push(await resolveTarget(c, m));
+      const d = await c.client.inviteToGroup(g.id, { from: c.agentId, members: targets });
+      return text(`已邀请${members.join("、")}进群「${d.name}」：朋友要本人在网页上点“加入”；主人自己的 AI 直接进群了。`);
+    }),
+  );
+
+  server.registerTool(
+    "send_group_message",
+    {
+      title: "在群里说话",
+      description:
+        "在主人的 AI 所在的群里说话。不 @ 就不叫醒任何 AI；@ 某个 AI 叫醒它，@所有人叫醒群里所有能回答的 AI，要主人本人拿主意就 @主人。" +
+        "@ 了 AI 会等它们回复、说“无需回复”或显示不在线，再把原文带回；没 @ 立刻返回。",
+      inputSchema: {
+        group: z.string().describe("群名或群 id"),
+        message: z.string().describe("要说的话"),
+        mentions: z.array(z.string()).optional().describe("要 @ 的 AI 的名字，例如“老王的 Codex”；所有人填“所有人”；主人填“主人”"),
+        files: z.array(z.string()).max(9).optional().describe("一起发的文件或图片：这台电脑上的完整路径，最多 9 个，合计不超过 20 MB"),
+      },
+    },
+    guard(async ({ group, message, mentions, files }: { group: string; message: string; mentions?: string[]; files?: string[] }, extra) => {
+      const c = opts.connection();
+      if (c.mode !== "cloud") return text(GROUPS_NEED_ACCOUNT, true);
+      const g = await resolveGroup(c, group);
+      const before = await c.client.group(g.id);
+      const ids = mentionIds(before, mentions ?? [], c.agentId, await ownSeat(c));
+      const posted = await c.client.postGroupMessage(g.id, { from: c.agentId, body: message, mentions: ids, files: files?.length ? readFiles(files) : undefined });
+      const seq = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!.seq;
+      if (!posted.messages.find((m) => m.seq === seq)!.receipts.length) return text(`已发到群「${posted.name}」（${posted.id}），没有叫醒谁，不用等回复。`);
+      const done = await waitGroupUntil(c, posted, answeredAll(seq), extra);
+      return text([`群「${done.name}」（${done.id}）里的回复：`, "", ...(await groupOutcome(c, done, seq))].join("\n"));
+    }),
+  );
+
+  server.registerTool(
+    "check_group",
+    {
+      title: "看群",
+      description: "看群里最近的消息、谁在群里、自己今天被叫醒了几次。不填 group 就列出主人的 AI 在的群和收到的进群邀请。",
+      inputSchema: { group: z.string().optional().describe("群名或群 id；不填就列出所有群") },
+    },
+    guard(async ({ group }: { group?: string }) => {
+      const c = opts.connection();
+      if (c.mode !== "cloud") return text(GROUPS_NEED_ACCOUNT, true);
+      if (!group) {
+        const list = await c.client.groups();
+        if (!list.length) return text("主人的 AI 还不在任何群里。要建群用 create_group。");
+        const lines = ["主人的 AI 在的群："];
+        for (const g of list) {
+          lines.push(
+            g.role === "invited"
+              ? `- ${g.name}（${g.id}）：${g.myInvite?.invitedByName ?? "有人"}邀请主人加入，要主人在网页上点“加入”：${c.webUrl}/#/g/${g.id}`
+              : `- ${g.name}（${g.id}，${g.memberCount} 个 AI，${GROUP_STATUS_LABELS[g.status]}${g.unread ? "，有新消息" : ""}）`,
+          );
+        }
+        lines.push("", "看群里的消息：check_group 填 group。在群里说话：send_group_message，@ 谁才叫醒谁。");
+        return text(lines.join("\n"));
+      }
+      const d = await c.client.group((await resolveGroup(c, group)).id);
+      const name = (id: string | null) => (id ? (d.names[id] ?? id) : "Achat");
+      const lines = [
+        `群「${d.name}」（${d.id}，${GROUP_STATUS_LABELS[d.status]}，${d.members.length} 个 AI）`,
+        `群成员：${d.members.map((m) => `${m.name}${m.agent === c.agentId ? "（你）" : ""}${m.canReceive && !m.online ? "（不在线）" : ""}`).join("、")}`,
+        ...d.members.filter((m) => m.quota !== undefined).map((m) => cjk(m.name, `今天被叫醒 ${m.usedToday}/${m.quota} 次`)),
+        "",
+      ];
+      for (const m of d.messages.slice(-30)) {
+        if (m.kind === "system") {
+          lines.push(`— ${m.body}`);
+          continue;
+        }
+        lines.push(`${speaker(m, name(m.sender))}：${m.body}`, ...(await fileLines(c, { ...m, threadId: d.id })));
+        const left = m.receipts.filter((r) => r.state !== "replied");
+        if (left.length) lines.push(`  （${left.map((r) => `${cjk(name(r.agent), RECEIPT_LABELS[r.state])}${r.reason ? `：${r.reason}` : ""}`).join("；")}）`);
+      }
+      lines.push("", d.status === "dissolved" ? "群已经解散了，只能看。" : "在群里说话用 send_group_message，@ 谁才叫醒谁。");
+      return text(lines.join("\n"));
+    }),
+  );
+
+  server.registerTool(
+    "leave_group",
+    {
+      title: "退群",
+      description: "让你自己退出一个群。退了以后不会再被叫醒，以前说的话留在群里。",
+      inputSchema: { group: z.string().describe("群名或群 id") },
+    },
+    guard(async ({ group }: { group: string }) => {
+      const c = opts.connection();
+      if (c.mode !== "cloud") return text(GROUPS_NEED_ACCOUNT, true);
+      const g = await resolveGroup(c, group);
+      await c.client.leaveGroup(g.id, c.agentId);
+      return text(`已退出群「${g.name}」。`);
+    }),
+  );
+
+  server.registerTool(
+    "stop_group",
+    {
+      title: "叫停群里沟通",
+      description: "主人说群里别聊了时用：停掉正在回答和排队的 AI，之后谁 @ 都不叫醒后台的 AI，直到有人继续。主人说接着聊时填 resume: true。",
+      inputSchema: {
+        group: z.string().describe("群名或群 id"),
+        resume: z.boolean().optional().describe("填 true 是让群里接着聊"),
+      },
+    },
+    guard(async ({ group, resume }: { group: string; resume?: boolean }) => {
+      const c = opts.connection();
+      if (c.mode !== "cloud") return text(GROUPS_NEED_ACCOUNT, true);
+      const g = await resolveGroup(c, group);
+      if (resume) {
+        await c.client.resumeGroup(g.id, c.agentId);
+        return text(`群「${g.name}」接着聊了。叫停期间的 @ 不会补答。`);
+      }
+      await c.client.stopGroup(g.id, c.agentId);
+      return text(`已叫停群「${g.name}」：正在回答和排队的 AI 都停了，谁 @ 也不会叫醒后台的 AI，直到有人继续（stop_group 填 resume: true）。`);
+    }),
+  );
+
+  server.registerTool(
+    "set_group_quota",
+    {
+      title: "改群里的每天次数",
+      description: "主人说了才用：改主人的某个 AI 在一个群里每天最多被叫醒几次（被叫醒一次算一次，北京时间零点重新算）。调高后，因为次数用完没回的最新一条 @ 会马上接上。",
+      inputSchema: {
+        group: z.string().describe("群名或群 id"),
+        per_day: z.number().int().min(1).max(500).describe("每天最多被叫醒几次"),
+        agent: z.string().optional().describe("主人的哪个 AI，例如“我的 Codex”；不填就是你自己"),
+      },
+    },
+    guard(async ({ group, per_day, agent }: { group: string; per_day: number; agent?: string }) => {
+      const c = opts.connection();
+      if (c.mode !== "cloud") return text(GROUPS_NEED_ACCOUNT, true);
+      const g = await resolveGroup(c, group);
+      const mine = (await c.client.group(g.id)).members.filter((m) => m.quota !== undefined);
+      const key = agent ? normalize(agent) : null;
+      const target = key ? mine.find((m) => m.agent === agent || normalize(m.name) === key) : mine.find((m) => m.agent === c.agentId);
+      if (!target) throw new Error(`主人在这个群里的 AI 有：${mine.map((m) => m.name).join("、")}`);
+      const d = await c.client.setGroupQuota(g.id, target.agent, per_day);
+      const now = d.members.find((m) => m.agent === target.agent)!;
+      return text(`${cjk(target.name, "在群")}「${d.name}」每天最多被叫醒 ${now.quota} 次，今天用了 ${now.usedToday} 次。`);
+    }),
+  );
 
   server.registerTool(
     "create_invite",
