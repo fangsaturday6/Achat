@@ -165,3 +165,149 @@ export function waitingForAsker(thread: Pick<Thread, "from" | "to">, messages: M
 export function isTerminal(status: ThreadStatus): boolean {
   return status === "declined" || status === "closed" || status === "stopped" || status === "expired";
 }
+
+// --- 群（8n）：几个人的 AI 一起开会
+
+export type GroupStatus = "open" | "stopped" | "dissolved";
+
+export const GROUP_STATUS_LABELS: Record<GroupStatus, string> = {
+  open: "进行中",
+  stopped: "已叫停",
+  dissolved: "已解散",
+};
+
+// What became of an AI a message woke. The line under the message shows
+// every state but "replied": the reply itself is right below.
+export type ReceiptState = "reading" | "replied" | "passed" | "offline" | "quota" | "cannot" | "stopped" | "failed";
+
+export const RECEIPT_LABELS: Record<ReceiptState, string> = {
+  reading: "正在看",
+  replied: "回复了",
+  passed: "无需回复",
+  offline: "不在线",
+  quota: "额度用完了",
+  cannot: "还不能接收",
+  stopped: "已叫停",
+  failed: "没答上",
+};
+
+// "@所有人" in a message's mentions.
+export const ALL = "all";
+
+export interface Receipt {
+  agent: string;
+  state: ReceiptState;
+  // Why it need not reply, in its own half sentence, or what went wrong.
+  reason: string | null;
+}
+
+export interface GroupMessage {
+  id: number;
+  groupId: string;
+  seq: number;
+  // An AI, a person's seat (本人), or null for Achat's own notes.
+  sender: string | null;
+  kind: "message" | "system";
+  body: string;
+  // AIs' ids, ALL, or the seat of the sender's own person (an AI calling its owner).
+  mentions: string[];
+  // For a background answer: the message whose @ woke it.
+  replyTo: number | null;
+  byPerson: boolean;
+  redactions: number;
+  costUsd: number;
+  files: Attachment[];
+  // The AIs it woke and what became of them, in the order they were woken.
+  receipts: Receipt[];
+  model: string | null;
+  effort: Effort | null;
+  createdAt: string;
+}
+
+export interface GroupMember {
+  agent: string;
+  // From the caller's side: "我的 Claude", "老王的 Codex".
+  name: string;
+  // Its account.
+  owner: string;
+  canReceive: boolean;
+  online: boolean;
+  joinedAt: string;
+  // The caller's own AIs only: times a day it may be woken here, and today so far.
+  quota?: number;
+  usedToday?: number;
+}
+
+export interface GroupInvite {
+  id: string;
+  // The person invited.
+  account: string;
+  name: string;
+  // The AI asked for by name; null when the person picks.
+  agent: string | null;
+  agentName: string | null;
+  invitedBy: string;
+  invitedByName: string;
+  expiresAt: string;
+}
+
+export interface Group {
+  id: string;
+  name: string;
+  // 群主: the account of the AI that started it, or whoever it passed to.
+  owner: string;
+  status: GroupStatus;
+  // Goes up with every 叫停, so answers to what was asked before are refused.
+  epoch: number;
+  // The opening message (@所有人), which wakes AIs as they join within a day.
+  openerSeq: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GroupDetail extends Group {
+  // "invited": the caller only has an invite, and sees the opening message alone.
+  role: "member" | "invited";
+  members: GroupMember[];
+  invites: GroupInvite[];
+  myInvite: GroupInvite | null;
+  messages: GroupMessage[];
+  // Every sender in `messages` and every member, named from the caller's side.
+  names: Record<string, string>;
+}
+
+export interface GroupSummary extends Group {
+  role: "member" | "invited";
+  memberCount: number;
+  lastMessage: GroupMessage | null;
+  unread: boolean;
+  myInvite: GroupInvite | null;
+}
+
+// Someone to bring into a group: one AI, or a person, who picks their AIs.
+export type GroupTarget = { agent: string } | { account: string };
+
+// What an AI woken in a group reads: the message that woke it, and what came
+// before it from where its background session left off.
+export interface GroupWork {
+  group: Group;
+  wake: GroupMessage;
+  messages: GroupMessage[];
+  session: string | null;
+  // Named from the AI's owner's side.
+  members: { agent: string; name: string }[];
+  names: Record<string, string>;
+  // Its own person, whom it may call with "@" and this name.
+  owner: { seat: string; name: string };
+}
+
+// Sent on the same event stream as threads. `members`: every AI in the group
+// and the seats of people invited, so each account hears of its own groups.
+// `wake`: the AIs just woken.
+export interface GroupEvent {
+  type: "group.updated" | "group.message";
+  groupId: string;
+  seq?: number;
+  wake?: string[];
+  members: string[];
+}
