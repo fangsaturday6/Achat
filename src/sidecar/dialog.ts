@@ -15,10 +15,12 @@ export interface ApprovalPrompt {
   scope: string; // 问答 · 5 轮 · $5.00 / 动手 · 5 轮
 }
 
-// The dialog's icon tells 问答 (a blue question bubble) from 动手 (an orange
-// wrench) at a glance; the same pictures as on the web page.
-function modeIcon(mode: ThreadMode): string | null {
-  const file = join(import.meta.dirname, "..", "..", "web", "icons", mode === "do" ? "do.png" : "ask.png");
+// A dialog's icon is the Achat icon. A request's has 问答 (a blue question
+// bubble) or 动手 (an orange wrench) in its corner, the same pictures as on
+// the web page; web/icons/*.svg are what the PNGs are drawn from.
+export function dialogIcon(kind: ThreadMode | "app"): string | null {
+  const web = join(import.meta.dirname, "..", "..", "web");
+  const file = kind === "app" ? join(web, "brand", "achat-icon-512.png") : join(web, "icons", kind === "do" ? "do.png" : "ask.png");
   return existsSync(file) ? file : null;
 }
 
@@ -56,7 +58,7 @@ function onPath(command: string): boolean {
 // when the icon is missing, shows the title larger.
 function macAlert(p: ApprovalPrompt): Asking {
   const buttons = `buttons {"稍后", "拒绝", "同意"} default button "稍后" cancel button "稍后" giving up after ${WAIT_SECONDS}`;
-  const icon = modeIcon(p.mode);
+  const icon = dialogIcon(p.mode);
   const show = icon
     ? `display dialog ((item 1 of argv) & return & return & (item 2 of argv)) with title "Achat" ${buttons} with icon (POSIX file (item 3 of argv))`
     : `display alert (item 1 of argv) message (item 2 of argv) ${buttons}`;
@@ -107,8 +109,13 @@ export type Alerter = (title: string, message: string) => void;
 export const desktopAlert: Alerter = (title, message) => {
   const os = platform();
   if (os === "darwin") {
-    const script = ["on run argv", "activate", `display alert (item 1 of argv) message (item 2 of argv) buttons {"好"} default button "好" giving up after ${WAIT_SECONDS}`, "end run"];
-    execFile("osascript", [...script.flatMap((line) => ["-e", line]), title, message], () => {});
+    const buttons = `buttons {"好"} default button "好" giving up after ${WAIT_SECONDS}`;
+    const icon = dialogIcon("app");
+    const show = icon
+      ? `display dialog ((item 1 of argv) & return & return & (item 2 of argv)) with title "Achat" ${buttons} with icon (POSIX file (item 3 of argv))`
+      : `display alert (item 1 of argv) message (item 2 of argv) ${buttons}`;
+    const script = ["on run argv", "activate", show, "end run"];
+    execFile("osascript", [...script.flatMap((line) => ["-e", line]), title, message, ...(icon ? [icon] : [])], () => {});
   } else if (os === "linux" && (process.env.DISPLAY || process.env.WAYLAND_DISPLAY) && onPath("zenity")) {
     execFile("zenity", ["--info", "--no-markup", "--title", title, "--text", `${title}\n\n${message}`], () => {});
   } else {

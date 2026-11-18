@@ -250,7 +250,14 @@ button.item { width: 100%; border: none; background: none; text-align: left; }
 .main.drop-over { outline: 2px dashed var(--accent); outline-offset: -6px; }
 .card-actions { padding-top: 2px; display: flex; gap: 10px; justify-content: flex-end; }
 .with-avatar .grow { flex: 1; min-width: 0; }
-.empty-mark { font-size: 40px; line-height: 1; font-weight: 500; color: #d6d6d6; user-select: none; }
+.empty-mark { width: 64px; height: 64px; color: #d6d6d6; }
+
+/* The Achat mark, painted in the text colour; its shape is web/brand/achat-mark.svg. */
+.logo-a, .empty-mark {
+  display: inline-block; background: currentColor;
+  -webkit-mask: url(/brand/achat-mark.svg) center / contain no-repeat;
+  mask: url(/brand/achat-mark.svg) center / contain no-repeat;
+}
 
 /* a conversation */
 .log { display: flex; flex-direction: column; gap: 16px; padding: 20px 0; }
@@ -523,7 +530,9 @@ body.public { background: var(--panel); }
   max-width: 1120px; margin: 0 auto; padding: 20px 24px; display: flex; flex-wrap: wrap; gap: 16px; align-items: center;
   justify-content: space-between;
 }
-.logo { font-size: 20px; line-height: 28px; font-weight: 500; color: var(--accent); }
+.logo { font-size: 20px; line-height: 28px; font-weight: 500; color: var(--accent); white-space: nowrap; }
+/* The A fills 72 × 70 of the mark's 100 × 100: as tall as a capital, on the baseline. */
+.logo-a { width: 1.03em; height: 1.03em; margin: 0 -0.09em -0.155em -0.145em; }
 .page-main { max-width: 428px; margin: 0 auto; padding: 80px 24px 72px; display: flex; flex-direction: column; gap: 24px; }
 .page-main.wide { max-width: 568px; }
 .page-main h1 { font-size: 22px; line-height: 30px; font-weight: 500; }

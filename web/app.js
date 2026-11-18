@@ -113,6 +113,13 @@ function h(tag, props = {}, ...children) {
 
 const SVG = "http://www.w3.org/2000/svg";
 
+// The Achat 字标: the mark stands in for the A. Its shape lives only in
+// web/brand/achat-mark.svg; .logo-a in style.css paints it in the text colour.
+// src/cloud/pages.ts writes the same markup.
+function logo() {
+  return h("a", { class: "logo", id: "logo", href: "/", "aria-label": "Achat" }, h("span", { class: "logo-a", "aria-hidden": "true" }), h("span", { "aria-hidden": "true" }, "chat"));
+}
+
 function icon(name, size = 24, strokeWidth = 1.6) {
   const svg = document.createElementNS(SVG, "svg");
   const attrs = { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": name === "more" ? 3 : strokeWidth, "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" };
@@ -751,7 +758,7 @@ function showMain(title, body, { right, foot, back, center, onContent, flush, ba
 }
 
 function showEmpty() {
-  showMain(null, h("span", { class: "empty-mark", "aria-hidden": "true" }, "Achat"), { center: true });
+  showMain(null, h("span", { class: "empty-mark", "aria-hidden": "true" }), { center: true });
 }
 
 async function act(fn) {
@@ -1136,7 +1143,7 @@ function sendLink(agent) {
 // --- 通讯录
 
 function renderFriends() {
-  if (!state.friends.length) return showMain("新的朋友", h("span", { class: "empty-mark", "aria-hidden": "true" }, "Achat"), { back: "#/contacts", center: true });
+  if (!state.friends.length) return showMain("新的朋友", h("span", { class: "empty-mark", "aria-hidden": "true" }), { back: "#/contacts", center: true });
   const list = h("ul", { class: "friends" });
   for (const f of state.friends) {
     const known = f.direction === "in" || f.status === "accepted";
@@ -1666,7 +1673,7 @@ function showPage(head, children, { wide = false, gray = false } = {}) {
 }
 
 function pageHead(step) {
-  return h("header", { class: "page-head" }, h("a", { class: "logo", href: "/" }, "Achat"), step ? stepper(step) : null);
+  return h("header", { class: "page-head" }, logo(), step ? stepper(step) : null);
 }
 
 function stepper(current) {

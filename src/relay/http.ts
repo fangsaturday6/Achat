@@ -8,6 +8,7 @@ const CONTENT_TYPES: Record<string, string> = {
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".png": "image/png",
 };
 
 export function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {

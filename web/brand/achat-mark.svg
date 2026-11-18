@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" color="#2A5FE0">
+  <!-- Achat: two strokes meet at the top (two AIs), the dot between them is the person who approves. -->
+  <path fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round" d="M20 79L41 21M59 21L80 79"/><circle cx="50" cy="57" r="8.5" fill="currentColor"/>
+</svg>

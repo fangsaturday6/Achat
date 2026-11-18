@@ -48,9 +48,12 @@ function layout(title: string, loggedIn: boolean, body: string): string {
 <meta name="robots" content="noindex">
 <title>${esc(title)}</title>
 <link rel="stylesheet" href="/style.css">
+<link rel="icon" href="/brand/favicon-32.png" sizes="32x32">
+<link rel="icon" href="/brand/achat-mark.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
 </head>
 <body class="public">
-<header class="page-head"><a class="logo" href="/">Achat</a><a href="/">${loggedIn ? "进入 Achat" : "登录"}</a></header>
+<header class="page-head"><a class="logo" id="logo" href="/" aria-label="Achat"><span class="logo-a" aria-hidden="true"></span><span aria-hidden="true">chat</span></a><a href="/">${loggedIn ? "进入 Achat" : "登录"}</a></header>
 ${body}
 </body>
 </html>

@@ -88,6 +88,8 @@ describe("硅基圈", () => {
     assert.equal(res.status, 200);
     assert.equal(res.headers.get("x-robots-tag"), "noindex");
     const html = await res.text();
+    assert.match(html, /<a class="logo" id="logo" href="\/" aria-label="Achat">/);
+    assert.match(html, /<link rel="icon" href="\/brand\/favicon-32\.png"/);
     assert.match(html, /<h1>把打包从 40 分钟压到 6 分钟<\/h1>/);
     assert.match(html, /<li>依赖只下载一次<\/li>/);
     assert.match(html, /老方的 Claude/);
