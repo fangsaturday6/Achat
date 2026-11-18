@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { NewFile } from "../attachments.js";
+import { isEffort, readOffer, type Effort, type ModelOffer, type ModelPick } from "../models.js";
 import type { Attachment, Message, MessageKind, Scope, Thread, ThreadMode, ThreadStatus } from "../types.js";
 
 const SCHEMA = `
@@ -26,6 +27,8 @@ CREATE TABLE IF NOT EXISTS threads (
   reminded INTEGER NOT NULL DEFAULT 0,
   reply_mailed INTEGER NOT NULL DEFAULT 0,
   quiet INTEGER NOT NULL DEFAULT 0,
+  model TEXT,
+  effort TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -40,8 +43,19 @@ CREATE TABLE IF NOT EXISTS messages (
   cost_usd REAL NOT NULL DEFAULT 0,
   by_person INTEGER NOT NULL DEFAULT 0,
   to_person INTEGER NOT NULL DEFAULT 0,
+  model TEXT,
+  effort TEXT,
   created_at TEXT NOT NULL,
   UNIQUE (thread_id, seq)
+);
+-- What each AI can use, as its computer reported it, and what its person
+-- picked (null: the AI's own default).
+CREATE TABLE IF NOT EXISTS agent_models (
+  agent TEXT PRIMARY KEY,
+  offer TEXT NOT NULL,
+  model TEXT,
+  effort TEXT,
+  updated_at TEXT NOT NULL
 );
 -- How far each reader (an account, or the person on this computer) has read.
 CREATE TABLE IF NOT EXISTS thread_reads (
@@ -86,6 +100,8 @@ interface ThreadRow {
   reminded: number;
   reply_mailed: number;
   quiet: number;
+  model: string | null;
+  effort: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -101,6 +117,8 @@ interface MessageRow {
   cost_usd: number;
   by_person: number;
   to_person: number;
+  model: string | null;
+  effort: string | null;
   created_at: string;
 }
 
@@ -126,6 +144,8 @@ function toThread(row: ThreadRow): Thread {
     askerSeen: row.asker_seen,
     reminded: row.reminded === 1,
     quiet: row.quiet === 1,
+    model: row.model ?? null,
+    effort: isEffort(row.effort) ? row.effort : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -144,6 +164,8 @@ function toMessage(row: MessageRow): Message {
     byPerson: row.by_person === 1,
     toPerson: row.to_person === 1,
     files: [],
+    model: row.model ?? null,
+    effort: isEffort(row.effort) ? row.effort : null,
     createdAt: row.created_at,
   };
 }
@@ -168,6 +190,9 @@ export interface NewMessage {
   byPerson?: boolean;
   toPerson?: boolean;
   files?: NewFile[];
+  // What the asked AI ran on.
+  model?: string | null;
+  effort?: Effort | null;
 }
 
 export interface ThreadPatch {
@@ -181,6 +206,9 @@ export interface ThreadPatch {
   roundsUsed?: number;
   costUsd?: number;
   responderSession?: string | null;
+  // The conversation's model and 推理档位.
+  model?: string | null;
+  effort?: Effort | null;
 }
 
 export class Store {
@@ -216,6 +244,10 @@ export class Store {
     add("threads", "own", "INTEGER NOT NULL DEFAULT 0");
     add("messages", "by_person", "INTEGER NOT NULL DEFAULT 0");
     add("messages", "to_person", "INTEGER NOT NULL DEFAULT 0");
+    add("threads", "model", "TEXT");
+    add("threads", "effort", "TEXT");
+    add("messages", "model", "TEXT");
+    add("messages", "effort", "TEXT");
   }
 
   close(): void {
@@ -308,6 +340,14 @@ export class Store {
       sets.push("responder_session = ?");
       params.push(patch.responderSession);
     }
+    if (patch.model !== undefined) {
+      sets.push("model = ?");
+      params.push(patch.model);
+    }
+    if (patch.effort !== undefined) {
+      sets.push("effort = ?");
+      params.push(patch.effort);
+    }
     params.push(id);
     this.db.prepare(`UPDATE threads SET ${sets.join(", ")} WHERE id = ?`).run(...params);
     return this.getThread(id)!;
@@ -319,10 +359,10 @@ export class Store {
       .get(threadId) as { seq: number };
     const result = this.db
       .prepare(
-        `INSERT INTO messages (thread_id, seq, sender, kind, body, redactions, cost_usd, by_person, to_person, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO messages (thread_id, seq, sender, kind, body, redactions, cost_usd, by_person, to_person, model, effort, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(threadId, next.seq, m.sender, m.kind, m.body, m.redactions ?? 0, m.costUsd ?? 0, m.byPerson ? 1 : 0, m.toPerson ? 1 : 0, now);
+      .run(threadId, next.seq, m.sender, m.kind, m.body, m.redactions ?? 0, m.costUsd ?? 0, m.byPerson ? 1 : 0, m.toPerson ? 1 : 0, m.model ?? null, m.effort ?? null, now);
     const messageId = Number(result.lastInsertRowid);
     const insert = this.db.prepare(
       "INSERT INTO files (id, message_id, thread_id, position, name, type, size, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -428,6 +468,35 @@ export class Store {
       .prepare("SELECT * FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 1")
       .get(threadId) as MessageRow | undefined;
     return row ? this.withFiles(threadId, [toMessage(row)])[0] : null;
+  }
+
+  // What an AI's computer offered and its person picked; null before its
+  // computer said anything.
+  agentModels(agent: string): { offer: ModelOffer; picked: ModelPick } | null {
+    const row = this.db.prepare("SELECT offer, model, effort FROM agent_models WHERE agent = ?").get(agent) as
+      | { offer: string; model: string | null; effort: string | null }
+      | undefined;
+    if (!row) return null;
+    let offer: ModelOffer | null = null;
+    try {
+      offer = readOffer(JSON.parse(row.offer));
+    } catch {
+      // kept from a version that wrote it differently
+    }
+    return offer ? { offer, picked: { model: row.model, effort: isEffort(row.effort) ? row.effort : null } } : null;
+  }
+
+  saveOffer(agent: string, offer: ModelOffer, now: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO agent_models (agent, offer, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT (agent) DO UPDATE SET offer = excluded.offer, updated_at = excluded.updated_at`,
+      )
+      .run(agent, JSON.stringify(offer), now);
+  }
+
+  savePick(agent: string, pick: ModelPick, now: string): void {
+    this.db.prepare("UPDATE agent_models SET model = ?, effort = ?, updated_at = ? WHERE agent = ?").run(pick.model, pick.effort, now, agent);
   }
 
   countSentSince(from: string, since: string, to?: string): number {

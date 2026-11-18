@@ -328,3 +328,35 @@ test("claude tells 问答 from 动手 with Haiku alone: no tools, settings, hist
   const answering = new ClaudeRunner(fakeClaude(dir, { type: "result", result: "answer", is_error: false }));
   assert.equal(await answering.judge({ topic: "做法", message: "怎么灌的？", files: [] }), "answer");
 });
+
+test("runs on the model and 推理档位 it is given, and says which model answered", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "achat-runner-model-"));
+  process.env.ACHAT_CLAUDE_PROJECTS = dir;
+  const bin = fakeClaude(dir, {
+    type: "result",
+    result: "答案",
+    total_cost_usd: 0.03,
+    is_error: false,
+    modelUsage: { "claude-haiku-4-5-20251001": { outputTokens: 3 }, "claude-opus-4-8[1m]": { outputTokens: 900 } },
+  });
+  const out = await new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0.5, model: "opus", effort: "low" });
+  const args: string[] = JSON.parse(readFileSync(join(dir, "call.json"), "utf8")).args;
+  assert.equal(args[args.indexOf("--model") + 1], "opus");
+  assert.equal(args[args.indexOf("--effort") + 1], "low");
+  assert.equal(out.model, "Opus 4.8 1M", "the one that wrote the answer, not a helper it called");
+  await new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0.5 });
+  assert.ok(!JSON.parse(readFileSync(join(dir, "call.json"), "utf8")).args.includes("--model"));
+  delete process.env.ACHAT_CLAUDE_PROJECTS;
+
+  const codexDir = mkdtempSync(join(tmpdir(), "achat-runner-codex-model-"));
+  process.env.ACHAT_CODEX_SESSIONS = codexDir;
+  const codex = new CodexRunner(fakeCodex(codexDir, CODEX_TURN));
+  await codex.run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0, model: "gpt-6.1-sol", effort: "xhigh" });
+  const first: string[] = JSON.parse(readFileSync(join(codexDir, "call.json"), "utf8")).args;
+  assert.equal(first[first.indexOf("-m") + 1], "gpt-6.1-sol");
+  assert.ok(first.includes('model_reasoning_effort="xhigh"'));
+  await codex.run({ prompt: "追问", systemPrompt: "规则", budgetUsd: 0, sessionId: "thread-1", model: "gpt-6.1-sol", effort: "low" });
+  const resumed: string[] = JSON.parse(readFileSync(join(codexDir, "call.json"), "utf8")).args;
+  assert.ok(resumed.indexOf("-m") > resumed.indexOf("resume") && resumed.indexOf("-m") < resumed.indexOf("thread-1"));
+  delete process.env.ACHAT_CODEX_SESSIONS;
+});

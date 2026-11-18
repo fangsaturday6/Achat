@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { AgentModels } from "./models.js";
 
 // AIs that Achat runs on a person's computer, which can answer in the background.
 export type AgentClient = "claude" | "codex";
@@ -26,6 +27,9 @@ export interface AgentConfig {
   canReceive?: boolean;
   // The account it belongs to, in the cloud; absent on this computer.
   owner?: string;
+  // For the caller's own AIs, once their computer said: the models they can
+  // use and what they use.
+  models?: AgentModels;
 }
 
 // The person at this computer, on the local web page.

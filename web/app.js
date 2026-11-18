@@ -27,6 +27,7 @@ const ICONS = {
   check: "M5 12l5 5L20 7",
   monitor: "M5 4h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zM8 20h8M12 16v4",
   right: "M9 6l6 6-6 6",
+  down: "M6 9l6 6 6-6",
   left: "M15 6l-6 6 6 6",
   heart: "M12 20.5l-1.2-1.1C6.4 15.4 3.5 12.8 3.5 9.6 3.5 7 5.5 5 8.1 5c1.5 0 2.9.7 3.9 1.8C13 5.7 14.4 5 15.9 5c2.6 0 4.6 2 4.6 4.6 0 3.2-2.9 5.8-7.3 9.8z",
   chat: "M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-8l-4 3.5V17H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z",
@@ -47,6 +48,8 @@ const MAX_FILES_BYTES = 20 * 1024 * 1024;
 const SHOWN_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
 const MODE = { answer: "问答", do: "动手" };
+// 推理档位, from least to most thinking, as in src/models.ts.
+const EFFORT = { low: "低", medium: "中", high: "高", xhigh: "很高", max: "最高", ultra: "极限" };
 // AIs that can 动手, the same list as canDo in src/config.ts.
 const DOERS = new Set(["claude", "codex"]);
 
@@ -238,7 +241,6 @@ function waiting(text) {
 let closeOpenMenu = null;
 
 function openMenu(button, container, items, { bar = false } = {}) {
-  closeOpenMenu?.();
   const menu = h(
     "div",
     { class: `menu${bar ? " action-bar" : ""}`, role: "menu" },
@@ -251,12 +253,18 @@ function openMenu(button, container, items, { bar = false } = {}) {
         label,
       );
       item.addEventListener("click", () => {
-        close();
+        closeOpenMenu?.();
         onSelect?.();
       });
       return item;
     }),
   );
+  popup(button, container, menu);
+}
+
+// Shows `menu` under `button` until a click elsewhere or Esc.
+function popup(button, container, menu) {
+  closeOpenMenu?.();
   const onKey = (event) => {
     if (event.key === "Escape") {
       close();
@@ -279,6 +287,111 @@ function openMenu(button, container, items, { bar = false } = {}) {
   document.addEventListener("click", onClick, true);
   closeOpenMenu = close;
   menu.querySelector("button, input")?.focus();
+}
+
+// --- the model and 推理档位 an AI answers and works with
+
+// "Opus 4.8 · 中".
+function useText(use) {
+  return `${use.label} · ${EFFORT[use.effort]}`;
+}
+
+// What is used, and a menu to pick another: 默认 (what `fallback` names),
+// the models the AI's computer offers, and the 推理档位 of the model in use.
+// `pick` sends a change and returns what is used and picked after it, or
+// null when the page is redrawn anyway. `chip`: the small one in a scope line.
+function modelPicker({ models, uses, picked, fallback, pick, label, chip = false }) {
+  let now = uses;
+  const button = h("button", { type: "button", class: chip ? "model-chip" : "model-btn", "aria-haspopup": "menu", "aria-expanded": "false" });
+  const paint = () => {
+    button.replaceChildren(useText(now), icon("down", 12, 2));
+    button.setAttribute("aria-label", `${label}：${useText(now)}，点开更换`);
+  };
+  paint();
+  const holder = h("span", { class: "model-pick" }, button);
+  const choose = async (change) => {
+    closeOpenMenu?.();
+    try {
+      const after = await pick(change);
+      if (after) {
+        now = after.uses;
+        picked = after.picked;
+        paint();
+      }
+    } catch (err) {
+      toast(err.message);
+    }
+  };
+  const radio = (text, hint, on, change) =>
+    h(
+      "button",
+      { type: "button", class: "menu-item model-item", role: "menuitemradio", "aria-checked": String(on), onclick: () => choose(change) },
+      h("span", { class: "model-check" }, on ? icon("check", 16, 2.2) : null),
+      h("span", { class: "grow" }, text),
+      hint ? h("span", { class: "muted" }, hint) : null,
+    );
+  button.addEventListener("click", () => {
+    if (closeOpenMenu) return closeOpenMenu();
+    const efforts = [models.default, ...models.models].find((m) => m.id === now.model)?.efforts ?? [];
+    const menu = h(
+      "div",
+      { class: "menu model-menu", role: "menu", "aria-label": label },
+      radio("默认", fallback, picked.model === null, { model: "default" }),
+      h("div", { class: "menu-line", "aria-hidden": "true" }),
+      ...models.models.map((m) => radio(m.label, null, picked.model === m.id, { model: m.id })),
+      efforts.length
+        ? [
+            h("div", { class: "menu-line", "aria-hidden": "true" }),
+            h(
+              "div",
+              { class: "effort-row", role: "group", "aria-label": "推理档位" },
+              h("span", { class: "muted" }, "推理"),
+              h("span", { class: "seg" }, ...efforts.map((e) => h("button", { type: "button", "aria-pressed": String(e === now.effort), onclick: () => choose({ effort: e }) }, EFFORT[e]))),
+            ),
+          ]
+        : null,
+    );
+    popup(button, holder, menu);
+  });
+  return holder;
+}
+
+// What one of the person's AIs uses from now on, once its computer said
+// what it can use.
+function agentModelPicker(id) {
+  const agent = state.agents.get(id);
+  const models = agent?.models;
+  if (!models?.uses) return null;
+  return modelPicker({
+    models,
+    uses: models.uses,
+    picked: models.picked,
+    fallback: models.default.label,
+    label: `${agent.name}用的模型`,
+    pick: async (change) => (agent.models = await api("POST", `/api/agents/${encodeURIComponent(id)}/models`, change)),
+  });
+}
+
+// What the asked AI uses in this conversation; 默认 is what the AI uses.
+function threadModelPicker(t, { redraw = false } = {}) {
+  const models = state.agents.get(t.to)?.models;
+  if (!t.uses || !models) return null;
+  return modelPicker({
+    models,
+    uses: t.uses,
+    picked: { model: t.model, effort: t.effort },
+    fallback: models.uses ? models.uses.label : models.default.label,
+    label: "这次对话的模型",
+    chip: true,
+    pick: async (change) => {
+      const after = await api("POST", `/api/threads/${t.id}/model`, change);
+      if (redraw) {
+        await refresh();
+        return null;
+      }
+      return { uses: after.uses, picked: { model: after.model, effort: after.effort } };
+    },
+  });
 }
 
 function moreButton(label, container, items) {
@@ -705,7 +818,7 @@ function requestCard(t, m, waiting) {
   if (!waiting) return h("article", { class: "card", "aria-label": `请求：${t.topic}` }, ...asked);
   const spend = t.mode === "do" ? "" : ` · $${t.scope.budgetUsd.toFixed(2)}`;
   if (!isMine(t.to)) {
-    const scope = h("div", { class: "scope" }, `${agentName(t.to)} · `, modeChip(t.mode), ` · ${t.scope.maxRounds} 轮${spend}`);
+    const scope = h("div", { class: "scope" }, `${agentName(t.to)} · ${t.uses ? `${useText(t.uses)} · ` : ""}`, modeChip(t.mode), ` · ${t.scope.maxRounds} 轮${spend}`);
     return h("article", { class: "card", "aria-label": `请求：${t.topic}` }, ...asked, scope);
   }
   const budget = h(
@@ -718,7 +831,9 @@ function requestCard(t, m, waiting) {
   const canDo = DOERS.has(state.agents.get(t.to)?.client);
   const chip = canDo ? modeChip(t.mode, (mode) => (budget.hidden = mode === "do")) : modeChip(t.mode);
   const rounds = h("input", { type: "number", min: "1", max: "20", value: String(t.scope.maxRounds), "aria-label": "最多轮数" });
-  const scope = h("div", { class: "scope" }, `${agentName(t.to)} · `, chip, " · ", rounds, " 轮", budget);
+  // The model is picked right away, the rest with 同意.
+  const model = threadModelPicker(t);
+  const scope = h("div", { class: "scope" }, `${agentName(t.to)} · `, model ? [model, " · "] : null, chip, " · ", rounds, " 轮", budget);
   const decline = h("button", { type: "button", class: "btn", onclick: () => act(() => api("POST", `/api/threads/${t.id}/decline`, {})) }, "拒绝");
   const approve = h(
     "button",
@@ -934,7 +1049,7 @@ function renderThread(t) {
       "div",
       { class: `msg${onRight(m.sender) ? " right" : ""}` },
       avatar(agentName(m.sender), 34),
-      h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, writerName(m)), ...content),
+      h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, m.model ? `${writerName(m)} · ${m.model}` : writerName(m)), ...content),
     );
   const log = h("div", { class: "log", role: "log", "aria-label": "对话原文" }, h("span", { class: "event" }, shortTime(t.createdAt)));
   // While pending, the asker's latest message is what the person decides on.
@@ -962,9 +1077,12 @@ function renderThread(t) {
   const writes = side && (t.status === "active" || t.status === "closed" || (t.status === "expired" && side === t.from));
   let foot = null;
   let drop;
+  // The asked side picks the model of a 问答 under way; a 动手 that started
+  // shows what it works with.
+  const ran = t.uses && isMine(t.to) && t.status === "active" ? (t.mode === "answer" ? threadModelPicker(t, { redraw: true }) : useText(t.uses)) : null;
   if (writes) {
     const stop = t.status === "active" ? [h("button", { type: "button", class: "btn danger", onclick: () => act(() => api("POST", `/api/threads/${t.id}/stop`, {})) }, "停止")] : [];
-    const status = h("span", { class: "muted" }, t.status === "active" ? usage : `${usage} · ${STATUS[t.status]}`);
+    const status = h("span", { class: "muted usage" }, t.status === "active" ? usage : `${usage} · ${STATUS[t.status]}`, ran ? [" · ", ran] : null);
     ({ foot, take: drop } = writeBox({
       label: `发给${agentName(side === t.from ? t.to : t.from)}`,
       status,
@@ -1121,9 +1239,16 @@ function renderContact(id) {
 
 function renderMe(id) {
   if (!cloud) {
+    const ais = [...state.agents.values()].filter((a) => DOERS.has(a.client));
     return showMain(
       "这台电脑",
-      h("div", { class: "column" }, h("span", { class: "muted" }, "还没加入 Achat 账号"), h("pre", { class: "code-box" }, "achat link")),
+      h(
+        "div",
+        { class: "column" },
+        ais.length ? h("ul", { class: "panel-list" }, ...ais.map((a) => h("li", {}, clientAvatar(a.client, 34), h("span", { class: "grow" }, a.name), agentModelPicker(a.id)))) : null,
+        h("span", { class: "muted" }, "还没加入 Achat 账号"),
+        h("pre", { class: "code-box" }, "achat link"),
+      ),
       { back: "#/me" },
     );
   }
@@ -1150,7 +1275,7 @@ function renderMe(id) {
           "ul",
           { class: "panel-list" },
           ...(device.agents ?? device.ais.map((label) => ({ client: label === "Codex" ? "codex" : "claude" }))).map((a) =>
-            h("li", {}, clientAvatar(a.client, 34), h("span", { class: "grow" }, `我的 ${a.client === "codex" ? "Codex" : "Claude"}`), a.id ? sendLink(a) : null),
+            h("li", {}, clientAvatar(a.client, 34), h("span", { class: "grow" }, `我的 ${a.client === "codex" ? "Codex" : "Claude"}`), a.id ? agentModelPicker(a.id) : null, a.id ? sendLink(a) : null),
           ),
         ),
         error,
@@ -1952,7 +2077,7 @@ function pollConnect(offer, client, name) {
     }
     if (status.status === "connected") {
       stopPolling();
-      state.connected = { name };
+      state.connected = { name, client };
       location.hash = "#/start/done";
     } else if (status.status === "expired") {
       stopPolling();
@@ -1966,16 +2091,41 @@ function pollConnect(offer, client, name) {
 function renderConnected() {
   const name = state.connected?.name ?? "AI";
   const sentence = "我在 Achat 上能联系谁？";
+  const status = h("span", { class: "connected", role: "status" }, icon("check", 16, 2.4), cjk(name, "已连接"));
+  showModelOnceKnown(status, state.connected?.client);
   showPage(
     pageHead(3),
     [
-      h("span", { class: "connected", role: "status" }, icon("check", 16, 2.4), cjk(name, "已连接")),
+      status,
       h("h1", {}, cjk("在", name, "里说")),
       h("div", { class: "say" }, h("span", {}, sentence), copyButton(sentence, false)),
       h("div", { class: "buttons" }, h("a", { class: "btn primary", href: "#/start/invite" }, "下一步"), h("a", { class: "btn", href: "#/start" }, "再连接一个 AI")),
     ],
     { wide: true },
   );
+}
+
+// Claude Code and Codex say what they use a few seconds after Achat starts on
+// their computer; it is shown beside 已连接 once they have.
+function showModelOnceKnown(status, client) {
+  if (!DOERS.has(client)) return;
+  let tries = 0;
+  const look = async () => {
+    let agents;
+    try {
+      agents = await api("GET", "/api/agents");
+    } catch {
+      return;
+    }
+    state.agents = new Map(agents.map((a) => [a.id, a]));
+    const mine = agents.filter((a) => a.client === client && isMine(a.id) && a.models?.uses).at(-1);
+    if (!mine || status.querySelector(".model-pick") || !status.isConnected) return;
+    stopPolling();
+    status.append(h("span", { class: "muted", "aria-hidden": "true" }, "·"), agentModelPicker(mine.id));
+  };
+  stopPolling();
+  pollTimer = setInterval(() => (++tries > 30 || !status.isConnected ? stopPolling() : void look()), 2000);
+  void look();
 }
 
 function renderInviteStep() {

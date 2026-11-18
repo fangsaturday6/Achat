@@ -10,7 +10,8 @@ import { canDo, type AgentConfig } from "../config.js";
 import { cjk } from "../text.js";
 import { ownerOf, pendingMessage, requestReason, requestTitle, scopeLine, speaker, withFileNames } from "../asking.js";
 import { redact } from "../redact.js";
-import { markTaskSeen } from "../sidecar/tasks.js";
+import { markTaskSeen, TaskBook } from "../sidecar/tasks.js";
+import { EFFORT_LABELS, EFFORTS, resolveUse, useLine, type AgentModels, type Effort } from "../models.js";
 import { isTerminal, MODE_LABELS, personWaiting, STATUS_LABELS, type Message, type ThreadDetail } from "../types.js";
 
 export interface McpConnection {
@@ -27,8 +28,9 @@ export interface McpOptions {
   // Starts adding this computer to an account; see link_account. Without it
   // the tool is not offered (AIs that connect by address).
   link?: (server?: string) => Promise<DeviceLinkTicket>;
-  // Offer review_pending, which approves through a dialog. Off for AIs that
-  // connect by address: their credential cannot approve.
+  // Offer review_pending, which approves through a dialog, and set_model.
+  // Off for AIs that connect by address: their credential can neither
+  // approve nor change what the person's AIs on a computer run on.
   review?: boolean;
   // How long a tool call waits for the other side before handing back a
   // thread id to check later.
@@ -81,6 +83,18 @@ const NO_NEED_TO_WAIT =
 
 function money(n: number): string {
   return `$${n.toFixed(2)}`;
+}
+
+// "Opus 4.8 · 高" for what an answer ran on; "" when it does not say.
+function ranOn(m: Message): string {
+  if (!m.model) return "";
+  return m.effort ? useLine({ label: m.model, effort: m.effort }) : m.model;
+}
+
+// What one of the person's AIs uses, and whether that is its own default.
+function modelsLine(models: AgentModels): string {
+  const own = models.picked.model === null && models.picked.effort === null;
+  return `${useLine(resolveUse(models))}${own ? "（默认）" : ""}`;
 }
 
 export function createMcpServer(opts: McpOptions): McpServer {
@@ -163,7 +177,8 @@ export function createMcpServer(opts: McpOptions): McpServer {
     // An answer, and anything the other side added after it.
     const replies = detail.messages.filter((m) => m.seq > afterSeq && m.sender === detail.to);
     const ended = detail.messages.filter((m) => m.seq > afterSeq && m.kind === "system").at(-1);
-    const meta = threadMeta(detail);
+    const ran = replies.map(ranOn).filter(Boolean).at(-1);
+    const meta = `${threadMeta(detail)}${ran ? `，用 ${ran} 回答` : ""}`;
     if (replies.length) {
       const lines = [`${other}的回复（${meta}）：`, ""];
       for (const reply of replies) {
@@ -272,8 +287,12 @@ export function createMcpServer(opts: McpOptions): McpServer {
     },
     guard(async () => {
       const c = opts.connection();
-      const list = (await c.client.agents()).filter((a) => a.id !== c.agentId && a.canReceive !== false);
-      const lines = list.map((a) => `${a.name}（${a.id}）`);
+      const agents = await c.client.agents();
+      const list = agents.filter((a) => a.id !== c.agentId && a.canReceive !== false);
+      // The person's own AIs say what they answer with.
+      const lines = list.map((a) => `${a.name}（${a.id}）${a.models ? ` · ${modelsLine(a.models)}` : ""}`);
+      const self = agents.find((a) => a.id === c.agentId)?.models;
+      if (self) lines.push("", `别人问你时，你在后台用 ${modelsLine(self)}回答和动手。要换用 set_model。`);
       if (c.mode === "cloud") {
         const asking = (await c.client.newFriends()).filter((f) => f.direction === "in" && f.status === "pending");
         if (asking.length) {
@@ -351,7 +370,10 @@ export function createMcpServer(opts: McpOptions): McpServer {
       // like a background answer.
       const answering = (await c.client.getThread(thread_id)).to === c.agentId;
       const filtered = answering ? redact(message) : { text: message, count: 0 };
-      const posted = await c.client.postMessage(thread_id, { from: c.agentId, body: filtered.text, redactions: filtered.count, files: outgoing });
+      // A 动手 conversation hands back what it works with, which its record keeps.
+      const task = answering ? new TaskBook().get(thread_id) : null;
+      const ran = task?.model ? { model: task.model, ...(task.effort ? { effort: task.effort } : {}) } : {};
+      const posted = await c.client.postMessage(thread_id, { from: c.agentId, body: filtered.text, redactions: filtered.count, files: outgoing, ...ran });
       if (posted.to === c.agentId) {
         const afterSeq = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!.seq;
         if (posted.mode === "do" && posted.status === "active") {
@@ -386,12 +408,14 @@ export function createMcpServer(opts: McpOptions): McpServer {
       if (!thread_id) return text(await listRecent(c));
       const t = await c.client.getThread(thread_id);
       const spent = t.mode === "do" ? "" : `，已花费 ${money(t.costUsd)}`;
+      const uses = t.uses ? `，${await nameOf(c, t.to)}现在用 ${useLine(t.uses)}` : "";
       const lines = [
-        `协作 ${t.id}：${t.topic}（${MODE_LABELS[t.mode]}，${STATUS_LABELS[t.status]}，第 ${t.roundsUsed}/${t.scope.maxRounds} 轮${spent}）`,
+        `协作 ${t.id}：${t.topic}（${MODE_LABELS[t.mode]}，${STATUS_LABELS[t.status]}，第 ${t.roundsUsed}/${t.scope.maxRounds} 轮${spent}${uses}）`,
         "",
       ];
       for (const m of t.messages) {
-        lines.push(m.kind === "system" ? `— ${m.body}` : `${speaker(m, await nameOf(c, m.sender))}：${m.body}`, ...(await fileLines(c, m)));
+        const who = `${speaker(m, await nameOf(c, m.sender))}${ranOn(m) ? `（${ranOn(m)}）` : ""}`;
+        lines.push(m.kind === "system" ? `— ${m.body}` : `${who}：${m.body}`, ...(await fileLines(c, m)));
       }
       const next = nextStep(c, t, await nameOf(c, t.to));
       if (next) lines.push("", next);
@@ -450,6 +474,71 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
+  // The person's AIs on a computer; an AI that connects by address cannot.
+  if (opts.review !== false) {
+    server.registerTool(
+      "set_model",
+      {
+        title: "查看或更换模型",
+        description:
+          "查看或更换主人自己的 AI 在 Achat 里回答别人和动手时用的模型和推理档位（档位越低越快、越省）。" +
+          "model 和 effort 都不填，只列出现在用的和能选的。不填 thread_id，改的是这个 AI 以后的默认；" +
+          "填了 thread_id，只换别人问主人的 AI 的那一次协作，从下一次回答起生效，动手开始后就换不了。",
+        inputSchema: {
+          agent: z.string().optional().describe("主人自己的哪个 AI，id 或名字，例如“我的 Codex”；不填就是你自己"),
+          model: z.string().optional().describe("模型的 id 或名字，例如 opus、Sonnet、gpt-6.1-sol；填 default 跟着这个 AI 自己的默认"),
+          effort: z
+            .enum(["low", "medium", "high", "xhigh", "max", "ultra", "default"])
+            .optional()
+            .describe("推理档位：low 低、medium 中、high 高、xhigh 很高、max 最高、ultra 极限（只有部分 Codex 模型有）；default 跟着默认"),
+          thread_id: z.string().optional().describe("只换这一次协作用的"),
+        },
+      },
+      guard(async ({ agent, model, effort, thread_id }: { agent?: string; model?: string; effort?: Effort | "default"; thread_id?: string }) => {
+        const c = opts.connection();
+        const thread = thread_id ? await c.client.getThread(thread_id) : null;
+        const mine = (await c.client.agents()).filter((a) => a.models);
+        const key = agent ? normalize(agent) : null;
+        const target = key
+          ? (mine.find((a) => a.id.toLowerCase() === key || normalize(a.name) === key) ?? mine.find((a) => normalize(a.name).includes(key)))
+          : mine.find((a) => a.id === (thread?.to ?? c.agentId));
+        if (!target?.models) {
+          const named = mine.map((a) => a.name).join("、");
+          throw new Error(
+            named ? `找不到「${agent ?? "你自己"}」能用的模型。能换的有：${named}` : "主人的 AI 所在的电脑还没说能用哪些模型，等 Achat 在那台电脑上运行起来再试。",
+          );
+        }
+        if (thread && thread.to !== target.id) throw new Error(`协作 ${thread.id} 不是别人问${target.name}的，换不了它的模型`);
+        const models = target.models;
+        // A name people read, or an id.
+        const said = model?.trim();
+        const wanted =
+          said === undefined
+            ? undefined
+            : /^(default|默认)$/i.test(said)
+              ? "default"
+              : ([models.default, ...models.models].find((m) => m.id.toLowerCase() === said.toLowerCase() || normalize(m.label) === normalize(said))?.id ?? said);
+        if (wanted === undefined && effort === undefined) {
+          const now = thread?.uses ? useLine(thread.uses) : modelsLine(models);
+          return text(
+            [
+              `${target.name}${thread ? `在协作 ${thread.id} 里` : ""}现在用 ${now}。`,
+              `能选的模型：默认（${models.default.label}）、${models.models.map((m) => (m.label === m.id ? m.id : `${m.label}（${m.id}）`)).join("、")}`,
+              `推理档位：${EFFORTS.map((e) => `${e} ${EFFORT_LABELS[e]}`).join("、")}；模型没有的档位会换成最近的一档`,
+            ].join("\n"),
+          );
+        }
+        const pick = { ...(wanted !== undefined ? { model: wanted } : {}), ...(effort !== undefined ? { effort } : {}) };
+        if (thread) {
+          const after = await c.client.pickThreadModels(thread.id, pick);
+          return text(`协作 ${thread.id} 改成用 ${after.uses ? useLine(after.uses) : "默认"}，从下一次回答起生效。`);
+        }
+        const after = await c.client.pickModels(target.id, pick);
+        return text(`${target.name}改成用 ${modelsLine(after)}。以后别人问它、请它动手都用这个；某一次协作要另换，填 thread_id。`);
+      }),
+    );
+  }
+
   // Approving through a dialog; AIs connected by address approve on the web instead.
   if (opts.review !== false) {
     server.registerTool(
@@ -477,8 +566,12 @@ export function createMcpServer(opts: McpOptions): McpServer {
           const request = pendingMessage(t);
           const reason = requestReason(t);
           const doing = t.mode === "do";
-          // The person picks 问答 or 动手 whatever was judged, where this AI can 动手.
-          const doable = canDo((await client.agents()).find((a) => a.id === t.to)?.client);
+          // The person picks 问答 or 动手 whatever was judged, where this AI can 动手,
+          // and the model and 推理档位, once its computer said what it can use.
+          const asked = (await client.agents()).find((a) => a.id === t.to);
+          const doable = canDo(asked?.client);
+          const models = asked?.models && t.uses ? asked.models : null;
+          const choices = models ? [models.default, ...models.models] : [];
           const me = await nameOf(c, t.to);
           const rounds = { type: "integer", title: "最多轮数", minimum: 1, maximum: 20, default: t.scope.maxRounds } as const;
           const result = await server.server.elicitInput({
@@ -499,6 +592,24 @@ export function createMcpServer(opts: McpOptions): McpServer {
               type: "object",
               properties: {
                 ...(doable ? { mode: { type: "string", title: "做法", enum: ["do", "answer"], enumNames: ["动手", "问答"], default: t.mode } } : {}),
+                ...(models
+                  ? {
+                      model: {
+                        type: "string",
+                        title: "模型",
+                        enum: ["default", ...models.models.map((m) => m.id)],
+                        enumNames: [`默认（${models.default.label}）`, ...models.models.map((m) => m.label)],
+                        default: t.model ?? "default",
+                      },
+                      effort: {
+                        type: "string",
+                        title: "推理档位",
+                        enum: choices.find((m) => m.id === t.uses!.model)?.efforts ?? models.default.efforts,
+                        enumNames: (choices.find((m) => m.id === t.uses!.model)?.efforts ?? models.default.efforts).map((e) => EFFORT_LABELS[e]),
+                        default: t.uses!.effort,
+                      },
+                    }
+                  : {}),
                 maxRounds: rounds,
                 ...(doing
                   ? {}
@@ -508,10 +619,16 @@ export function createMcpServer(opts: McpOptions): McpServer {
           });
           if (result.action === "accept") {
             const c = result.content ?? {};
+            // A 推理档位 the newly picked model does not have is left to the nearest one.
+            const model = typeof c.model === "string" && c.model !== (t.model ?? "default") ? c.model : undefined;
+            const takes = choices.find((m) => m.id === (model === "default" ? models?.default.id : (model ?? t.uses?.model)))?.efforts ?? [];
+            const effort = typeof c.effort === "string" && c.effort !== t.uses?.effort && (takes as string[]).includes(c.effort) ? (c.effort as Effort) : undefined;
             await client.approve(t.id, {
               mode: c.mode === "answer" || c.mode === "do" ? c.mode : undefined,
               maxRounds: typeof c.maxRounds === "number" ? c.maxRounds : undefined,
               budgetUsd: typeof c.budgetUsd === "number" ? c.budgetUsd : undefined,
+              ...(model ? { model } : {}),
+              ...(effort ? { effort } : {}),
             });
             approved += 1;
           } else if (result.action === "decline") {

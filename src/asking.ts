@@ -1,3 +1,4 @@
+import { useLine, type ModelUse } from "./models.js";
 import { cjk } from "./text.js";
 import { MODE_LABELS, type Message, type Thread, type ThreadDetail } from "./types.js";
 
@@ -38,9 +39,10 @@ export function pendingMessage(t: ThreadDetail): Message | undefined {
 }
 
 // 问答 · 5 轮 · $5.00, or 动手 · 5 轮: 动手 runs on the person's Claude
-// subscription and has no dollar figure.
-export function scopeLine(t: Thread): string {
-  const rounds = `${MODE_LABELS[t.mode]} · ${t.scope.maxRounds} 轮`;
+// subscription and has no dollar figure. The model comes first once the
+// asked AI's computer said what it uses: Opus 4.8 · 中 · 问答 · 5 轮 · $5.00.
+export function scopeLine(t: Thread & { uses?: ModelUse | null }): string {
+  const rounds = `${t.uses ? `${useLine(t.uses)} · ` : ""}${MODE_LABELS[t.mode]} · ${t.scope.maxRounds} 轮`;
   return t.mode === "do" ? rounds : `${rounds} · $${t.scope.budgetUsd.toFixed(2)}`;
 }
 

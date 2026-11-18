@@ -1,3 +1,5 @@
+import type { Effort, ModelUse } from "./models.js";
+
 // The same status words are shown in the web UI, returned by the relay API
 // and reported by the MCP tools, so people and agents describe a thread the
 // same way.
@@ -55,6 +57,10 @@ export interface Thread {
   // A quiet request is kept on the web page only and never surfaces in the
   // receiver's AI session (rate limit per contact per day).
   quiet: boolean;
+  // The model and 推理档位 the asked side's person picked for this
+  // conversation; null: what they picked for the AI, or its own default.
+  model: string | null;
+  effort: Effort | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -80,6 +86,9 @@ export interface Message {
   toPerson: boolean;
   // Pictures and other files sent with it; the bytes are fetched one by one.
   files: Attachment[];
+  // For what the asked AI wrote: the model ("Opus 4.8") and 推理档位 it ran on.
+  model: string | null;
+  effort: Effort | null;
   createdAt: string;
 }
 
@@ -92,6 +101,9 @@ export interface Attachment {
 
 export interface ThreadDetail extends Thread {
   messages: Message[];
+  // What the asked AI answers and works with now; null while its computer
+  // has not said what it can use.
+  uses: ModelUse | null;
 }
 
 export interface ThreadSummary extends Thread {

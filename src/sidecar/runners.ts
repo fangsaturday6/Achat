@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { secretStore } from "../device.js";
+import { claudeLabel, type Effort } from "../models.js";
 import type { ThreadMode } from "../types.js";
 import { codexCommand } from "../which.js";
 import { historyFor } from "./history.js";
@@ -17,12 +18,17 @@ export interface RunInput {
   // A thread id: it reads only the conversations that mention it, in a folder
   // of their own, instead of the whole history.
   only?: string;
+  // The model and 推理档位 to run on; the CLI's own when absent.
+  model?: string;
+  effort?: Effort;
 }
 
 export interface RunOutput {
   text: string;
   sessionId: string;
   costUsd: number;
+  // The model that answered, as people call it ("Opus 4.8"), when the CLI says.
+  model?: string;
 }
 
 // What the asked computer reads to tell 问答 from 动手.
@@ -128,6 +134,18 @@ interface ClaudeJsonResult {
   total_cost_usd?: number;
   is_error?: boolean;
   subtype?: string;
+  // Per model the run used; the one that wrote the most wrote the answer.
+  modelUsage?: Record<string, { outputTokens?: number }>;
+}
+
+function answeredBy(parsed: ClaudeJsonResult): string | undefined {
+  const used = Object.entries(parsed.modelUsage ?? {}).sort((a, b) => (b[1]?.outputTokens ?? 0) - (a[1]?.outputTokens ?? 0));
+  return used[0] ? claudeLabel(used[0][0]) : undefined;
+}
+
+// --model and --effort for claude, when given.
+export function claudeModelArgs(input: { model?: string; effort?: Effort }): string[] {
+  return [...(input.model ? ["--model", input.model] : []), ...(input.effort ? ["--effort", input.effort] : [])];
 }
 
 // Tells 问答 from 动手 by reading the asker's words with nothing else: no
@@ -168,10 +186,12 @@ export class ClaudeRunner implements AgentRunner {
       Math.max(0.01, input.budgetUsd).toFixed(2),
       "--append-system-prompt",
       input.systemPrompt,
+      ...claudeModelArgs(input),
       ...(input.sessionId ? ["--resume", input.sessionId] : ["--session-id", sessionId]),
     ];
     const parsed = await this.claude(args, dir, input.prompt, this.timeoutMs);
-    return { text: parsed.result, sessionId: parsed.session_id ?? sessionId, costUsd: parsed.total_cost_usd ?? 0 };
+    const model = answeredBy(parsed);
+    return { text: parsed.result, sessionId: parsed.session_id ?? sessionId, costUsd: parsed.total_cost_usd ?? 0, ...(model ? { model } : {}) };
   }
 
   async judge(input: JudgeInput): Promise<ThreadMode> {
@@ -255,9 +275,10 @@ export class CodexRunner implements AgentRunner {
     const history = historyFor("codex");
     await history.refresh();
     const dir = input.only ? history.about(input.only) : history.dir;
+    const chosen = codexModelArgs(input);
     const args = input.sessionId
-      ? ["exec", "resume", ...CODEX_QUIET, input.sessionId, "-"]
-      : ["exec", ...CODEX_QUIET, "-c", `developer_instructions=${JSON.stringify(input.systemPrompt)}`, "-"];
+      ? ["exec", "resume", ...CODEX_QUIET, ...chosen, input.sessionId, "-"]
+      : ["exec", ...CODEX_QUIET, ...chosen, "-c", `developer_instructions=${JSON.stringify(input.systemPrompt)}`, "-"];
     const { text, sessionId } = await this.codex(args, dir, input.prompt, this.timeoutMs, input.sessionId);
     return { text, sessionId, costUsd: 0 };
   }
@@ -299,6 +320,11 @@ export class CodexRunner implements AgentRunner {
     }
     return { text, sessionId };
   }
+}
+
+// -m and the 推理档位 for codex, when given.
+export function codexModelArgs(input: { model?: string; effort?: Effort }): string[] {
+  return [...(input.model ? ["-m", input.model] : []), ...(input.effort ? ["-c", `model_reasoning_effort="${input.effort}"`] : [])];
 }
 
 // `codex exec` without the person's config.toml (no MCP servers, Achat

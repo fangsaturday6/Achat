@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { FILES_BODY_LIMIT, SHOWN_TYPES, type NewFile } from "../attachments.js";
 import type { AgentConfig } from "../config.js";
+import { isEffort } from "../models.js";
 import type { Thread, ThreadMode, ThreadStatus } from "../types.js";
 import { optNum, readJson, send, str } from "./http.js";
 import { RelayError, type RelayService } from "./service.js";
@@ -59,7 +60,12 @@ function filesOf(body: Record<string, unknown>): NewFile[] {
   });
 }
 
-// Handles /api/agents, /api/events, /api/threads/* and /api/files/*;
+// A pick as sent; the service checks it against what the AI can use.
+function pickOf(body: Record<string, unknown>): { model?: unknown; effort?: unknown } {
+  return { ...(body.model !== undefined ? { model: body.model } : {}), ...(body.effort !== undefined ? { effort: body.effort } : {}) };
+}
+
+// Handles /api/agents/*, /api/events, /api/threads/* and /api/files/*;
 // returns false for other paths.
 export async function threadsApi(
   req: IncomingMessage,
@@ -71,8 +77,31 @@ export async function threadsApi(
   const method = req.method ?? "GET";
   const parts = url.pathname.split("/").filter(Boolean).slice(1); // drop "api"
 
+  // The caller's own AIs come with the models they can use and use now.
   if (method === "GET" && parts[0] === "agents" && parts.length === 1) {
-    send(res, 200, viewer.agents());
+    send(
+      res,
+      200,
+      viewer.agents().map((a) => {
+        const models = viewer.sees(a.id) ? service.models(a.id) : null;
+        return models ? { ...a, models } : a;
+      }),
+    );
+    return true;
+  }
+
+  // An AI's computer says what it can use; its person, or one of their AIs,
+  // picks what it uses.
+  if (method === "POST" && parts[0] === "agents" && parts.length === 3 && (parts[2] === "offer" || parts[2] === "models")) {
+    const agent = decodeURIComponent(parts[1]);
+    const body = await readJson(req);
+    if (parts[2] === "offer") {
+      if (!viewer.actsAs(agent)) throw new RelayError(403, "只有这个 AI 所在的电脑可以报它能用的模型");
+      send(res, 200, service.reportModels(agent, body));
+      return true;
+    }
+    if (!viewer.sees(agent) || (!viewer.approves && !viewer.actsAs(agent))) throw new RelayError(403, "只能换自己的 AI 用的模型");
+    send(res, 200, service.pickModels(agent, pickOf(body)));
     return true;
   }
 
@@ -189,7 +218,11 @@ export async function threadsApi(
   switch (action) {
     case "approve":
       if (!viewer.approves || !viewer.sees(thread.to)) forbid("只有接收方的主人可以批准");
-      send(res, 200, service.approve(id, { maxRounds: optNum(body, "maxRounds"), budgetUsd: optNum(body, "budgetUsd"), mode: modeOf(body) }));
+      send(res, 200, service.approve(id, { maxRounds: optNum(body, "maxRounds"), budgetUsd: optNum(body, "budgetUsd"), mode: modeOf(body), ...pickOf(body) }));
+      return true;
+    case "model":
+      if (!viewer.approves || !viewer.sees(thread.to)) forbid("只有接收方的主人可以换这次对话用的模型");
+      send(res, 200, service.pickThreadModels(id, pickOf(body)));
       return true;
     case "read":
       if (!viewer.approves) forbid("只有人可以标记已读");
@@ -258,6 +291,8 @@ export async function threadsApi(
           byPerson,
           reply: body.reply === true,
           files: filesOf(body),
+          model: typeof body.model === "string" ? body.model : undefined,
+          effort: isEffort(body.effort) ? body.effort : undefined,
         }),
       );
       return true;

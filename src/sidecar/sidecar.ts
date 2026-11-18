@@ -3,6 +3,7 @@ import { filesDir, saveAllFiles, savedLines } from "../attachments.js";
 import { ownerOf, pendingMessage, requestReason, requestTitle, scopeLine, speaker, withFileNames } from "../asking.js";
 import { RelayClientError, type RelayClient } from "../client.js";
 import type { AgentClient, AgentConfig } from "../config.js";
+import { NO_PICK, resolveUse, type ModelOffer, type ModelUse } from "../models.js";
 import { redact } from "../redact.js";
 import { cjk } from "../text.js";
 import { MIN_ROUND_BUDGET_USD } from "../relay/service.js";
@@ -49,6 +50,9 @@ export interface SidecarOptions {
   ask?: Asker;
   // Tells the person something they must do on this computer, such as log in again.
   alert?: Alerter;
+  // Finds out what each AI here can use and is set to use, keyed by agent id;
+  // the relay is told on start and every half hour.
+  offers?: Record<string, () => Promise<ModelOffer | null>>;
   notify: Notifier;
   // How often a thread waiting for a login tries again.
   loginRetryMs?: number;
@@ -60,6 +64,10 @@ export interface SidecarOptions {
   webUrl: string;
   log?: (line: string) => void;
 }
+
+// How often what the AIs here can use is looked at again: the person may
+// have picked another default in Claude Code or Codex meanwhile.
+const OFFERS_EVERY_MS = 30 * 60 * 1000;
 
 // Only AIs that run on a computer answer, so the owner is Claude or Codex.
 // The history is a plain copy, one .md per conversation, whose first lines
@@ -261,6 +269,8 @@ export class Sidecar {
   // Threads where the other side's person is being answered in the background.
   private replying = new Set<string>();
   private owner: string | null = null;
+  // What each AI here can use, as found on this computer.
+  private offers = new Map<string, ModelOffer>();
 
   constructor(private opts: SidecarOptions) {
     this.tasks = opts.tasks ?? new TaskBook();
@@ -294,6 +304,47 @@ export class Sidecar {
       (e) => this.onEvent(e),
       () => void this.recover(),
     );
+    void this.reportOffers();
+  }
+
+  // Tells the relay what each AI here can use and is set to use, then again
+  // every half hour. An Achat service from before models only stops it.
+  private async reportOffers(): Promise<void> {
+    for (const [agent, find] of Object.entries(this.opts.offers ?? {})) {
+      try {
+        const offer = await find();
+        if (!offer || this.stopping.signal.aborted) continue;
+        this.offers.set(agent, offer);
+        await this.relay.reportModels(agent, offer);
+      } catch (err) {
+        if (this.stopping.signal.aborted) return;
+        if (err instanceof RelayClientError && err.status === 404) return;
+        this.log(`${agent} 能用的模型没有报上：${(err as Error).message}`);
+      }
+    }
+    if (this.stopping.signal.aborted || !this.opts.offers) return;
+    const timer = setTimeout(() => {
+      this.timers.delete(timer);
+      void this.reportOffers();
+    }, OFFERS_EVERY_MS);
+    this.timers.add(timer);
+  }
+
+  // What an AI here answers a conversation with: what the relay worked out,
+  // or, from a relay that does not know yet, the AI's own default.
+  private useFor(thread: ThreadDetail): ModelUse | null {
+    if (thread.uses) return thread.uses;
+    const offer = this.offers.get(thread.to);
+    return offer ? resolveUse({ ...offer, picked: NO_PICK }) : null;
+  }
+
+  // What the AI here that asked uses for answering on its own: what its
+  // person picked for it, or its own default.
+  private async ownUse(agent: string): Promise<ModelUse | null> {
+    const models = (await this.relay.agents().catch(() => [])).find((a) => a.id === agent)?.models;
+    if (models) return resolveUse(models);
+    const offer = this.offers.get(agent);
+    return offer ? resolveUse({ ...offer, picked: NO_PICK }) : null;
   }
 
   stop(): void {
@@ -404,7 +455,9 @@ export class Sidecar {
         names.set(id, (await this.agent(id))?.name ?? id);
       }
       const saved = await saveAllFiles(this.relay, t.messages.filter((m) => m.seq <= question.seq));
+      const use = await this.ownUse(t.from);
       const out = await runner.run({
+        ...(use ? { model: use.model, effort: use.effort } : {}),
         prompt: replyPrompt(t, (id) => (id ? (names.get(id) ?? id) : ""), question, saved),
         systemPrompt: replySystemPrompt(me, await this.ownerName(), question.byPerson ? `对方的主人${who}本人` : `对方的 AI「${who}」`),
         budgetUsd: REPLY_USD,
@@ -617,7 +670,9 @@ export class Sidecar {
     // Files that come later are kept in the same folder, which it may read.
     mkdirSync(filesDir(thread.id), { recursive: true, mode: 0o700 });
     const saved = await saveAllFiles(this.relay, thread.messages.filter((m) => m.seq > since));
+    const use = this.useFor(thread);
     const rec = await opener.open({
+      ...(use ? { model: use.model, label: use.label, effort: use.effort } : {}),
       threadId: thread.id,
       topic: thread.topic,
       prompt: doerPrompt(thread, names, since, saved),
@@ -675,8 +730,10 @@ export class Sidecar {
       // A new session is told where the earlier files are too.
       const saved = await saveAllFiles(this.relay, thread.messages.filter((m) => m.seq <= last.seq));
       const asked = thread;
+      const use = this.useFor(thread);
       const run = (session: string | null): Promise<RunOutput> =>
         runner.run({
+          ...(use ? { model: use.model, effort: use.effort } : {}),
           prompt: responderPrompt(asked, last, from, session !== null, saved),
           systemPrompt: responderSystemPrompt(owner, from),
           sessionId: session ?? undefined,
@@ -705,6 +762,8 @@ export class Sidecar {
           costUsd: out.costUsd,
           redactions: filtered.count,
           sessionId: out.sessionId,
+          ...(out.model || use ? { model: out.model ?? use!.label } : {}),
+          ...(use ? { effort: use.effort } : {}),
         })
         .catch((err: unknown) => {
           // It already arrived and only the reply was lost, or the thread ended

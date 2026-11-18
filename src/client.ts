@@ -2,7 +2,14 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { OutgoingFile } from "./attachments.js";
 import type { AgentClient, AgentConfig } from "./config.js";
 import { signRequest, type DeviceKey } from "./device.js";
+import type { AgentModels, Effort, ModelOffer } from "./models.js";
 import type { RelayEvent, Scope, ThreadDetail, ThreadMode, ThreadStatus, ThreadSummary } from "./types.js";
+
+// A pick as sent: a model's id or 推理档位, or "default" for the next one down.
+export interface PickBody {
+  model: string | null;
+  effort: Effort | "default" | null;
+}
 
 export class RelayClientError extends Error {
   constructor(
@@ -272,8 +279,23 @@ export class RelayClient {
     return this.call("GET", `/api/files/${encodeURIComponent(id)}`, undefined, undefined, true);
   }
 
-  approve(id: string, scope: Partial<Scope> & { mode?: ThreadMode } = {}): Promise<ThreadDetail> {
+  approve(id: string, scope: Partial<Scope> & { mode?: ThreadMode } & Partial<PickBody> = {}): Promise<ThreadDetail> {
     return this.call("POST", `/api/threads/${encodeURIComponent(id)}/approve`, scope);
+  }
+
+  // What this computer's AI can use and is set to use.
+  reportModels(agent: string, offer: ModelOffer): Promise<AgentModels> {
+    return this.call("POST", `/api/agents/${encodeURIComponent(agent)}/offer`, offer);
+  }
+
+  // The model and 推理档位 one of the person's AIs uses; "default" for its own.
+  pickModels(agent: string, pick: Partial<PickBody>): Promise<AgentModels> {
+    return this.call("POST", `/api/agents/${encodeURIComponent(agent)}/models`, pick);
+  }
+
+  // The same for one conversation, by the asked side.
+  pickThreadModels(id: string, pick: Partial<PickBody>): Promise<ThreadDetail> {
+    return this.call("POST", `/api/threads/${encodeURIComponent(id)}/model`, pick);
   }
 
   decline(id: string): Promise<ThreadDetail> {
@@ -332,6 +354,9 @@ export class RelayClient {
       // Answering in the background what the other side said on its own.
       reply?: boolean;
       files?: OutgoingFile[];
+      // What the answer ran on.
+      model?: string;
+      effort?: Effort;
     },
   ): Promise<ThreadDetail> {
     return this.call("POST", `/api/threads/${encodeURIComponent(id)}/messages`, input);

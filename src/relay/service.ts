@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { cleanName, filesProblem, typeOf, type NewFile } from "../attachments.js";
 import { canDo, type AchatConfig, type AgentConfig } from "../config.js";
+import { choiceOf, EFFORT_LABELS, isEffort, readOffer, resolveUse, useLine, type AgentModels, type Effort, type ModelPick, type ModelUse } from "../models.js";
 import {
   isTerminal,
   latestAnswer,
@@ -58,6 +59,13 @@ function checkMode(mode: unknown): ThreadMode | undefined {
   return mode;
 }
 
+// A pick as sent: a model's id, or "default" (or null) for the next one down;
+// absent leaves it as it is.
+export interface PickInput {
+  model?: unknown;
+  effort?: unknown;
+}
+
 export interface CreateRequestInput {
   from: string;
   to: string;
@@ -91,6 +99,15 @@ export interface PostMessageInput {
   // said on its own: it wakes no AI and is not a round.
   reply?: boolean;
   files?: NewFile[];
+  // What the asked AI ran on, for its answer: "Opus 4.8" and its 推理档位.
+  model?: string;
+  effort?: Effort;
+}
+
+// What the asked AI says it ran on, kept with its answer when it makes sense.
+function ranOn(input: PostMessageInput): { model?: string; effort?: Effort } {
+  const model = typeof input.model === "string" && input.model.trim() && input.model.length <= 80 ? input.model.trim() : undefined;
+  return { ...(model ? { model } : {}), ...(isEffort(input.effort) ? { effort: input.effort } : {}) };
 }
 
 // Owns the thread state machine. Every state change goes through here so the
@@ -179,9 +196,92 @@ export class RelayService {
     return this.store.file(id);
   }
 
+  // What an AI can use and what its person picked; null before its computer said.
+  models(agent: string): AgentModels | null {
+    const found = this.store.agentModels(agent);
+    if (!found) return null;
+    const models = { ...found.offer, picked: found.picked };
+    return { ...models, uses: resolveUse(models) };
+  }
+
+  // An AI's computer says what the AI can use and is set to use.
+  reportModels(agent: string, raw: unknown): AgentModels {
+    this.requireAgent(agent);
+    const offer = readOffer(raw);
+    if (!offer) throw new RelayError(400, "模型清单的格式不对");
+    this.store.saveOffer(agent, offer, this.stamp());
+    return this.models(agent)!;
+  }
+
+  // The model and 推理档位 an AI answers and works with from now on.
+  pickModels(agent: string, input: PickInput): AgentModels {
+    const models = this.requireModels(agent);
+    this.store.savePick(agent, this.checkPick(models, models.picked, input, null), this.stamp());
+    return this.models(agent)!;
+  }
+
+  private requireModels(agent: string): AgentModels {
+    const models = this.models(agent);
+    if (!models) throw new RelayError(409, `${this.agentName(agent)}的电脑还没说能用哪些模型，等它连上 Achat 再试`);
+    return models;
+  }
+
+  // `input` on top of `current`, as long as the AI can use it. `below`: the
+  // model used when the pick has none (the AI's pick, for a conversation).
+  private checkPick(models: AgentModels, current: ModelPick, input: PickInput, below: string | null): ModelPick {
+    const none = (v: unknown) => v === null || v === "default";
+    let model = current.model;
+    if (input.model !== undefined) {
+      if (none(input.model)) model = null;
+      else if (typeof input.model === "string" && choiceOf(models, input.model).id === input.model) model = input.model;
+      else throw new RelayError(400, `没有这个模型：${String(input.model)}。可以用的有：${[models.default, ...models.models].map((m) => m.id).join("、")}`);
+    }
+    let effort = current.effort;
+    if (input.effort !== undefined) {
+      if (none(input.effort)) effort = null;
+      else if (isEffort(input.effort)) effort = input.effort;
+      else throw new RelayError(400, `推理档位只能是 ${Object.keys(EFFORT_LABELS).join("、")} 之一`);
+      const choice = choiceOf(models, model ?? below);
+      if (effort && choice.efforts.length && !choice.efforts.includes(effort)) {
+        throw new RelayError(400, `${choice.label}没有「${EFFORT_LABELS[effort]}」这一档，可以选：${choice.efforts.map((e) => EFFORT_LABELS[e]).join("、")}`);
+      }
+    }
+    return { model, effort };
+  }
+
+  // What the asked AI answers this conversation with now.
+  private uses(t: Thread): ModelUse | null {
+    const models = this.models(t.to);
+    return models ? resolveUse(models, { model: t.model ?? null, effort: t.effort ?? null }) : null;
+  }
+
+  // The asked side's person picks a model for this conversation: before they
+  // approve it, or in a 问答 under way, from the next answer on. A 动手 that
+  // started works in its own window, where the person changes it.
+  pickThreadModels(id: string, input: PickInput): ThreadDetail {
+    const thread = this.requireThread(id);
+    if (thread.status !== "pending" && thread.status !== "active") throw new RelayError(409, "这次协作已经结束了");
+    if (thread.status === "active" && thread.mode === "do") throw new RelayError(409, "动手已经开始，模型要在动手的窗口里换");
+    const models = this.requireModels(thread.to);
+    const pick = this.checkPick(models, { model: thread.model, effort: thread.effort }, input, models.picked.model);
+    const before = this.uses(thread);
+    const now = this.stamp();
+    const updated = this.store.transaction(() => {
+      const t = this.store.updateThread(id, { model: pick.model, effort: pick.effort }, now);
+      const after = this.uses(t)!;
+      if (t.status === "active" && (after.model !== before?.model || after.effort !== before?.effort)) {
+        this.store.addMessage(id, { sender: null, kind: "system", body: `换成 ${useLine(after)}` }, now);
+      }
+      return t;
+    });
+    // Before approval nothing else changes; the person goes on deciding.
+    if (updated.status === "active") this.emit("thread.updated", updated);
+    return this.getThread(id);
+  }
+
   getThread(id: string): ThreadDetail {
     const thread = this.requireThread(id);
-    return { ...thread, messages: this.store.messages(id) };
+    return { ...thread, messages: this.store.messages(id), uses: this.uses(thread) };
   }
 
   listThreads(filter: {
@@ -264,18 +364,18 @@ export class RelayService {
         { sender: input.from, kind: "request", body: message, byPerson: this.byPerson(input.from, input.byPerson), files },
         now,
       );
-      if (!opts.autoApprove) return { ...thread, messages: [msg] };
+      if (!opts.autoApprove) return { ...thread, messages: [msg], uses: this.uses(thread) };
       const started = this.store.updateThread(thread.id, { status: "active" }, now);
       const note = this.store.addMessage(
         thread.id,
         {
           sender: null,
           kind: "system",
-          body: `${this.agents.get(input.from)?.client === "person" ? "问自己的 AI" : "同一个人的 AI"}，自动接待 · ${this.scopeNote(started.scope, mode)}`,
+          body: `${this.agents.get(input.from)?.client === "person" ? "问自己的 AI" : "同一个人的 AI"}，自动接待 · ${this.scopeNote(started.scope, mode, this.uses(started))}`,
         },
         now,
       );
-      return { ...started, messages: [msg, note] };
+      return { ...started, messages: [msg, note], uses: this.uses(started) };
     });
     this.emit("thread.created", detail);
     return detail;
@@ -283,23 +383,30 @@ export class RelayService {
 
   // The person has the last word on 问答 or 动手, whatever was judged; only
   // Claude can 动手. Approving a 动手 asked for mid-thread starts the rounds over.
-  approve(id: string, scope?: Partial<Scope> & { mode?: ThreadMode }): ThreadDetail {
+  approve(id: string, scope?: Partial<Scope> & { mode?: ThreadMode } & PickInput): ThreadDetail {
     const thread = this.requireThread(id);
     if (thread.status !== "pending") throw new RelayError(409, "这次协作已经处理过了");
     const finalScope = clampScope(scope, thread.scope);
     const mode = checkMode(scope?.mode) ?? thread.mode;
     if (mode === "do" && thread.mode !== "do") this.requireDoer(thread.to);
+    // The model is picked in the same go, when the AI's computer said what it can use.
+    const models = scope?.model !== undefined || scope?.effort !== undefined ? this.requireModels(thread.to) : null;
+    const pick = models ? this.checkPick(models, { model: thread.model, effort: thread.effort }, scope!, models.picked.model) : { model: thread.model, effort: thread.effort };
     const now = this.stamp();
     const updated = this.store.transaction(() => {
       // A request inside the thread is a new allowance: rounds and money start over.
       const restart = thread.prior ? { roundsUsed: 0, costUsd: 0 } : {};
-      const t = this.store.updateThread(id, { status: "active", mode, scope: finalScope, prior: null, reminded: false, ...restart }, now);
+      const t = this.store.updateThread(
+        id,
+        { status: "active", mode, scope: finalScope, prior: null, reminded: false, model: pick.model, effort: pick.effort, ...restart },
+        now,
+      );
       this.store.addMessage(
         id,
         {
           sender: null,
           kind: "system",
-          body: `已同意：${this.scopeNote(finalScope, mode)}`,
+          body: `已同意：${this.scopeNote(finalScope, mode, this.uses(t))}`,
         },
         now,
       );
@@ -346,8 +453,9 @@ export class RelayService {
   }
 
   // 动手 runs on the person's Claude subscription, so it has no dollar figure.
-  private scopeNote(scope: Scope, mode: ThreadMode): string {
-    const rounds = `${MODE_LABELS[mode]} · ${scope.maxRounds} 轮`;
+  // The model comes first when the AI's computer said what it uses.
+  private scopeNote(scope: Scope, mode: ThreadMode, use?: ModelUse | null): string {
+    const rounds = `${use ? `${useLine(use)} · ` : ""}${MODE_LABELS[mode]} · ${scope.maxRounds} 轮`;
     return mode === "do" ? rounds : `${rounds} · $${scope.budgetUsd.toFixed(2)}`;
   }
 
@@ -532,6 +640,7 @@ export class RelayService {
           byPerson: personSays,
           toPerson,
           files,
+          ...(fromResponder && !personSays ? ranOn(input) : {}),
         },
         now,
       );

@@ -4,7 +4,9 @@ import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { achatHome } from "../config.js";
+import { isEffort, type Effort } from "../models.js";
 import { codexCommand, onPath } from "../which.js";
+import { claudeModelArgs, codexModelArgs } from "./runners.js";
 
 // 动手: the receiving person's Claude Code or Codex does the work in a
 // conversation of its own, which the person can watch and step into. These records say which
@@ -16,6 +18,10 @@ import { codexCommand, onPath } from "../which.js";
 export interface TaskRecord {
   sessionId: string;
   dir: string;
+  // What it works with: the model as people call it, and the 推理档位. Kept
+  // with what it hands back.
+  model?: string;
+  effort?: Effort;
 }
 
 export class TaskBook {
@@ -28,7 +34,13 @@ export class TaskBook {
   get(threadId: string): TaskRecord | null {
     try {
       const rec = JSON.parse(readFileSync(this.file(threadId, "json"), "utf8")) as Partial<TaskRecord>;
-      return typeof rec.sessionId === "string" && typeof rec.dir === "string" ? { sessionId: rec.sessionId, dir: rec.dir } : null;
+      if (typeof rec.sessionId !== "string" || typeof rec.dir !== "string") return null;
+      return {
+        sessionId: rec.sessionId,
+        dir: rec.dir,
+        ...(typeof rec.model === "string" ? { model: rec.model } : {}),
+        ...(isEffort(rec.effort) ? { effort: rec.effort } : {}),
+      };
     } catch {
       return null;
     }
@@ -77,6 +89,16 @@ export interface TaskStart {
   readDirs?: string[];
   // Between one person's own AIs: Codex's commands may then go online.
   own?: boolean;
+  // The model and 推理档位 to work with: the id the CLI takes, and the name
+  // people read, kept in the record.
+  model?: string;
+  label?: string;
+  effort?: Effort;
+}
+
+// What a task's record keeps of what it works with.
+export function workingWith(start: TaskStart): Pick<TaskRecord, "model" | "effort"> {
+  return { ...(start.label ? { model: start.label } : {}), ...(start.effort ? { effort: start.effort } : {}) };
 }
 
 // Opens a Claude Code or Codex conversation for a task; resolves once it is started.
@@ -115,6 +137,7 @@ export function claudeTaskArgs(start: TaskStart): string[] {
     ...(start.readDirs?.length ? ["--add-dir", ...start.readDirs] : []),
     "--permission-mode",
     "acceptEdits",
+    ...claudeModelArgs(start),
     "--append-system-prompt",
     start.systemPrompt,
     start.prompt,
@@ -148,7 +171,7 @@ export class ClaudeTaskOpener implements TaskOpener {
     if (!id) throw new Error(`打不开动手的对话：${output.trim().split("\n").at(-1) || "claude --bg 没有给出会话"}`);
     const sessionId = await fullSessionId(claude, id, dir);
     await showWindow(this.scripts, `${safe(start.threadId)}-${id}`, dir, [`exec ${[claude, "attach", id].map(shellQuote).join(" ")}`]);
-    return { sessionId, dir };
+    return { sessionId, dir, ...workingWith(start) };
   }
 }
 
@@ -169,6 +192,7 @@ export function codexTaskArgs(start: TaskStart): string[] {
     'sandbox_mode="workspace-write"',
     "-c",
     `sandbox_workspace_write.network_access=${start.own === true}`,
+    ...codexModelArgs(start),
     ...CODEX_HAND_BACK.flatMap((tool) => ["-c", `mcp_servers.achat.tools.${tool}.approval_mode="approve"`]),
   ];
   return start.from
@@ -238,7 +262,7 @@ export class CodexTaskOpener implements TaskOpener {
       const hint = `关掉窗口不影响干活。要插话：在这个文件夹里运行 codex resume ${sessionId}`;
       await showWindow(this.scripts, name, dir, [`echo ${shellQuote(hint)}`, `exec tail -n +1 -f ${shellQuote(log)}`]);
     }
-    return { sessionId, dir };
+    return { sessionId, dir, ...workingWith(start) };
   }
 }
 

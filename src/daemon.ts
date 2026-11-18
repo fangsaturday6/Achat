@@ -8,6 +8,8 @@ import { checkLink } from "./link.js";
 import { startRelay } from "./relay/server.js";
 import { desktopAlert, desktopAsk, type Asker } from "./sidecar/dialog.js";
 import { historyFor } from "./sidecar/history.js";
+import { claudeOffer, codexOffer } from "./sidecar/models.js";
+import type { ModelOffer } from "./models.js";
 import { desktopNotify } from "./sidecar/notify.js";
 import { ClaudeRunner, CodexRunner, type AgentRunner } from "./sidecar/runners.js";
 import { ClaudeTaskOpener, CodexTaskOpener, type TaskOpener } from "./sidecar/tasks.js";
@@ -105,6 +107,11 @@ function prepareHistory(cfg: AchatConfig): void {
   }
 }
 
+// What Claude Code and Codex here can use and are set to use.
+function offersFor(cfg: AchatConfig, idOf: (a: AchatConfig["agents"][number]) => string): Record<string, () => Promise<ModelOffer | null>> {
+  return Object.fromEntries(cfg.agents.map((a) => [idOf(a), a.client === "claude" ? () => claudeOffer() : async () => codexOffer()]));
+}
+
 // Claude Code and Codex each open a conversation of their own to 动手.
 function doersFor(cfg: AchatConfig, idOf: (a: AchatConfig["agents"][number]) => string): Record<string, TaskOpener> {
   return Object.fromEntries(cfg.agents.map((a) => [idOf(a), a.client === "claude" ? new ClaudeTaskOpener() : new CodexTaskOpener()]));
@@ -161,6 +168,7 @@ async function startLocal(cfg: AchatConfig, webDir: string, wait: boolean): Prom
     agents: cfg.agents,
     runners,
     doers: doersFor(cfg, (a) => a.id),
+    offers: offersFor(cfg, (a) => a.id),
     ask,
     alert: desktopAlert,
     notify: desktopNotify,
@@ -183,7 +191,8 @@ async function startCloudMode(cfg: AchatConfig, conn: Connection, wait: boolean)
   const deviceId = conn.deviceId!;
   const runners = Object.fromEntries(cfg.agents.map((a) => [agentIdFor(deviceId, a.client), runnerFor(a.client)]));
   const doers = doersFor(cfg, (a) => agentIdFor(deviceId, a.client));
-  const sidecar = new Sidecar({ client: conn.client, agents: [], runners, doers, ask, alert: desktopAlert, notify: desktopNotify, webUrl: conn.webUrl });
+  const offers = offersFor(cfg, (a) => agentIdFor(deviceId, a.client));
+  const sidecar = new Sidecar({ client: conn.client, agents: [], runners, doers, offers, ask, alert: desktopAlert, notify: desktopNotify, webUrl: conn.webUrl });
   sidecar.start();
   console.log(`Achat 已启动（账号模式）：${conn.webUrl}`);
   return {
