@@ -602,9 +602,11 @@ function needsYou(t) {
   return t.unread || (t.status === "pending" && isMine(t.to)) || (t.status === "active" && othersAsk(t) && t.scope.maxRounds - t.roundsUsed <= 1);
 }
 
-// Another person's AI asking one of the person's own.
+// Someone else's AI asking one of the person's own: the same rule as the
+// relay's `own`, which also holds on a computer on its own, where the person
+// approves for both sides.
 function othersAsk(t) {
-  return isMine(t.to) && !isMine(t.from) && !t.own;
+  return isMine(t.to) && !t.own;
 }
 
 // The person can give ten more rounds (MORE_SCOPE in src/types.ts) to a
