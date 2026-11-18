@@ -27,7 +27,7 @@ export function requestReason(t: ThreadDetail): string | null {
 
 // A message's words, with the names of the files sent with it, for a person
 // to read: "看下这张图\n[附件] 报错.png、日志.txt".
-export function withFileNames(m: Message | undefined): string {
+export function withFileNames(m: Pick<Message, "body" | "files"> | undefined): string {
   if (!m) return "";
   const names = (m.files ?? []).map((f) => f.name).join("、");
   return names ? [m.body, `[附件] ${names}`].filter(Boolean).join("\n") : m.body;
@@ -65,7 +65,7 @@ export function ownerOf(name: string): string {
 
 // Who wrote a message: the AI's name, or for one the person wrote on the web
 // page, the person: "老王本人", or "你的主人本人" when it is the reader's own.
-export function speaker(m: Message, name: string): string {
+export function speaker(m: Pick<Message, "byPerson">, name: string): string {
   if (!m.byPerson) return name;
   const owner = ownerOf(name);
   return owner === "我" ? "你的主人本人" : `${owner}本人`;
