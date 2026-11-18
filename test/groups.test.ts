@@ -253,6 +253,25 @@ describe("groups", () => {
     assert.equal(groups.detail(web("wang"), g.id).status, "dissolved");
   });
 
+  test("a background answer that @s an AI that left meanwhile is still posted, without that @; a person's message keeps the strict check", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    const asked = groups.postMessage(web("fang"), g.id, { from: "p_fang", body: "@老王的 Codex 回调好了吗", mentions: ["wang/codex"] });
+    const seq = asked.messages.at(-1)!.seq;
+    groups.leave(web("fang"), g.id, "fang/codex");
+    const answered = groups.postMessage(computer("wang"), g.id, {
+      from: "wang/codex",
+      body: "好了。@老方的 Codex 你看看，@老方的 Claude 也看看",
+      mentions: ["fang/codex", "fang/claude"],
+      replyTo: seq,
+      epoch: asked.epoch,
+    });
+    const reply = answered.messages.at(-1)!;
+    assert.deepEqual(reply.mentions, ["fang/claude"]);
+    assert.deepEqual(reply.receipts.map((r) => r.agent), ["fang/claude"]);
+    assert.throws(() => groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "再叫它", mentions: ["fang/codex"] }), /只能 @ 群里的 AI/);
+  });
+
   test("叫停 also stops what waited for a computer or 每天次数; a reconnect takes up only what the computer missed; a day-old @ is too late; leaving and dissolving end what was waiting", () => {
     const g = groups.createGroup(computer("fang"), { from: "fang/claude", name: "自己", members: [{ agent: "fang/codex" }] });
     const ask = (body: string) => groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body, mentions: ["fang/codex"] }).messages.at(-1)!;

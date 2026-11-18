@@ -323,7 +323,7 @@ export interface GroupWork {
   wake: GroupMessage;
   messages: GroupMessage[];
   session: string | null;
-  // Named from the AI's owner's side.
+  // Named from nobody's side ("老方的 Claude", never "我的 Claude").
   members: { agent: string; name: string }[];
   names: Record<string, string>;
   // Its own person, whom it may call with "@" and this name.

@@ -72,3 +72,25 @@ test("an AI makes a group, talks in it, reads it, sets its 每天次数 and 叫�
     await cloud.close();
   }
 });
+
+test("an AI that is not in the group is told to pull itself in with invite_to_group, and can", async () => {
+  const { cloud, mailer } = await startTestCloud();
+  const fang = await logIn(cloud, mailer, "fang@example.com", "老方");
+  const wang = await logIn(cloud, mailer, "wang@example.com", "老王");
+  await befriend(fang, wang, "wang@example.com");
+  const fangMac = await addComputer(cloud, fang, "MacBook", ["claude", "codex"]);
+  const wangId = (await wang.call("GET", "/api/me")).account.id;
+  try {
+    // Only 老方's Codex is in the group; his Claude is not.
+    await fangMac.client.createGroup({ from: fangMac.agent("codex"), name: "只有 Codex", members: [{ account: wangId }] });
+    const ai = await mcp(fangMac.client, fangMac.agent("claude"));
+    const refused = await ai.callTool({ name: "send_group_message", arguments: { group: "只有 Codex", message: "我来了" } });
+    assert.equal(refused.isError, true);
+    assert.equal(textOf(refused), "你不在「只有 Codex」里，先用 invite_to_group 把自己拉进来（members 填「我的 Claude」）");
+    const pulled = await ai.callTool({ name: "invite_to_group", arguments: { group: "只有 Codex", members: ["我的 Claude"] } });
+    assert.notEqual(pulled.isError, true);
+    assert.match(textOf(await ai.callTool({ name: "send_group_message", arguments: { group: "只有 Codex", message: "我来了" } })), /已发到群「只有 Codex」/);
+  } finally {
+    await cloud.close();
+  }
+});

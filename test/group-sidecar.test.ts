@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, afterEach, before, describe, mock, test } from "node:test";
 import { RelayClientError } from "../src/client.js";
 import type { RunningCloud } from "../src/cloud/server.js";
-import type { AgentRunner, RunInput, RunOutput } from "../src/sidecar/runners.js";
+import { BudgetExceededError, type AgentRunner, type RunInput, type RunOutput } from "../src/sidecar/runners.js";
 import { Sidecar } from "../src/sidecar/sidecar.js";
 import type { GroupDetail } from "../src/types.js";
 import { addComputer, type Browser, logIn, ScriptedRunner, startTestCloud, until, type MemoryMailer } from "./helpers.js";
@@ -90,6 +90,37 @@ describe("an AI @ed in a group answers in the background", () => {
     assert.match(wangRunner.calls[0].prompt, /说说现状/);
     assert.match(wangRunner.calls[0].systemPrompt, /无需回复/);
     assert.equal(wangRunner.calls[0].budgetUsd, 1);
+  });
+
+  // What everyone in the group sees under the @ when the answer fails.
+  async function failedReason(name: string, error: Error): Promise<string> {
+    const codex = wangLaptop.agent("codex");
+    sidecarFor(wangLaptop, codex, {
+      run: async () => {
+        throw error;
+      },
+    });
+    const g = await meeting(name);
+    const asked = await fang.call("POST", `/api/groups/${g.id}/messages`, { from: fangSeat, body: "@老王的 Codex 在吗", mentions: [codex] });
+    const seq = asked.messages.at(-1).seq;
+    const receipt = await until(async () => {
+      const d: GroupDetail = await fang.call("GET", `/api/groups/${g.id}`);
+      const r = d.messages.find((m) => m.seq === seq)!.receipts[0];
+      return r.state === "failed" ? r : null;
+    });
+    return receipt.reason ?? "";
+  }
+
+  test("an answer over the $1 cap fails with a plain sentence, not the runner's error text", async () => {
+    assert.equal(await failedReason("超预算", new BudgetExceededError("error_max_budget_usd")), "这次回答超过了 $1 的上限");
+  });
+
+  test("any other failure shows one short redacted line", async () => {
+    const reason = await failedReason("出错", new Error(`  spawn failed at /Users/someone/.claude/x\nsecond line ${"很长".repeat(100)}`));
+    assert.ok(!reason.includes("someone"), reason);
+    assert.ok(!reason.includes("\n"), reason);
+    assert.match(reason, /^spawn failed at ~\/\.claude\/x/);
+    assert.ok(reason.length <= 120, String(reason.length));
   });
 
   test("an answer that comes after 叫停 is not posted", async () => {

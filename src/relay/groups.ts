@@ -248,7 +248,9 @@ export class GroupService {
   }
 
   // Mentions as sent: AIs in the group, ALL, and for an AI, its own person's seat.
-  private checkMentions(groupId: string, from: AgentConfig, raw: string[]): string[] {
+  // `answering`: a background answer written while the group changed, so an AI
+  // that left meanwhile is dropped, not an error nobody can act on.
+  private checkMentions(groupId: string, from: AgentConfig, raw: string[], answering = false): string[] {
     const members = this.store.members(groupId);
     const out: string[] = [];
     for (const m of raw) {
@@ -262,6 +264,7 @@ export class GroupService {
         out.push(m);
         continue;
       }
+      if (answering) continue;
       throw new RelayError(400, `只能 @ 群里的 AI${from.client === "person" ? "" : "，或者自己的主人"}：${m}`);
     }
     return out;
@@ -432,8 +435,8 @@ export class GroupService {
     const body = input.body.trim();
     const files = this.checkFiles(input.files);
     if ((!body && !files.length) || body.length > 20000) throw new RelayError(400, "消息需要在 1 到 20000 个字之间");
-    const mentions = this.checkMentions(groupId, from, input.mentions ?? []);
     const answering = input.replyTo !== undefined;
+    const mentions = this.checkMentions(groupId, from, input.mentions ?? [], answering && !person);
     if (answering && person) throw new RelayError(400, "只有被叫醒的 AI 会这样回");
     if (answering) this.requireReading(group, from.id, input.replyTo!, input.epoch);
     const now = this.stamp();

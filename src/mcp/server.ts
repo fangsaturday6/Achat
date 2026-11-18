@@ -847,6 +847,10 @@ export function createMcpServer(opts: McpOptions): McpServer {
       if (c.mode !== "cloud") return text(GROUPS_NEED_ACCOUNT, true);
       const g = await resolveGroup(c, group);
       const before = await c.client.group(g.id);
+      if (!before.members.some((m) => m.agent === c.agentId)) {
+        const me = (await c.client.agents()).find((a) => a.id === c.agentId)?.name ?? c.agentId;
+        return text(`你不在「${g.name}」里，先用 invite_to_group 把自己拉进来（members 填「${me}」）`, true);
+      }
       const ids = mentionIds(before, mentions ?? [], c.agentId, await ownSeat(c));
       const posted = await c.client.postGroupMessage(g.id, { from: c.agentId, body: message, mentions: ids, files: files?.length ? readFiles(files) : undefined });
       const seq = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!.seq;
