@@ -257,6 +257,13 @@ test("Codex works in its folder with nobody to approve commands: online only bet
   const own = codexTaskArgs({ threadId: "t1", topic: "画图", prompt: "画", systemPrompt: "规则", own: true });
   assert.ok(own.includes("sandbox_workspace_write.network_access=true"));
   const later = codexTaskArgs({ threadId: "t1", topic: "画图", prompt: "接着画", systemPrompt: "规则", from: { sessionId: "0199-abc", dir: "/x" } });
+  // Nobody is there to approve an MCP call either, so handing the work back
+  // through Achat goes ahead; asking anyone else still does not.
+  for (const args of [first, later]) {
+    assert.ok(args.includes('mcp_servers.achat.tools.send_message.approval_mode="approve"'));
+    assert.ok(args.includes('mcp_servers.achat.tools.check_thread.approval_mode="approve"'));
+    assert.ok(!args.some((a) => a.includes("send_request")));
+  }
   assert.deepEqual(later.slice(0, 2), ["exec", "resume"]);
   assert.deepEqual(later.slice(-2), ["0199-abc", "-"]);
   assert.equal(codexSessionId("OpenAI Codex v0.169\n--------\nworkdir: /x\nsession id: 01a1e4e6-9149-7ef2-a71d-01b8e8de82bc\n--------"), "01a1e4e6-9149-7ef2-a71d-01b8e8de82bc");
