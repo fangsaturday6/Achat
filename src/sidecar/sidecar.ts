@@ -9,13 +9,11 @@ import { cjk } from "../text.js";
 import { MIN_ROUND_BUDGET_USD } from "../relay/service.js";
 import { MODE_LABELS, MORE_SCOPE, waitingForAsker, type Message, type RelayEvent, type ThreadDetail, type ThreadMode } from "../types.js";
 import type { Alerter, Asker, Asking, Chooser, Choosing } from "./dialog.js";
+import { LoginWait } from "./login-wait.js";
 import type { Notifier } from "./notify.js";
 import { BudgetExceededError, LoginExpiredError, SessionLostError, type AgentRunner, type RunOutput } from "./runners.js";
 import { TaskBook, type TaskOpener, type TaskRecord } from "./tasks.js";
 
-// How long a thread waits for the person to log in again before giving up.
-const LOGIN_WAIT_MS = 24 * 60 * 60 * 1000;
-const CLIENT_NAME = { claude: "Claude", codex: "Codex" } as const;
 const RELOGIN = {
   claude: "打开 Claude Code 发一句话就能恢复，等着的问题会自动接着回答。运行一次 achat claude-token 就不会再过期。",
   codex: "在终端运行 codex login 就能恢复，等着的问题会自动接着回答。",
@@ -259,10 +257,8 @@ export class Sidecar {
   private choosing = new Map<string, Choosing>();
   // The asker's words being judged 问答 or 动手, once each.
   private judging = new Map<string, Promise<ThreadDetail>>();
-  // Threads waiting for a login on this computer, since when, and the
-  // clients the person was already told about.
-  private waitingLogin = new Map<string, number>();
-  private alerted = new Set<string>();
+  // Waiting out a login that ran out, and trying a slow answer once more.
+  private loginWait: LoginWait;
   private timers = new Set<ReturnType<typeof setTimeout>>();
   // Threads asked from this computer with news from the other side, waiting
   // to see whether the AI that asked picks it up.
@@ -271,8 +267,6 @@ export class Sidecar {
   // 动手 threads where the asker said more, waiting to see whether the
   // conversation doing the work picks it up.
   private handing = new Set<string>();
-  // Threads whose answer timed out once and are being tried again.
-  private retried = new Set<string>();
   // Threads where the other side's person is being answered in the background.
   private replying = new Set<string>();
   private owner: string | null = null;
@@ -283,6 +277,7 @@ export class Sidecar {
     this.tasks = opts.tasks ?? new TaskBook();
     this.agentsById = new Map(opts.agents.map((a) => [a.id, a]));
     this.log = opts.log ?? ((line) => console.log(`[achat sidecar] ${line}`));
+    this.loginWait = new LoginWait({ alert: opts.alert, retryMs: opts.loginRetryMs, timers: this.timers, log: (line) => this.log(line), advice: loginAdvice });
     this.relay = opts.client.patient({
       retryMs: opts.relayRetryMs ?? 2000,
       stop: this.stopping.signal,
@@ -649,31 +644,6 @@ export class Sidecar {
     }
   }
 
-  // The AI's login ran out: the thread waits and tries again every minute,
-  // the asker is told why, and the person once that they need to log in.
-  private async waitForLogin(threadId: string, err: LoginExpiredError): Promise<void> {
-    const name = CLIENT_NAME[err.client];
-    const since = this.waitingLogin.get(threadId);
-    if (since === undefined) {
-      this.waitingLogin.set(threadId, Date.now());
-      await this.relay.note(threadId, `回答的 ${name} 需要重新登录，登录后会自动接着回答`).catch(() => {});
-      if (!this.alerted.has(err.client)) {
-        this.alerted.add(err.client);
-        this.opts.alert?.(`你的 ${name} 需要重新登录`, loginAdvice(err));
-      }
-    } else if (Date.now() - since > LOGIN_WAIT_MS) {
-      this.waitingLogin.delete(threadId);
-      await this.relay.fail(threadId, `${name} 一天都没有重新登录，这次没有回答`).catch(() => {});
-      return;
-    }
-    this.log(`${threadId} 等 ${name} 重新登录：${err.message}`);
-    const timer = setTimeout(() => {
-      this.timers.delete(timer);
-      void this.answer(threadId);
-    }, this.opts.loginRetryMs ?? 60_000);
-    this.timers.add(timer);
-  }
-
   // 动手: the first time, a conversation of its own starts on the whole
   // thread. After that the conversation is usually waiting for the asker
   // (its send_message waits) and takes what they said itself; if it has not
@@ -829,25 +799,26 @@ export class Sidecar {
           if (!(err instanceof RelayClientError && err.status === 409)) throw err;
           this.log(`${threadId} 不用再发这次回答：${err.message}`);
         });
-      this.waitingLogin.delete(threadId);
-      this.retried.delete(threadId);
-      this.alerted.delete(owner.client);
+      this.loginWait.answered(threadId, owner.client);
     } catch (err) {
       // Stopped while waiting for the relay: the next start picks the thread up.
       if (this.stopping.signal.aborted) return;
       if (err instanceof LoginExpiredError) {
-        await this.waitForLogin(threadId, err);
+        await this.loginWait.loginExpired(threadId, err, {
+          tell: (note) => this.relay.note(threadId, note),
+          giveUp: (note) => this.relay.fail(threadId, note),
+          again: () => void this.answer(threadId),
+        });
         return;
       }
       const reason = (err as Error).message || "未知错误";
       // A slow answer is tried once more before the thread ends.
-      if (reason === "回答超时" && !this.retried.has(threadId)) {
-        this.retried.add(threadId);
+      if (reason === "回答超时" && this.loginWait.timedOut(threadId)) {
         this.log(`${threadId} 回答超时，再试一次`);
         this.again.add(threadId);
         return;
       }
-      this.retried.delete(threadId);
+      this.loginWait.failed(threadId);
       this.log(`${threadId} 出错：${reason}`);
       await this.relay.fail(threadId, reason).catch((e: Error) => this.log(`${threadId} 的出错没有传到：${e.message}`));
     } finally {
