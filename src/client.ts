@@ -283,6 +283,11 @@ export class RelayClient {
     return this.call("POST", `/api/threads/${encodeURIComponent(id)}/approve`, scope);
   }
 
+  // Ten more rounds for a thread an AI here is asked in, money too for 问答.
+  addRounds(id: string): Promise<ThreadDetail> {
+    return this.call("POST", `/api/threads/${encodeURIComponent(id)}/rounds`, {});
+  }
+
   // What this computer's AI can use and is set to use.
   reportModels(agent: string, offer: ModelOffer): Promise<AgentModels> {
     return this.call("POST", `/api/agents/${encodeURIComponent(agent)}/offer`, offer);

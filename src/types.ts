@@ -28,6 +28,10 @@ export interface Scope {
   budgetUsd: number;
 }
 
+// What “加 10 轮” gives a thread under way, on top of what it had; 问答 gets
+// the money for them too. web/app.js writes the same number on its button.
+export const MORE_SCOPE: Scope = { maxRounds: 10, budgetUsd: 10 };
+
 export interface Thread {
   id: string;
   topic: string;
@@ -113,7 +117,9 @@ export interface ThreadSummary extends Thread {
 }
 
 // "thread.reminded": a request has waited for approval for hours.
-export type RelayEventType = "thread.created" | "thread.updated" | "message.created" | "thread.reminded";
+// "thread.lastRound": the asker's question at `seq` opened the last round of a
+// thread between two people's AIs; the asked side's person may give more.
+export type RelayEventType = "thread.created" | "thread.updated" | "message.created" | "thread.reminded" | "thread.lastRound";
 
 export interface RelayEvent {
   type: RelayEventType;

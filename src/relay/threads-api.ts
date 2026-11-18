@@ -266,6 +266,10 @@ export async function threadsApi(
       if (!viewer.actsAs(thread.to)) forbid("只有接收方可以申请接着聊");
       send(res, 200, service.askMore(id, str(body, "note")));
       return true;
+    case "rounds":
+      if (!viewer.approves || !viewer.sees(thread.to)) forbid("只有接收方的主人可以加轮数");
+      send(res, 200, service.addRounds(id));
+      return true;
     case "judge": {
       if (!viewer.actsAs(thread.to)) forbid("只有接收方可以判断问答还是动手");
       const seq = optNum(body, "seq");

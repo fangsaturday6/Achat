@@ -7,6 +7,7 @@ import {
   isTerminal,
   latestAnswer,
   MODE_LABELS,
+  MORE_SCOPE,
   personWaiting,
   waitingForAsker,
   type Attachment,
@@ -501,6 +502,29 @@ export class RelayService {
     return this.getThread(id);
   }
 
+  // The asked side's person gives a thread more rounds: under way, before
+  // they run out, or right after it ended because they or the money did.
+  // Added on top of what it had, money too for 问答, and it goes on without
+  // being approved again.
+  addRounds(id: string): ThreadDetail {
+    const thread = this.requireThread(id);
+    const ranOut = thread.status === "closed" && this.spent(thread);
+    if (thread.status !== "active" && !ranOut) throw new RelayError(409, "只有进行中、或者刚用完轮数的协作可以加轮数");
+    const scope: Scope = {
+      maxRounds: thread.scope.maxRounds + MORE_SCOPE.maxRounds,
+      budgetUsd: thread.mode === "do" ? thread.scope.budgetUsd : Math.round((thread.scope.budgetUsd + MORE_SCOPE.budgetUsd) * 100) / 100,
+    };
+    const note = thread.mode === "do" ? `加了 ${MORE_SCOPE.maxRounds} 轮` : `加了 ${MORE_SCOPE.maxRounds} 轮 · $${MORE_SCOPE.budgetUsd.toFixed(2)}`;
+    const now = this.stamp();
+    const updated = this.store.transaction(() => {
+      const t = this.store.updateThread(id, { status: "active", scope }, now);
+      this.store.addMessage(id, { sender: null, kind: "system", body: note }, now);
+      return t;
+    });
+    this.emit("thread.updated", updated);
+    return this.getThread(id);
+  }
+
   // Run every few minutes: a request waiting for hours is brought up again
   // once; one waiting for days is given up, and one made inside a thread
   // goes back to where the thread was.
@@ -627,8 +651,12 @@ export class RelayService {
     }
 
     const now = this.stamp();
+    // The asker's question that opens the last round: said in the thread, and
+    // between two people's AIs, the asked side's person may give more.
+    const opensLast = !fromResponder && !toPerson && !asks && thread.status === "active" && thread.roundsUsed + 1 === thread.scope.maxRounds;
     let closingNote: string | null = null;
     const result = this.store.transaction(() => {
+      if (opensLast) this.store.addMessage(id, { sender: null, kind: "system", body: "最后 1 轮" }, now);
       const msg = this.store.addMessage(
         id,
         {
@@ -675,6 +703,7 @@ export class RelayService {
     });
     this.emit("message.created", result.thread, result.msg);
     if (closingNote) this.emit("thread.updated", result.thread);
+    if (opensLast && !thread.own) this.emit("thread.lastRound", result.thread, result.msg);
     return this.getThread(id);
   }
 
