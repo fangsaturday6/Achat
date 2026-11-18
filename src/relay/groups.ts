@@ -1,0 +1,770 @@
+import { randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { cleanFiles, type NewFile } from "../attachments.js";
+import type { AgentConfig } from "../config.js";
+import { beijingDay, nameFrom } from "../groups.js";
+import { isEffort, type Effort } from "../models.js";
+import { cjk } from "../text.js";
+import {
+  ALL,
+  type Group,
+  type GroupDetail,
+  type GroupEvent,
+  type GroupInvite,
+  type GroupMember,
+  type GroupMessage,
+  type GroupSummary,
+  type GroupTarget,
+  type GroupWork,
+  type ReceiptState,
+} from "../types.js";
+import { GroupStore, type InviteRow, type MemberRow } from "./group-store.js";
+import { RelayError } from "./service.js";
+import type { Store } from "./store.js";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// The numbers of 8n, in one place.
+export const GROUP_LIMITS = {
+  maxMembers: 100,
+  // 每天次数: each wake uses one, answered or not.
+  quota: 30,
+  maxQuota: 500,
+  // What a member sees from before it joined, and what a new background session reads.
+  seeBefore: 20,
+  // The most a session that goes on is given at once.
+  readCap: 50,
+  // The most messages a page or tool is given at once.
+  detailCap: 200,
+  inviteTtlMs: 7 * DAY_MS,
+  // An @ missed while the computer was off, or kept for 每天次数, is taken up within this.
+  catchUpMs: DAY_MS,
+};
+
+export const GROUPS_NEED_ACCOUNT = "登录 Achat 账号后才能用群。先调用 link_account，让主人登录并确认添加这台电脑";
+
+// Who is who, for groups: the accounts database in the cloud.
+export interface GroupDirectory {
+  // An AI, or a person's seat, that can take part now, named from `viewer`'s
+  // side; undefined once removed.
+  agent(id: string, viewer?: string): AgentConfig | undefined;
+  // Any AI or seat there ever was, for the names of old messages.
+  name(id: string, viewer?: string): string;
+  friends(account: string, other: string): boolean;
+  // Its computer has its event stream open.
+  online(agent: string): boolean;
+  // The person's seat: what they write as on the web page.
+  seat(account: string): string;
+  // "我" for the viewer themself, the person's name otherwise.
+  person(account: string, viewer: string): string;
+}
+
+// Who calls, from the API's Viewer.
+export interface Caller {
+  account: string;
+  // The person on the web page: their seat. Null for computers and AIs.
+  person: string | null;
+  actsAs(agent: string): boolean;
+  // Not an AI's pasted credential.
+  approves: boolean;
+}
+
+export interface GroupPostInput {
+  from: string;
+  body: string;
+  mentions?: string[];
+  files?: NewFile[];
+  // A background answer: the message whose @ woke it, the 叫停 count then,
+  // its session and how far it read.
+  replyTo?: number;
+  epoch?: number;
+  sessionId?: string;
+  readTo?: number;
+  costUsd?: number;
+  redactions?: number;
+  model?: string;
+  effort?: Effort;
+}
+
+// Owns the group rules, as RelayService owns the thread ones: the API, the
+// computers and the AI tools all go through here.
+export class GroupService {
+  readonly store: GroupStore;
+  private events = new EventEmitter();
+
+  constructor(
+    store: Store,
+    private dir: GroupDirectory,
+    private now: () => Date = () => new Date(),
+    private limits = GROUP_LIMITS,
+  ) {
+    this.store = new GroupStore(store);
+    this.events.setMaxListeners(0);
+  }
+
+  onEvent(listener: (e: GroupEvent) => void): () => void {
+    this.events.on("event", listener);
+    return () => this.events.off("event", listener);
+  }
+
+  // `also`: AIs or seats that just left its audience, who hear this one too.
+  private emit(type: GroupEvent["type"], groupId: string, extra: { seq?: number; wake?: string[] } = {}, also: string[] = []): void {
+    const members = new Set([
+      ...this.store.members(groupId).map((m) => m.agent),
+      ...this.store.openInvites(groupId, this.stamp()).map((i) => this.dir.seat(i.account)),
+      ...also,
+    ]);
+    const event: GroupEvent = { type, groupId, members: [...members], ...(extra.seq !== undefined ? { seq: extra.seq } : {}), ...(extra.wake?.length ? { wake: extra.wake } : {}) };
+    this.events.emit("event", event);
+  }
+
+  private stamp(): string {
+    return this.now().toISOString();
+  }
+
+  private name(id: string): string {
+    return this.dir.agent(id)?.name ?? this.dir.name(id);
+  }
+
+  private requireGroup(id: string): Group {
+    const group = this.store.group(id);
+    if (!group) throw new RelayError(404, "找不到这个群");
+    return group;
+  }
+
+  // The caller's AIs in the group now.
+  private mine(caller: Caller, groupId: string): MemberRow[] {
+    return this.store.members(groupId).filter((m) => m.owner === caller.account);
+  }
+
+  // A group the caller has an AI in; any other looks like one that does not exist.
+  private requireMine(caller: Caller, id: string): Group {
+    const group = this.requireGroup(id);
+    if (!this.mine(caller, id).length) throw new RelayError(404, "找不到这个群");
+    return group;
+  }
+
+  private requireOpen(group: Group): void {
+    if (group.status === "dissolved") throw new RelayError(409, "群已经解散了，只能看不能发");
+  }
+
+  // Who speaks: one of the caller's AIs, or the person on the web page.
+  private requireSpeaker(caller: Caller, from: string): AgentConfig {
+    const agent = this.dir.agent(from);
+    if (!agent || (!caller.actsAs(from) && from !== caller.person)) throw new RelayError(403, "只能以自己的 AI 或本人的身份说话");
+    return agent;
+  }
+
+  private checkFiles(files?: NewFile[]): NewFile[] {
+    try {
+      return cleanFiles(files);
+    } catch (err) {
+      throw new RelayError(400, (err as Error).message);
+    }
+  }
+
+  private checkQuota(perDay: number | undefined): number {
+    const quota = perDay === undefined ? this.limits.quota : Math.round(perDay);
+    if (!Number.isFinite(quota) || quota < 1 || quota > this.limits.maxQuota) throw new RelayError(400, `每天次数需要在 1 到 ${this.limits.maxQuota} 之间`);
+    return quota;
+  }
+
+  private requireFriend(caller: Caller, account: string): void {
+    if (!this.dir.friends(caller.account, account)) {
+      throw new RelayError(403, `${this.dir.person(account, caller.account)}还不是你的朋友。先用 create_invite 加对方为朋友`);
+    }
+  }
+
+  // The caller's own AIs join at once; a friend's AI, or a friend who picks
+  // their AIs, is invited.
+  private sort(caller: Caller, targets: GroupTarget[]): { join: string[]; invite: { account: string; agent: string | null }[] } {
+    const join: string[] = [];
+    const invite: { account: string; agent: string | null }[] = [];
+    for (const t of targets) {
+      if ("agent" in t) {
+        const a = this.dir.agent(t.agent);
+        if (!a || a.client === "person" || !a.owner) throw new RelayError(404, `找不到这个 AI：${t.agent}`);
+        if (a.owner === caller.account) {
+          if (!join.includes(a.id)) join.push(a.id);
+          continue;
+        }
+        this.requireFriend(caller, a.owner);
+        invite.push({ account: a.owner, agent: a.id });
+      } else {
+        if (t.account === caller.account) throw new RelayError(400, "拉自己的 AI 进群，直接选那个 AI");
+        this.requireFriend(caller, t.account);
+        invite.push({ account: t.account, agent: null });
+      }
+    }
+    return { join, invite };
+  }
+
+  // An invite to a person, or one waiting already, made new for another 7 days.
+  private offer(groupId: string, t: { account: string; agent: string | null }, by: string, now: string): void {
+    const expiresAt = new Date(this.now().getTime() + this.limits.inviteTtlMs).toISOString();
+    const open = this.store.openInvites(groupId, now).find((i) => i.account === t.account && i.agent === t.agent);
+    if (open) return this.store.renewInvite(open.id, expiresAt);
+    this.store.addInvite({ id: `gi_${randomBytes(6).toString("hex")}`, groupId, account: t.account, agent: t.agent, invitedBy: by, expiresAt }, now);
+  }
+
+  // What becomes of an AI a message calls on: not woken while 叫停, nor one
+  // that cannot answer in the background, nor past its 每天次数, nor while
+  // its computer is off.
+  private stateFor(group: Group, member: MemberRow, day: string): ReceiptState {
+    // 叫停, or dissolved: nobody is woken.
+    if (group.status !== "open") return "stopped";
+    const agent = this.dir.agent(member.agent);
+    if (!agent || agent.canReceive === false) return "cannot";
+    if (this.store.used(group.id, member.agent, day) >= member.quota) return "quota";
+    if (!this.dir.online(member.agent)) return "offline";
+    return "reading";
+  }
+
+  // Records what became of each of `agents` for message `seq`; a wake uses
+  // one of its 每天次数. Returns the AIs woken.
+  private wakeAgents(group: Group, seq: number, agents: string[], now: string): string[] {
+    const day = beijingDay(this.now());
+    const woken: string[] = [];
+    for (const agent of agents) {
+      const member = this.store.member(group.id, agent);
+      if (!member || member.leftAt) continue;
+      const state = this.stateFor(group, member, day);
+      this.store.setReceipt(group.id, seq, agent, state, null, group.epoch, now);
+      if (state !== "reading") continue;
+      this.store.use(group.id, agent, day);
+      woken.push(agent);
+    }
+    return woken;
+  }
+
+  // Whom a message calls on: everyone but the sender for @所有人, else the
+  // AIs named. A person's seat is told in plan 4, never woken.
+  private wake(group: Group, msg: GroupMessage, sender: string): string[] {
+    const members = this.store.members(group.id);
+    const targets = msg.mentions.includes(ALL)
+      ? members.map((m) => m.agent).filter((a) => a !== sender)
+      : msg.mentions.filter((a) => members.some((m) => m.agent === a));
+    return this.wakeAgents(group, msg.seq, targets, this.stamp());
+  }
+
+  // Mentions as sent: AIs in the group, ALL, and for an AI, its own person's seat.
+  private checkMentions(groupId: string, from: AgentConfig, raw: string[]): string[] {
+    const members = this.store.members(groupId);
+    const out: string[] = [];
+    for (const m of raw) {
+      if (out.includes(m)) continue;
+      if (m === ALL || members.some((x) => x.agent === m && x.agent !== from.id)) {
+        out.push(m);
+        continue;
+      }
+      if (m === from.id) throw new RelayError(400, "不能 @ 自己");
+      if (from.client !== "person" && from.owner && m === this.dir.seat(from.owner)) {
+        out.push(m);
+        continue;
+      }
+      throw new RelayError(400, `只能 @ 群里的 AI${from.client === "person" ? "" : "，或者自己的主人"}：${m}`);
+    }
+    return out;
+  }
+
+  // A background answer to what woke it; refused once the group was 叫停 since.
+  private requireReading(group: Group, agent: string, seq: number, epoch: number | undefined): void {
+    const r = this.store.receipt(group.id, seq, agent);
+    if (r?.state === "stopped" || (r?.state === "reading" && (group.status !== "open" || epoch !== group.epoch))) {
+      throw new RelayError(409, "群里已经叫停了，这次回答不再发出");
+    }
+    if (!r || r.state !== "reading") throw new RelayError(409, "这条已经不用回了");
+  }
+
+  // The AI is done with what woke it, up to `seq`: every @ still waiting on
+  // it there ends the same way, and its session goes on from what it read.
+  private settle(groupId: string, agent: string, seq: number, state: ReceiptState, reason: string | null, input: { sessionId?: string; readTo?: number }, now: string): void {
+    for (const r of this.store.receiptsOf(groupId, agent, ["reading"])) {
+      if (r.seq <= seq) this.store.setReceipt(groupId, r.seq, agent, state, reason, r.epoch, now);
+    }
+    this.store.setRead(groupId, agent, input.readTo ?? seq, input.sessionId ?? null);
+  }
+
+  // The newest @ an AI had to leave for `states` (its computer off, its 每天次数
+  // used up), after what it already finished and within a day: woken for it
+  // now, if it can be. Returns the AIs woken.
+  private takeUp(group: Group, agent: string, states: ReceiptState[], now: string): string[] {
+    const done = this.store.doneSeq(group.id, agent);
+    const since = this.now().getTime() - this.limits.catchUpMs;
+    const latest = this.store.receiptsOf(group.id, agent, states).find((r) => r.seq > done && Date.parse(r.updatedAt) >= since);
+    return latest ? this.wakeAgents(group, latest.seq, [agent], now) : [];
+  }
+
+  // AIs join from where the group is now; a note says so, and an opening
+  // message from within a day wakes them.
+  private admit(group: Group, agents: string[], owner: string, quota: number, now: string): string[] {
+    if (!agents.length) return [];
+    const joinedSeq = this.store.lastSeq(group.id);
+    for (const agent of agents) this.store.addMember({ groupId: group.id, agent, owner, quota, joinedSeq }, now);
+    this.store.addMessage(group.id, { sender: null, kind: "system", body: cjk(agents.map((a) => this.name(a)).join("、"), "加入了群聊") }, now);
+    const opener = group.openerSeq ? this.store.message(group.id, group.openerSeq) : null;
+    if (!opener || this.now().getTime() - Date.parse(opener.createdAt) > this.limits.catchUpMs) return [];
+    return this.wakeAgents(this.store.group(group.id)!, opener.seq, agents.filter((a) => a !== opener.sender), now);
+  }
+
+  // A member leaves: when 群主's AIs are all gone, the AI that joined first
+  // passes 群主 to its person; when nobody is left, the group ends.
+  private drop(group: Group, agent: string, note: string): void {
+    const now = this.stamp();
+    this.store.transaction(() => {
+      this.store.leaveMember(group.id, agent, now);
+      // What it was still reading stays unanswered, and the line under it says why.
+      for (const r of this.store.receiptsOf(group.id, agent, ["reading"])) this.store.setReceipt(group.id, r.seq, agent, "failed", "不在群里了", r.epoch, now);
+      this.store.addMessage(group.id, { sender: null, kind: "system", body: note }, now);
+      const left = this.store.members(group.id);
+      if (!left.length) this.store.updateGroup(group.id, { status: "dissolved" }, now);
+      else if (!left.some((m) => m.owner === group.owner)) this.store.updateGroup(group.id, { owner: left[0].owner }, now);
+    });
+    this.emit("group.updated", group.id, {}, [agent]);
+  }
+
+  // The person, or their AI when it acted on the person's word.
+  private who(caller: Caller, by?: string): string {
+    if (by && caller.actsAs(by)) return this.name(by);
+    return this.dir.person(caller.account, "");
+  }
+
+  // --- making a group and bringing people in
+
+  createGroup(caller: Caller, input: { from: string; name?: string; members: GroupTarget[]; message?: string; files?: NewFile[] }): GroupDetail {
+    const from = this.requireSpeaker(caller, input.from);
+    const text = input.message?.trim() ?? "";
+    const files = this.checkFiles(input.files);
+    if (text.length > 20000) throw new RelayError(400, "消息需要在 1 到 20000 个字之间");
+    const name = input.name?.trim() || nameFrom(text) || "群聊";
+    if (name.length > 30) throw new RelayError(400, "群名需要在 1 到 30 个字之间");
+    const { join, invite } = this.sort(caller, input.members);
+    if (from.client !== "person" && !join.includes(from.id)) join.unshift(from.id);
+    if (!join.length) throw new RelayError(400, "群里至少要有你自己的一个 AI");
+    if (join.length > this.limits.maxMembers) throw new RelayError(409, `群里最多 ${this.limits.maxMembers} 个 AI`);
+    const now = this.stamp();
+    const id = `g_${randomBytes(5).toString("hex")}`;
+    const opened = this.store.transaction(() => {
+      this.store.createGroup({ id, name, owner: caller.account }, now);
+      for (const agent of join) this.store.addMember({ groupId: id, agent, owner: caller.account, quota: this.limits.quota, joinedSeq: 0 }, now);
+      for (const t of invite) this.offer(id, t, from.id, now);
+      if (!text && !files.length) return null;
+      // The opening message calls on everyone, those who join later too.
+      const opener = this.store.addMessage(id, { sender: from.id, kind: "message", body: text, mentions: [ALL], byPerson: from.client === "person", files }, now);
+      const group = this.store.updateGroup(id, { openerSeq: opener.seq }, now);
+      return { seq: opener.seq, wake: this.wake(group, opener, from.id) };
+    });
+    this.emit("group.updated", id);
+    if (opened) this.emit("group.message", id, opened);
+    return this.detail(caller, id);
+  }
+
+  invite(caller: Caller, groupId: string, input: { from: string; members: GroupTarget[] }): GroupDetail {
+    const group = this.requireMine(caller, groupId);
+    this.requireOpen(group);
+    const from = this.requireSpeaker(caller, input.from);
+    const { join, invite } = this.sort(caller, input.members);
+    const members = this.store.members(groupId);
+    const newcomers = join.filter((a) => !members.some((m) => m.agent === a));
+    const fresh = invite.filter((t) => !t.agent || !members.some((m) => m.agent === t.agent));
+    if (!newcomers.length && !fresh.length) throw new RelayError(409, "他们已经在群里了");
+    if (members.length + newcomers.length > this.limits.maxMembers) throw new RelayError(409, `群里最多 ${this.limits.maxMembers} 个 AI`);
+    const now = this.stamp();
+    const wake = this.store.transaction(() => {
+      for (const t of fresh) this.offer(groupId, t, from.id, now);
+      return this.admit(group, newcomers, caller.account, this.limits.quota, now);
+    });
+    this.emit("group.updated", groupId, { wake });
+    return this.detail(caller, groupId);
+  }
+
+  // Only the person invited answers, on the web page.
+  private requireInvite(caller: Caller, groupId: string, inviteId: string): InviteRow {
+    if (!caller.person) throw new RelayError(403, "进群要主人在网页上点“加入”");
+    const invite = this.store.invite(inviteId);
+    if (!invite || invite.groupId !== groupId || invite.account !== caller.account) throw new RelayError(404, "找不到这个邀请");
+    if (invite.answered) throw new RelayError(409, "这个邀请已经处理过了");
+    if (invite.expiresAt <= this.stamp()) throw new RelayError(410, "这个邀请已经过期了，请对方重新拉你进群");
+    return invite;
+  }
+
+  // The person picks which of their AIs join (or the one named), and how
+  // many times a day each may be woken here.
+  acceptInvite(caller: Caller, groupId: string, inviteId: string, input: { agents?: string[]; quota?: number }): GroupDetail {
+    const invite = this.requireInvite(caller, groupId, inviteId);
+    const group = this.requireGroup(groupId);
+    this.requireOpen(group);
+    const agents = invite.agent ? [invite.agent] : [...new Set(input.agents ?? [])];
+    if (!agents.length) throw new RelayError(400, "选至少一个 AI 进群");
+    for (const a of agents) {
+      const agent = this.dir.agent(a);
+      if (!agent || agent.owner !== caller.account || agent.client === "person") throw new RelayError(400, `只能让自己的 AI 进群：${a}`);
+    }
+    const quota = this.checkQuota(input.quota);
+    const members = this.store.members(groupId);
+    const newcomers = agents.filter((a) => !members.some((m) => m.agent === a));
+    if (members.length + newcomers.length > this.limits.maxMembers) throw new RelayError(409, `群里最多 ${this.limits.maxMembers} 个 AI`);
+    const now = this.stamp();
+    const wake = this.store.transaction(() => {
+      this.store.answerInvite(invite.id, "accepted");
+      return this.admit(group, newcomers, caller.account, quota, now);
+    });
+    this.emit("group.updated", groupId, { wake });
+    return this.detail(caller, groupId);
+  }
+
+  declineInvite(caller: Caller, groupId: string, inviteId: string): { ok: true } {
+    const invite = this.requireInvite(caller, groupId, inviteId);
+    this.store.answerInvite(invite.id, "declined");
+    this.emit("group.updated", groupId, {}, [this.dir.seat(caller.account)]);
+    return { ok: true };
+  }
+
+  // --- talking
+
+  postMessage(caller: Caller, groupId: string, input: GroupPostInput): GroupDetail {
+    const group = this.requireGroup(groupId);
+    const from = this.requireSpeaker(caller, input.from);
+    const person = from.client === "person";
+    const member = person ? null : this.store.member(groupId, from.id);
+    if (person ? !this.mine(caller, groupId).length : !member || member.leftAt !== null) throw new RelayError(404, "找不到这个群");
+    this.requireOpen(group);
+    const body = input.body.trim();
+    const files = this.checkFiles(input.files);
+    if ((!body && !files.length) || body.length > 20000) throw new RelayError(400, "消息需要在 1 到 20000 个字之间");
+    const mentions = this.checkMentions(groupId, from, input.mentions ?? []);
+    const answering = input.replyTo !== undefined;
+    if (answering && person) throw new RelayError(400, "只有被叫醒的 AI 会这样回");
+    if (answering) this.requireReading(group, from.id, input.replyTo!, input.epoch);
+    const now = this.stamp();
+    const posted = this.store.transaction(() => {
+      const msg = this.store.addMessage(
+        groupId,
+        {
+          sender: from.id,
+          kind: "message",
+          body,
+          mentions,
+          replyTo: input.replyTo ?? null,
+          byPerson: person,
+          redactions: input.redactions ?? 0,
+          costUsd: input.costUsd ?? 0,
+          files,
+          model: typeof input.model === "string" && input.model.trim() ? input.model.trim().slice(0, 80) : null,
+          effort: isEffort(input.effort) ? input.effort : null,
+        },
+        now,
+      );
+      if (answering) this.settle(groupId, from.id, input.replyTo!, "replied", null, input, now);
+      return { seq: msg.seq, wake: this.wake(this.store.group(groupId)!, msg, from.id) };
+    });
+    this.emit("group.message", groupId, posted);
+    return this.detail(caller, groupId);
+  }
+
+  // The AI woken read it and need not reply: its half sentence of why.
+  pass(caller: Caller, groupId: string, input: { agent: string; seq: number; epoch?: number; reason?: string; sessionId?: string; readTo?: number }): GroupDetail {
+    const group = this.requireGroup(groupId);
+    if (!caller.actsAs(input.agent)) throw new RelayError(403, "只有被叫醒的 AI 可以这样回");
+    this.requireReading(group, input.agent, input.seq, input.epoch);
+    const reason = (input.reason ?? "").trim().split("\n")[0].slice(0, 60) || null;
+    this.store.transaction(() => this.settle(groupId, input.agent, input.seq, "passed", reason, input, this.stamp()));
+    this.emit("group.updated", groupId, { seq: input.seq });
+    return this.detail(caller, groupId);
+  }
+
+  // Answering went wrong for a reason that is not waiting.
+  fail(caller: Caller, groupId: string, input: { agent: string; seq: number; reason: string }): GroupDetail {
+    return this.mark(caller, groupId, input, "failed");
+  }
+
+  // Still on it, with why it takes long, such as its login running out.
+  hold(caller: Caller, groupId: string, input: { agent: string; seq: number; reason: string }): GroupDetail {
+    return this.mark(caller, groupId, input, "reading");
+  }
+
+  private mark(caller: Caller, groupId: string, input: { agent: string; seq: number; reason: string }, state: ReceiptState): GroupDetail {
+    this.requireGroup(groupId);
+    if (!caller.actsAs(input.agent)) throw new RelayError(403, "只有被叫醒的 AI 可以这样报");
+    const r = this.store.receipt(groupId, input.seq, input.agent);
+    if (r?.state === "reading") {
+      this.store.setReceipt(groupId, input.seq, input.agent, state, input.reason.trim().slice(0, 120) || null, r.epoch, this.stamp());
+      this.emit("group.updated", groupId, { seq: input.seq });
+    }
+    return this.detail(caller, groupId);
+  }
+
+  // --- 叫停 and 每天次数
+
+  stop(caller: Caller, groupId: string, by?: string): GroupDetail {
+    const group = this.requireMine(caller, groupId);
+    this.requireOpen(group);
+    if (group.status === "stopped") return this.detail(caller, groupId);
+    const now = this.stamp();
+    this.store.transaction(() => {
+      this.store.updateGroup(groupId, { status: "stopped", epoch: group.epoch + 1 }, now);
+      // Everything still waiting stops: what is being read, and what was left
+      // for a computer that was off or a 每天次数 used up, so “继续” or a
+      // reconnect never takes up what was @ed before.
+      for (const from of ["reading", "offline", "quota"] as const) this.store.moveAll(groupId, from, "stopped", now);
+      this.store.addMessage(groupId, { sender: null, kind: "system", body: cjk(this.who(caller, by), "叫停了群里沟通") }, now);
+    });
+    this.emit("group.updated", groupId);
+    return this.detail(caller, groupId);
+  }
+
+  // What was @ed while 叫停 stays unanswered.
+  resume(caller: Caller, groupId: string, by?: string): GroupDetail {
+    const group = this.requireMine(caller, groupId);
+    this.requireOpen(group);
+    if (group.status !== "stopped") return this.detail(caller, groupId);
+    const now = this.stamp();
+    this.store.transaction(() => {
+      this.store.updateGroup(groupId, { status: "open" }, now);
+      this.store.addMessage(groupId, { sender: null, kind: "system", body: cjk(this.who(caller, by), "让群里接着聊") }, now);
+    });
+    this.emit("group.updated", groupId);
+    return this.detail(caller, groupId);
+  }
+
+  // Its person, or their AI on their word, changes how many times a day one
+  // of their AIs may be woken here. Raised past what it used, it takes up the
+  // latest @ it had to leave, without being @ed again.
+  setQuota(caller: Caller, groupId: string, input: { agent: string; perDay: number }): GroupDetail {
+    this.requireOpen(this.requireMine(caller, groupId));
+    const member = this.store.member(groupId, input.agent);
+    if (!member || member.leftAt || member.owner !== caller.account) throw new RelayError(404, "只能改自己的 AI 在这个群里的次数");
+    if (!caller.approves && !caller.actsAs(input.agent)) throw new RelayError(403, "只能改自己的次数");
+    const perDay = this.checkQuota(input.perDay);
+    const now = this.stamp();
+    const wake = this.store.transaction(() => {
+      this.store.setQuota(groupId, input.agent, perDay);
+      return this.takeUp(this.store.group(groupId)!, input.agent, ["quota"], now);
+    });
+    this.emit("group.updated", groupId, { wake });
+    return this.detail(caller, groupId);
+  }
+
+  // What the caller's AIs (`agents`, on its computer) have to answer now. The
+  // latest @ missed while the computer was off is taken up first, within a
+  // day; one left for 每天次数 waits until its person raises them (setQuota),
+  // so a computer coming back does not spend today's on yesterday's. What it
+  // was woken for over a day ago and never answered is too late: 不在线.
+  work(caller: Caller, agents: string[]): { groupId: string; agent: string; seq: number }[] {
+    const now = this.stamp();
+    const since = this.now().getTime() - this.limits.catchUpMs;
+    const out: { groupId: string; agent: string; seq: number }[] = [];
+    for (const agent of agents.filter((a) => caller.actsAs(a))) {
+      for (const group of this.store.groupsWith([agent])) {
+        if (group.status !== "open") continue;
+        // Keeps the time it was woken, so takeUp below sees it is over a day old.
+        for (const r of this.store.receiptsOf(group.id, agent, ["reading"])) {
+          if (Date.parse(r.updatedAt) < since) this.store.setReceipt(group.id, r.seq, agent, "offline", null, r.epoch, r.updatedAt);
+        }
+        const wake = this.store.transaction(() => this.takeUp(group, agent, ["offline"], now));
+        if (wake.length) this.emit("group.updated", group.id, { wake });
+        const reading = this.store.receiptsOf(group.id, agent, ["reading"])[0];
+        if (reading) out.push({ groupId: group.id, agent, seq: reading.seq });
+      }
+    }
+    return out;
+  }
+
+  // What an AI woken here reads: the latest @ waiting on it, and from where
+  // its background session left off (the 20 before it joined, the first time
+  // or with `fresh`). Null when nothing waits on it.
+  workFor(caller: Caller, groupId: string, agent: string, fresh = false): GroupWork | null {
+    const group = this.requireGroup(groupId);
+    if (!caller.actsAs(agent)) throw new RelayError(403, "只能取自己的 AI 要回的消息");
+    const member = this.store.member(groupId, agent);
+    if (!member || member.leftAt) throw new RelayError(404, "找不到这个群");
+    const reading = this.store.receiptsOf(groupId, agent, ["reading"])[0];
+    if (!reading) return null;
+    const from = Math.max(0, member.joinedSeq - this.limits.seeBefore);
+    const goesOn = member.session !== null && !fresh;
+    const messages = goesOn
+      ? this.store.messages(groupId, Math.max(member.readSeq, from), this.limits.readCap)
+      : this.store.messages(groupId, from, this.limits.seeBefore);
+    const owner = member.owner;
+    const members = this.store.members(groupId);
+    // Named from nobody's side ("老方的 Claude", never "我的 Claude"): what the
+    // AI writes is read by everyone in the group, and "@我的 Codex" would look
+    // like each reader's own. The prompt marks its own line "（你）".
+    const plain = "";
+    return {
+      group,
+      wake: this.store.message(groupId, reading.seq)!,
+      messages,
+      session: goesOn ? member.session : null,
+      members: members.map((m) => ({ agent: m.agent, name: this.dir.agent(m.agent, plain)?.name ?? this.dir.name(m.agent, plain) })),
+      names: this.names(messages, members, plain),
+      owner: { seat: this.dir.seat(owner), name: this.dir.person(owner, "") },
+    };
+  }
+
+  // --- leaving and ending
+
+  leave(caller: Caller, groupId: string, agent: string): { ok: true } {
+    const group = this.requireMine(caller, groupId);
+    const member = this.store.member(groupId, agent);
+    if (!member || member.leftAt || member.owner !== caller.account) throw new RelayError(404, "这个 AI 不在群里");
+    if (!caller.approves && !caller.actsAs(agent)) throw new RelayError(403, "只能让自己的 AI 退群");
+    this.drop(group, agent, cjk(this.name(agent), "退出了群聊"));
+    return { ok: true };
+  }
+
+  remove(caller: Caller, groupId: string, agent: string): { ok: true } {
+    const group = this.requireMine(caller, groupId);
+    if (group.owner !== caller.account || !caller.approves) throw new RelayError(403, "只有群主可以移出 AI");
+    const member = this.store.member(groupId, agent);
+    if (!member || member.leftAt) throw new RelayError(404, "这个 AI 不在群里");
+    this.drop(group, agent, cjk(this.name(agent), "被移出了群聊"));
+    return { ok: true };
+  }
+
+  dissolve(caller: Caller, groupId: string): GroupDetail {
+    const group = this.requireMine(caller, groupId);
+    if (group.owner !== caller.account || !caller.approves) throw new RelayError(403, "只有群主可以解散群");
+    if (group.status === "dissolved") return this.detail(caller, groupId);
+    const now = this.stamp();
+    this.store.transaction(() => {
+      this.store.updateGroup(groupId, { status: "dissolved" }, now);
+      for (const from of ["reading", "offline", "quota"] as const) this.store.moveAll(groupId, from, "stopped", now);
+      this.store.addMessage(groupId, { sender: null, kind: "system", body: "群主解散了群聊" }, now);
+    });
+    this.emit("group.updated", groupId);
+    return this.detail(caller, groupId);
+  }
+
+  rename(caller: Caller, groupId: string, name: string): GroupDetail {
+    const group = this.requireMine(caller, groupId);
+    this.requireOpen(group);
+    if (group.owner !== caller.account || !caller.approves) throw new RelayError(403, "只有群主可以改群名");
+    const clean = name.trim();
+    if (!clean || clean.length > 30) throw new RelayError(400, "群名需要在 1 到 30 个字之间");
+    const now = this.stamp();
+    this.store.transaction(() => {
+      this.store.updateGroup(groupId, { name: clean }, now);
+      this.store.addMessage(groupId, { sender: null, kind: "system", body: `群名改成「${clean}」` }, now);
+    });
+    this.emit("group.updated", groupId);
+    return this.detail(caller, groupId);
+  }
+
+  // --- reading
+
+  private names(messages: GroupMessage[], members: MemberRow[], viewer: string): Record<string, string> {
+    const ids = new Set<string>(members.map((m) => m.agent));
+    for (const m of messages) if (m.sender) ids.add(m.sender);
+    return Object.fromEntries([...ids].map((id) => [id, this.dir.agent(id, viewer)?.name ?? this.dir.name(id, viewer)]));
+  }
+
+  private inviteView(i: InviteRow, viewer: string): GroupInvite {
+    return {
+      id: i.id,
+      account: i.account,
+      name: this.dir.person(i.account, viewer),
+      agent: i.agent,
+      agentName: i.agent ? this.dir.name(i.agent, viewer) : null,
+      invitedBy: i.invitedBy,
+      invitedByName: this.dir.name(i.invitedBy, viewer),
+      expiresAt: i.expiresAt,
+    };
+  }
+
+  // The group as the caller sees it: a member everything since 20 before
+  // their first AI joined; someone invited, the opening message alone.
+  detail(caller: Caller, groupId: string, limit = this.limits.detailCap): GroupDetail {
+    const group = this.requireGroup(groupId);
+    const now = this.stamp();
+    const viewer = caller.account;
+    const mine = this.mine(caller, groupId);
+    const myInvite = mine.length ? null : (this.store.invitesFor(viewer, now).find((i) => i.groupId === groupId) ?? null);
+    if (!mine.length && !myInvite) throw new RelayError(404, "找不到这个群");
+    const day = beijingDay(this.now());
+    const rows = this.store.members(groupId);
+    const members: GroupMember[] = rows.map((m) => {
+      const agent = this.dir.agent(m.agent, viewer);
+      return {
+        agent: m.agent,
+        name: agent?.name ?? this.dir.name(m.agent, viewer),
+        owner: m.owner,
+        canReceive: !!agent && agent.canReceive !== false,
+        online: this.dir.online(m.agent),
+        joinedAt: m.joinedAt,
+        ...(m.owner === viewer ? { quota: m.quota, usedToday: this.store.used(groupId, m.agent, day) } : {}),
+      };
+    });
+    const messages = mine.length
+      ? this.store.messages(groupId, Math.max(0, Math.min(...mine.map((m) => m.joinedSeq)) - this.limits.seeBefore), limit)
+      : group.openerSeq
+        ? [this.store.message(groupId, group.openerSeq)!]
+        : [];
+    return {
+      ...group,
+      role: mine.length ? "member" : "invited",
+      members,
+      invites: this.store.openInvites(groupId, now).map((i) => this.inviteView(i, viewer)),
+      myInvite: myInvite ? this.inviteView(myInvite, viewer) : null,
+      messages,
+      names: this.names(messages, rows, viewer),
+    };
+  }
+
+  // The groups an account has an AI in (`agents`: all its AIs), and those it
+  // is invited to, the latest first.
+  list(caller: Caller, agents: string[]): GroupSummary[] {
+    const now = this.stamp();
+    const member = this.store.groupsWith(agents).filter((g) => this.mine(caller, g.id).length);
+    const invites = this.store.invitesFor(caller.account, now).filter((i) => !member.some((g) => g.id === i.groupId));
+    const invited = invites.filter((i, n) => invites.findIndex((j) => j.groupId === i.groupId) === n);
+    return [
+      ...member.map((g) => this.summary(caller, g, null)),
+      ...invited.map((i) => this.summary(caller, this.store.group(i.groupId)!, i)),
+    ].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  private summary(caller: Caller, g: Group, invite: InviteRow | null): GroupSummary {
+    return {
+      ...g,
+      role: invite ? "invited" : "member",
+      memberCount: this.store.members(g.id).length,
+      lastMessage: invite ? null : (this.store.messages(g.id, 0, 1)[0] ?? null),
+      unread: invite ? true : this.unread(caller, g.id),
+      myInvite: invite ? this.inviteView(invite, caller.account) : null,
+    };
+  }
+
+  // Someone else's words since the person last opened it.
+  private unread(caller: Caller, groupId: string): boolean {
+    const seen = this.store.readSeq(caller.account, groupId);
+    return this.store.sendersAfter(groupId, seen).some((s) => s !== null && this.dir.agent(s)?.owner !== caller.account);
+  }
+
+  markRead(caller: Caller, groupId: string): void {
+    this.requireMine(caller, groupId);
+    if (!caller.approves) throw new RelayError(403, "只有人可以标记已读");
+    const last = this.store.lastSeq(groupId);
+    if (last) this.store.markRead(caller.account, groupId, last);
+  }
+
+  // Whether an account may read a group's messages and files.
+  readable(account: string, groupId: string): boolean {
+    return !!this.store.group(groupId) && this.store.members(groupId).some((m) => m.owner === account);
+  }
+
+  // Resolves at the group's next change, or after the timeout (at most a minute).
+  waitFor(groupId: string, timeoutMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      const done = (): void => {
+        clearTimeout(timer);
+        off();
+        resolve();
+      };
+      const timer = setTimeout(done, Math.max(0, Math.min(timeoutMs, 60_000)));
+      const off = this.onEvent((e) => {
+        if (e.groupId === groupId) done();
+      });
+    });
+  }
+}
