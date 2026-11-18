@@ -588,7 +588,7 @@ export class Sidecar {
       this.loginWait.failed(key);
       this.log(`${key} 出错：${raw}`);
       // Everyone in the group reads this: plain words, nothing from this computer.
-      const reason = err instanceof BudgetExceededError ? `这次回答超过了 $${REPLY_USD} 的上限` : redact(raw.trim().split("\n")[0]).text.slice(0, 120);
+      const reason = err instanceof BudgetExceededError ? `这次回答超过了 $${REPLY_USD} 的上限` : redact(raw.split("\n").map((l) => l.trim()).find(Boolean) ?? "出错了").text.slice(0, 120);
       await this.relay.failGroup(groupId, { agent, seq, reason }).catch((e: Error) => this.log(`${key} 的出错没有传到：${e.message}`));
     } finally {
       this.inFlight.delete(key);

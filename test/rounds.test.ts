@@ -202,6 +202,56 @@ test("the computer asks once, when the last round opens, and 加 10 轮 lets the
   }
 });
 
+// Counts how often the background runner is started, held ones included.
+class CountedRunner extends HeldRunner {
+  starts = 0;
+  async run(input: RunInput): Promise<RunOutput> {
+    this.starts++;
+    return super.run(input);
+  }
+}
+
+test("the asker's question that opens the last round is answered once, not again for the last-round event", async () => {
+  const { relay, client, config } = await startTestRelay();
+  const runner = new CountedRunner(["先写分镜", "用 Midjourney 出的", "不该有第三次"]);
+  let asked = 0;
+  const sidecar = new Sidecar({
+    client,
+    agents: config.agents,
+    runners: { [CLAUDE]: runner },
+    choose: () => {
+      asked++;
+      let resolve!: (c: Choice) => void;
+      const answer = new Promise<Choice>((r) => (resolve = r));
+      return { answer, close: () => resolve("stop") };
+    },
+    notify: () => {},
+    webUrl: relay.url,
+    log: () => {},
+  });
+  sidecar.start();
+  try {
+    const t = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "视频制作流程", message: "第一步怎么做？" });
+    await client.approve(t.id, { maxRounds: 2, budgetUsd: 1 });
+    await until(async () => (await client.getThread(t.id)).roundsUsed === 1);
+    assert.equal(runner.starts, 1);
+
+    await client.postMessage(t.id, { from: CODEX, body: "封面图怎么出的？" });
+    await until(async () => asked === 1);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(runner.starts, 2, "one run for the question while it is still being answered");
+
+    runner.letGo();
+    await until(async () => (await client.getThread(t.id)).roundsUsed === 2);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(runner.starts, 2, "and none after it");
+    assert.equal(asked, 1);
+  } finally {
+    sidecar.stop();
+    await relay.close();
+  }
+});
+
 test("where no dialog can be shown, a notification points to the conversation", async () => {
   const { relay, client, config } = await startTestRelay();
   const told: string[][] = [];

@@ -123,6 +123,10 @@ describe("an AI @ed in a group answers in the background", () => {
     assert.ok(reason.length <= 120, String(reason.length));
   });
 
+  test("a failure whose first lines are empty shows its first line with words", async () => {
+    assert.equal(await failedReason("空行开头", new Error("\n  \n\t钱包连不上 /Users/someone/x\n后面的")), "钱包连不上 ~/x");
+  });
+
   test("an answer that comes after 叫停 is not posted", async () => {
     const codex = wangLaptop.agent("codex");
     let release!: () => void;
