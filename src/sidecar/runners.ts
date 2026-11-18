@@ -44,6 +44,12 @@ export interface AgentRunner {
 // The run hit the dollar cap it was given, so no answer was produced.
 export class BudgetExceededError extends Error {}
 
+// The session to go on in cannot be found: Claude keeps a session under the
+// folder it ran in, and finds it only from there, so one started before the
+// background moved to another folder, or one Claude has since cleared out,
+// is gone. The round starts over in a new session instead.
+export class SessionLostError extends Error {}
+
 // The CLI is not logged in, or its login ran out. The person fixes it on this
 // computer; until then the thread waits instead of failing.
 export class LoginExpiredError extends Error {
@@ -219,6 +225,7 @@ export class ClaudeRunner implements AgentRunner {
     if (!parsed || parsed.is_error || code !== 0 || !parsed.result) {
       const reason = parsed?.result || parsed?.subtype || lastLine(stderr) || `退出码 ${code}`;
       if (/max_budget/i.test(`${parsed?.subtype ?? ""} ${reason}`)) throw new BudgetExceededError(reason);
+      if (/no conversation found/i.test(reason)) throw new SessionLostError(reason);
       if (LOGIN_TROUBLE.test(reason)) throw new LoginExpiredError("claude", reason, token !== null);
       throw new Error(reason);
     }

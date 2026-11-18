@@ -12,7 +12,7 @@ import { userPromptHook } from "../src/hook.js";
 import { createMcpServer } from "../src/mcp/server.js";
 import type { RunningRelay } from "../src/relay/server.js";
 import type { Answer, ApprovalPrompt } from "../src/sidecar/dialog.js";
-import { BudgetExceededError, LoginExpiredError } from "../src/sidecar/runners.js";
+import { BudgetExceededError, LoginExpiredError, SessionLostError } from "../src/sidecar/runners.js";
 import { loginAdvice, Sidecar } from "../src/sidecar/sidecar.js";
 import { CLAUDE, CODEX, ScriptedRunner, startTestRelay, until } from "./helpers.js";
 
@@ -257,6 +257,30 @@ describe("experiment 0 end to end", () => {
     assert.equal(runner.calls.length, 1, "nothing ran before the person agreed");
     await client.approve(pending.id);
     assert.match(textOf(await second), /第二轮回答/);
+  });
+
+  test("a follow-up whose background session is gone is answered in a new one that is given the thread so far", async () => {
+    startSidecar(["用的是接口 #281", new SessionLostError("No conversation found with session ID: session-1"), "绑定关系来自绑定表"]);
+    const codex = await mcpClient(client, CODEX, relay.url);
+    const asking = codex.callTool({ name: "send_request", arguments: { to: "我的 Claude", topic: "会话丢了", message: "数据从哪查的？" } });
+    const pending = await until(async () =>
+      (await client.listThreads({ status: "pending", to: CLAUDE })).find((t) => t.topic === "会话丢了"),
+    );
+    await client.approve(pending.id);
+    assert.match(textOf(await asking), /接口 #281/);
+
+    const next = textOf(await codex.callTool({ name: "send_message", arguments: { thread_id: pending.id, message: "绑定关系呢？" } }));
+    assert.match(next, /绑定关系来自绑定表/);
+    assert.doesNotMatch(next, /出错|No conversation/);
+    assert.equal(runner.calls[1].sessionId, "session-1");
+    const fresh = runner.calls[2];
+    assert.equal(fresh.sessionId, undefined, "the lost session is not tried again");
+    assert.match(fresh.prompt, /话题：会话丢了/);
+    assert.match(fresh.prompt, /<message>\n数据从哪查的？\n<\/message>/, "it is given what was asked before");
+    assert.match(fresh.prompt, /你之前说：\n<message>\n用的是接口 #281\n<\/message>/, "and what it answered");
+    assert.match(fresh.prompt, /<message>\n绑定关系呢？\n<\/message>$/, "and answers the latest question");
+    assert.equal((await client.getThread(pending.id)).roundsUsed, 2);
+    await codex.callTool({ name: "close_thread", arguments: { thread_id: pending.id } });
   });
 
   test("the hook stays quiet inside headless runs", async () => {

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { secretStore } from "../src/device.js";
-import { BudgetExceededError, ClaudeRunner, CodexRunner, LoginExpiredError } from "../src/sidecar/runners.js";
+import { BudgetExceededError, ClaudeRunner, CodexRunner, LoginExpiredError, SessionLostError } from "../src/sidecar/runners.js";
 
 // The keychain on this computer may hold the person's own credential. The tests
 // never read it: the fake claude below writes down what it was given.
@@ -170,6 +170,28 @@ test("reports claude errors", async () => {
   await assert.rejects(
     new ClaudeRunner(bin).run({ prompt: "问题", systemPrompt: "规则", budgetUsd: 0.1 }),
     (err: unknown) => err instanceof BudgetExceededError,
+  );
+  delete process.env.ACHAT_CLAUDE_PROJECTS;
+});
+
+test("a session claude can no longer find is reported as lost, not as a failure", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "achat-runner-"));
+  process.env.ACHAT_CLAUDE_PROJECTS = dir;
+  // What claude does when --resume names a session it has no record of in
+  // this folder: nothing on stdout, the reason on stderr, exit code 1.
+  const bin = join(dir, "claude");
+  writeFileSync(
+    bin,
+    `#!/usr/bin/env node
+const id = process.argv[process.argv.indexOf("--resume") + 1];
+process.stderr.write("No conversation found with session ID: " + id + "\\n");
+process.exit(1);
+`,
+  );
+  chmodSync(bin, 0o755);
+  await assert.rejects(
+    new ClaudeRunner(bin).run({ prompt: "追问", systemPrompt: "规则", budgetUsd: 1, sessionId: "3bf1592f" }),
+    (err: unknown) => err instanceof SessionLostError,
   );
   delete process.env.ACHAT_CLAUDE_PROJECTS;
 });
