@@ -1,9 +1,9 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeLabel, isEffort, EFFORTS, type Effort, type ModelChoice, type ModelOffer } from "../models.js";
-import { claudeCommand } from "../which.js";
+import { claudeCommand, codexCommand } from "../which.js";
 
 // What Claude Code and Codex on this computer can use, and what they are set
 // to use, as the person sees it when they open them. Achat passes the model
@@ -118,10 +118,28 @@ function effortsOf(m: CachedModel): Effort[] {
   return EFFORTS.filter((e) => named.includes(e));
 }
 
-// Codex's models, from the list it keeps of what this login can use, and the
-// model and 推理档位 set in config.toml. The background 问答 does not read
-// config.toml (no MCP servers or hooks there), so Achat passes them itself.
-export function codexOffer(home = codexHome()): ModelOffer | null {
+// The models the codex Achat runs can use, as `codex debug models` lists them
+// (a couple of seconds, no model is asked); null from a codex without it.
+function codexCatalog(command: string): Promise<unknown[] | null> {
+  return new Promise((resolve) => {
+    execFile(command, ["debug", "models"], { timeout: 30_000, maxBuffer: 20_000_000 }, (err, stdout) => {
+      if (err) return resolve(null);
+      try {
+        const models = (JSON.parse(stdout) as { models?: unknown }).models;
+        resolve(Array.isArray(models) ? models : null);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+// Codex's models, from the codex Achat runs, and the model and 推理档位 set
+// in config.toml. The background 问答 does not read config.toml (no MCP
+// servers or hooks there), so Achat passes them itself. Without `codex debug
+// models` it reads the list Codex keeps, which whichever codex last ran
+// wrote: an old one on the PATH lists only the models it knows.
+export async function codexOffer(home = codexHome(), command = codexCommand()): Promise<ModelOffer | null> {
   let toml = "";
   try {
     toml = readFileSync(join(home, "config.toml"), "utf8");
@@ -129,7 +147,7 @@ export function codexOffer(home = codexHome()): ModelOffer | null {
     // no settings
   }
   const cache = readJson(join(home, "models_cache.json"));
-  const listed = (Array.isArray(cache?.models) ? cache.models : []) as CachedModel[];
+  const listed = ((await codexCatalog(command)) ?? (Array.isArray(cache?.models) ? cache.models : [])) as CachedModel[];
   const cached = listed.filter((m) => typeof m.slug === "string");
   const models: ModelChoice[] = cached
     .filter((m) => m.visibility === undefined || m.visibility === "list")

@@ -55,7 +55,7 @@ test("a conversation runs on its own pick, else the AI's, else the AI's default,
   assert.equal(readOffer({ models: [], default: { id: "x", label: "X", efforts: [], effort: "fast" } }), null);
 });
 
-test("Codex offers what its login can use, defaulting to config.toml", () => {
+test("Codex offers what the codex Achat runs can use, defaulting to config.toml", async () => {
   const home = mkdtempSync(join(tmpdir(), "achat-codex-home-"));
   writeFileSync(join(home, "config.toml"), 'model = "gpt-b"\nmodel_reasoning_effort = "high"\n\n[mcp_servers.achat]\nmodel = "not-this"\n');
   writeFileSync(
@@ -68,15 +68,27 @@ test("Codex offers what its login can use, defaulting to config.toml", () => {
       ],
     }),
   );
-  const offer = codexOffer(home)!;
+  // A codex without `debug models`: the list Codex keeps.
+  const old = join(home, "codex-old");
+  writeFileSync(old, "#!/bin/sh\nexit 2\n");
+  chmodSync(old, 0o755);
+  const offer = (await codexOffer(home, old))!;
   assert.deepEqual(offer.models.map((m) => m.id), ["gpt-a", "gpt-b"]);
   assert.deepEqual(offer.models[1].efforts, ["low", "high"]);
   assert.deepEqual(offer.default, { id: "gpt-b", label: "GPT-B", efforts: ["low", "high"], effort: "high" });
 
   // Without a setting, the first model Codex lists, at its own 推理档位.
   writeFileSync(join(home, "config.toml"), "");
-  assert.deepEqual(codexOffer(home)!.default, { id: "gpt-a", label: "GPT-A", efforts: ["low", "medium", "ultra"], effort: "low" });
-  assert.equal(codexOffer(mkdtempSync(join(tmpdir(), "achat-codex-none-"))), null);
+  assert.deepEqual((await codexOffer(home, old))!.default, { id: "gpt-a", label: "GPT-A", efforts: ["low", "medium", "ultra"], effort: "low" });
+  assert.equal(await codexOffer(mkdtempSync(join(tmpdir(), "achat-codex-none-")), old), null);
+
+  // The codex Achat runs says what it can use, whatever an older one last wrote there.
+  const current = join(home, "codex-new");
+  const catalog = { models: [{ slug: "gpt-new", display_name: "GPT-New", visibility: "list", supported_reasoning_levels: [{ effort: "low" }, { effort: "max" }] }] };
+  writeFileSync(current, `#!/bin/sh\n[ "$1 $2" = "debug models" ] && echo '${JSON.stringify(catalog)}'\n`);
+  chmodSync(current, 0o755);
+  writeFileSync(join(home, "config.toml"), 'model = "gpt-new"\n');
+  assert.deepEqual((await codexOffer(home, current))!.models, [{ id: "gpt-new", label: "GPT-New", efforts: ["low", "max"] }]);
 });
 
 // A claude that says which model it starts on, by default or for --model,

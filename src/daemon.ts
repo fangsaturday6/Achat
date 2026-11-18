@@ -109,7 +109,7 @@ function prepareHistory(cfg: AchatConfig): void {
 
 // What Claude Code and Codex here can use and are set to use.
 function offersFor(cfg: AchatConfig, idOf: (a: AchatConfig["agents"][number]) => string): Record<string, () => Promise<ModelOffer | null>> {
-  return Object.fromEntries(cfg.agents.map((a) => [idOf(a), a.client === "claude" ? () => claudeOffer() : async () => codexOffer()]));
+  return Object.fromEntries(cfg.agents.map((a) => [idOf(a), a.client === "claude" ? () => claudeOffer() : () => codexOffer()]));
 }
 
 // Claude Code and Codex each open a conversation of their own to 动手.
