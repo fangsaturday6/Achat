@@ -4,6 +4,7 @@ import type { AgentConfig } from "../config.js";
 import { isEffort } from "../models.js";
 import type { Thread, ThreadMode, ThreadStatus } from "../types.js";
 import { optNum, readJson, send, str } from "./http.js";
+import type { GroupService } from "./groups.js";
 import { RelayError, type RelayService } from "./service.js";
 
 const STATUSES = new Set(["pending", "active", "declined", "closed", "stopped", "expired"]);
@@ -41,14 +42,18 @@ function modeOf(body: Record<string, unknown>): ThreadMode | undefined {
   return body.mode === undefined || body.mode === null ? undefined : (body.mode as ThreadMode);
 }
 
-// Starting a conversation and saying something in one may carry files.
+// Starting a conversation or a group, and saying something in one, may carry files.
 export function takesFiles(method: string, pathname: string): boolean {
   const parts = pathname.split("/").filter(Boolean).slice(1);
-  return method === "POST" && parts[0] === "threads" && (parts.length === 1 || (parts.length === 3 && parts[2] === "messages"));
+  return (
+    method === "POST" &&
+    (parts[0] === "threads" || parts[0] === "groups") &&
+    (parts.length === 1 || (parts.length === 3 && parts[2] === "messages"))
+  );
 }
 
 // Files as sent: a name, maybe a type, and the bytes in base64.
-function filesOf(body: Record<string, unknown>): NewFile[] {
+export function filesOf(body: Record<string, unknown>): NewFile[] {
   const raw = body.files;
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) throw new RelayError(400, "files 需要是文件的列表");
@@ -65,7 +70,7 @@ function pickOf(body: Record<string, unknown>): { model?: unknown; effort?: unkn
   return { ...(body.model !== undefined ? { model: body.model } : {}), ...(body.effort !== undefined ? { effort: body.effort } : {}) };
 }
 
-// Handles /api/agents/*, /api/events, /api/threads/* and /api/files/*;
+// Handles /api/agents/*, /api/events (threads' and groups'), /api/threads/* and /api/files/*;
 // returns false for other paths.
 export async function threadsApi(
   req: IncomingMessage,
@@ -73,6 +78,7 @@ export async function threadsApi(
   url: URL,
   service: RelayService,
   viewer: Viewer,
+  groups?: GroupService,
 ): Promise<boolean> {
   const method = req.method ?? "GET";
   const parts = url.pathname.split("/").filter(Boolean).slice(1); // drop "api"
@@ -119,12 +125,20 @@ export async function threadsApi(
       if (agent && e.from !== agent && e.to !== agent) return;
       res.write(`data: ${JSON.stringify(e)}\n\n`);
     });
+    // Groups' events come on the same stream, to the accounts with an AI in
+    // the group or an invite to it.
+    const offGroups = groups?.onEvent((e) => {
+      if (!e.members.some((a) => viewer.sees(a))) return;
+      if (agent && !e.members.includes(agent)) return;
+      res.write(`data: ${JSON.stringify(e)}\n\n`);
+    });
     const heartbeat = setInterval(() => res.write(": ping\n\n"), 25_000);
     // The response closes with the connection; the request may already have
     // closed once its (empty) body was read.
     res.on("close", () => {
       clearInterval(heartbeat);
       off();
+      offGroups?.();
     });
     return true;
   }
@@ -133,7 +147,9 @@ export async function threadsApi(
   // the page; anything else is downloaded, so it cannot run as a page there.
   if (method === "GET" && parts[0] === "files" && parts.length === 2) {
     const file = service.file(parts[1]);
-    if (!file || !readable(viewer, service.getThread(file.threadId))) throw new RelayError(404, "找不到这个文件");
+    // A group's files are kept under the group: for its members.
+    const allowed = !!file && (file.threadId.startsWith("g_") ? !!groups?.readable(viewer.reader, file.threadId) : readable(viewer, service.getThread(file.threadId)));
+    if (!file || !allowed) throw new RelayError(404, "找不到这个文件");
     const shown = SHOWN_TYPES.has(file.type);
     res.writeHead(200, {
       "content-type": shown ? file.type : "application/octet-stream",

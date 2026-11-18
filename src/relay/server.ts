@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { LOCAL_PERSON, type AchatConfig, type AgentConfig } from "../config.js";
+import { GROUPS_NEED_ACCOUNT } from "./groups.js";
 import { send, serveStatic } from "./http.js";
 import { RelayError, RelayService, SWEEP_EVERY_MS } from "./service.js";
 import { Store } from "./store.js";
@@ -70,6 +71,8 @@ export async function startRelay(opts: RelayOptions): Promise<RunningRelay> {
       if (req.method === "GET" && url.pathname === "/api/health") {
         return send(res, 200, { pid: process.pid, startedAt, mode: "local" });
       }
+      // Groups need an account (8n); this computer alone has none.
+      if (url.pathname === "/api/groups" || url.pathname.startsWith("/api/groups/")) throw new RelayError(409, GROUPS_NEED_ACCOUNT);
       if (await threadsApi(req, res, url, service, everything)) return;
       throw new RelayError(404, "没有这个接口");
     } catch (err) {

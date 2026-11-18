@@ -11,6 +11,9 @@ import { parseJson, readBody, send, serveStatic, str } from "../relay/http.js";
 import { RelayError, RelayService, SWEEP_EVERY_MS, type RelaySettings } from "../relay/service.js";
 import { Store } from "../relay/store.js";
 import { takesFiles, threadsApi, type Viewer } from "../relay/threads-api.js";
+import { GroupService } from "../relay/groups.js";
+import { groupsApi } from "../relay/groups-api.js";
+import { Presence } from "./presence.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { RelayClient } from "../client.js";
@@ -88,6 +91,7 @@ export interface RunningCloud {
   port: number;
   service: RelayService;
   accounts: AccountStore;
+  groups: GroupService;
   // Reminders, expiry and reply emails, which otherwise run every ten minutes.
   sweep(): Promise<void>;
   close(): Promise<void>;
@@ -274,6 +278,31 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
       },
     };
   }
+
+  // Which computers have their event stream open: their AIs can be woken in a group.
+  const presence = new Presence();
+  const groups = new GroupService(
+    store,
+    {
+      agent: (id, viewer) => {
+        const a = accounts.agent(id);
+        return a && (a.active || a.client === "person") ? accounts.agentConfig(a, viewer) : undefined;
+      },
+      name: (id, viewer) => {
+        const a = accounts.agent(id);
+        return a ? accounts.agentConfig(a, viewer).name : "已移除的 AI";
+      },
+      friends: (a, b) => a === b || accounts.isContact(a, b),
+      online: (id) => presence.online(accounts.agent(id)?.deviceId),
+      seat: (account) => seatOf(account).id,
+      person: (account, viewer) => {
+        if (account === viewer) return "我";
+        const found = accounts.account(account);
+        return found ? accounts.displayName(found) : "某人";
+      },
+    },
+    now,
+  );
 
   function requireWeb(p: Principal | null): Extract<Principal, { kind: "web" }> {
     if (!p) throw new RelayError(401, "请先登录");
@@ -938,7 +967,18 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
         return send(res, 200, person(requireAny(p).account, parts[1]));
     }
 
-    if (await threadsApi(req, res, url, service, viewerFor(requireAny(p)))) return;
+    const viewer = viewerFor(requireAny(p));
+    // A computer's event stream is open while this request lasts, and it
+    // beats every half minute to say it is still there.
+    if (route === "GET /events" && p?.kind === "device") res.on("close", presence.connect(p.device.id));
+    if (route === "POST /presence") {
+      if (p?.kind !== "device") throw new RelayError(403, "只有电脑上的 Achat 会报在线");
+      presence.beat(p.device.id);
+      send(res, 200, { ok: true });
+      return;
+    }
+    if (await groupsApi(req, res, url, groups, viewer)) return;
+    if (await threadsApi(req, res, url, service, viewer, groups)) return;
     throw new RelayError(404, "没有这个接口");
   }
 
@@ -1180,6 +1220,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     port,
     service,
     accounts,
+    groups,
     sweep,
     close: () =>
       new Promise<void>((resolve) => {

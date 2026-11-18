@@ -3,7 +3,7 @@ import type { OutgoingFile } from "./attachments.js";
 import type { AgentClient, AgentConfig } from "./config.js";
 import { signRequest, type DeviceKey } from "./device.js";
 import type { AgentModels, Effort, ModelOffer } from "./models.js";
-import type { RelayEvent, Scope, ThreadDetail, ThreadMode, ThreadStatus, ThreadSummary } from "./types.js";
+import type { GroupDetail, GroupEvent, GroupSummary, GroupTarget, GroupWork, RelayEvent, Scope, ThreadDetail, ThreadMode, ThreadStatus, ThreadSummary } from "./types.js";
 
 // A pick as sent: a model's id or 推理档位, or "default" for the next one down.
 export interface PickBody {
@@ -373,6 +373,94 @@ export class RelayClient {
     return this.call("GET", `/api/threads/${encodeURIComponent(id)}/wait?${q}`, undefined, signal);
   }
 
+  // --- 群
+
+  groups(): Promise<GroupSummary[]> {
+    return this.call("GET", "/api/groups");
+  }
+
+  group(id: string): Promise<GroupDetail> {
+    return this.call("GET", `/api/groups/${encodeURIComponent(id)}`);
+  }
+
+  // This computer is still here (every half minute); see src/cloud/presence.ts.
+  beat(): Promise<{ ok: true }> {
+    return this.call("POST", "/api/presence", {});
+  }
+
+  // `message` is the opening message: it calls on everyone, those who join later too.
+  createGroup(input: { from: string; name?: string; members: GroupTarget[]; message?: string; files?: OutgoingFile[] }): Promise<GroupDetail> {
+    return this.call("POST", "/api/groups", input);
+  }
+
+  inviteToGroup(id: string, input: { from: string; members: GroupTarget[] }): Promise<GroupDetail> {
+    return this.call("POST", `/api/groups/${encodeURIComponent(id)}/invites`, input);
+  }
+
+  postGroupMessage(
+    id: string,
+    input: {
+      from: string;
+      body: string;
+      mentions?: string[];
+      files?: OutgoingFile[];
+      // A background answer: what woke it, the 叫停 count then, and how far it read.
+      replyTo?: number;
+      epoch?: number;
+      sessionId?: string;
+      readTo?: number;
+      costUsd?: number;
+      redactions?: number;
+      model?: string;
+      effort?: Effort;
+    },
+  ): Promise<GroupDetail> {
+    return this.call("POST", `/api/groups/${encodeURIComponent(id)}/messages`, input);
+  }
+
+  passGroup(id: string, input: { agent: string; seq: number; epoch: number; reason: string; sessionId?: string; readTo?: number }): Promise<GroupDetail> {
+    return this.call("POST", `/api/groups/${encodeURIComponent(id)}/pass`, input);
+  }
+
+  holdGroup(id: string, input: { agent: string; seq: number; reason: string }): Promise<GroupDetail> {
+    return this.call("POST", `/api/groups/${encodeURIComponent(id)}/hold`, input);
+  }
+
+  failGroup(id: string, input: { agent: string; seq: number; reason: string }): Promise<GroupDetail> {
+    return this.call("POST", `/api/groups/${encodeURIComponent(id)}/fail`, input);
+  }
+
+  stopGroup(id: string, by?: string): Promise<GroupDetail> {
+    return this.call("POST", `/api/groups/${encodeURIComponent(id)}/stop`, { by });
+  }
+
+  resumeGroup(id: string, by?: string): Promise<GroupDetail> {
+    return this.call("POST", `/api/groups/${encodeURIComponent(id)}/continue`, { by });
+  }
+
+  setGroupQuota(id: string, agent: string, perDay: number): Promise<GroupDetail> {
+    return this.call("POST", `/api/groups/${encodeURIComponent(id)}/quota`, { agent, perDay });
+  }
+
+  leaveGroup(id: string, agent: string): Promise<{ ok: boolean }> {
+    return this.call("POST", `/api/groups/${encodeURIComponent(id)}/leave`, { agent });
+  }
+
+  // What the AIs here were woken for and have not answered; an @ missed while
+  // this computer was off is taken up first.
+  groupWork(agents: string[]): Promise<{ groupId: string; agent: string; seq: number }[]> {
+    return this.call("GET", `/api/groups/work?${new URLSearchParams({ agents: agents.join(",") })}`);
+  }
+
+  groupWorkFor(id: string, agent: string, fresh = false): Promise<GroupWork | null> {
+    const q = new URLSearchParams({ agent, ...(fresh ? { fresh: "1" } : {}) });
+    return this.call("GET", `/api/groups/${encodeURIComponent(id)}/work?${q}`);
+  }
+
+  waitGroup(id: string, timeoutMs: number, signal?: AbortSignal): Promise<GroupDetail> {
+    return this.call("GET", `/api/groups/${encodeURIComponent(id)}/wait?${new URLSearchParams({ timeout: String(timeoutMs) })}`, undefined, signal);
+  }
+
   // Follows the relay's event stream and reconnects after a drop. Returns a
   // function that stops it.
   // `idleMs`: the relay says something every 25 seconds, so a stream silent
@@ -381,7 +469,7 @@ export class RelayClient {
     agent: string | undefined,
     onEvent: (e: RelayEvent) => void,
     onConnect?: () => void,
-    { idleMs = 60_000, retryMs = 2000 }: { idleMs?: number; retryMs?: number } = {},
+    { idleMs = 60_000, retryMs = 2000, onGroup }: { idleMs?: number; retryMs?: number; onGroup?: (e: GroupEvent) => void } = {},
   ): () => void {
     const controller = new AbortController();
     const q = new URLSearchParams();
@@ -418,7 +506,12 @@ export class RelayClient {
                 .filter((line) => line.startsWith("data: "))
                 .map((line) => line.slice(6))
                 .join("\n");
-              if (data) onEvent(JSON.parse(data) as RelayEvent);
+              if (data) {
+                const event = JSON.parse(data) as RelayEvent | GroupEvent;
+                // Groups' events come on the same stream; who does not follow groups skips them.
+                if ("groupId" in event) onGroup?.(event);
+                else onEvent(event);
+              }
             }
           }
         } catch {
