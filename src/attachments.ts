@@ -135,6 +135,13 @@ export async function saveFiles(client: { file(id: string): Promise<Uint8Array> 
   return paths;
 }
 
+// The files of these messages, saved as above: their paths by seq.
+export async function saveAllFiles(client: { file(id: string): Promise<Uint8Array> }, messages: Message[]): Promise<Map<number, string[]>> {
+  const saved = new Map<number, string[]>();
+  for (const m of messages) saved.set(m.seq, await saveFiles(client, m));
+  return saved;
+}
+
 // One line per saved file, for an AI to read: "- /path（图片，12 KB）".
 export function savedLines(m: Message, paths: string[]): string[] {
   return m.files.map((f, i) => `- ${paths[i]}（${SHOWN_TYPES.has(f.type) ? "图片，" : ""}${sizeLabel(f.size)}）`);

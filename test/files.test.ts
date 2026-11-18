@@ -11,7 +11,8 @@ import { RelayClient } from "../src/client.js";
 import type { AchatConfig } from "../src/config.js";
 import { createMcpServer } from "../src/mcp/server.js";
 import type { RunningRelay } from "../src/relay/server.js";
-import { Sidecar } from "../src/sidecar/sidecar.js";
+import { SessionLostError } from "../src/sidecar/runners.js";
+import { replySystemPrompt, responderSystemPrompt, Sidecar } from "../src/sidecar/sidecar.js";
 import { claudeTaskArgs, type TaskOpener, type TaskRecord, type TaskStart } from "../src/sidecar/tasks.js";
 import { CLAUDE, CODEX, ScriptedRunner, startTestRelay, until } from "./helpers.js";
 
@@ -179,6 +180,35 @@ describe("AIs sending and receiving files", () => {
     assert.deepEqual(readFileSync(saved), PNG);
     assert.ok(runner.calls[0].prompt.includes(saved), runner.calls[0].prompt);
     assert.deepEqual(runner.calls[0].readDirs, [filesDir(id)]);
+  });
+
+  test("the rules for answering in the background let the AI open the files it was sent", () => {
+    const claude = { id: CLAUDE, name: "我的 Claude", client: "claude" as const };
+    const codex = { id: CODEX, name: "我的 Codex", client: "codex" as const };
+    const rules = [responderSystemPrompt(claude, codex), responderSystemPrompt(codex, claude), replySystemPrompt(claude, "老方", "对方的 AI「老王的 Codex」")];
+    for (const r of rules) {
+      assert.match(r, /对方发来的文件/, r);
+      assert.doesNotMatch(r, /只读这些，不读别的文件|只读当前目录。/, r);
+    }
+  });
+
+  test("a new session after the old one is lost is given where the earlier files are, not only their names", async () => {
+    const runner = new ScriptedRunner(["收到表结构", new SessionLostError("No conversation found with session ID: session-1"), "读了附件"]);
+    sidecar = new Sidecar({ client, agents: config.agents, runners: { [CLAUDE]: runner }, notify: () => {}, webUrl: relay.url, log: () => {} });
+    sidecar.start();
+    const codex = await mcpClient(client, CODEX, relay.url);
+    const asking = codex.callTool({
+      name: "send_request",
+      arguments: { to: "我的 Claude", topic: "评审表结构", message: "请评审", files: [local("schema.sql", "CREATE TABLE t (x TEXT);")] },
+    });
+    const id = await approveWhenAsked("评审表结构");
+    assert.match(textOf(await asking), /收到表结构/);
+    const next = textOf(await codex.callTool({ name: "send_message", arguments: { thread_id: id, message: "读取我给你的附件再评估" } }));
+    assert.match(next, /读了附件/);
+    const fresh = runner.calls[2];
+    assert.equal(fresh.sessionId, undefined);
+    assert.ok(fresh.prompt.includes(join(filesDir(id), "1", "schema.sql")), fresh.prompt);
+    assert.deepEqual(fresh.readDirs, [filesDir(id)]);
   });
 
   test("a file handed back reaches the asking AI as a path on its computer", async () => {
