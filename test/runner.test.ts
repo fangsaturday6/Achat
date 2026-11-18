@@ -20,7 +20,11 @@ function fakeClaude(dir: string, reply: object): string {
 const fs = require("node:fs");
 let input = "";
 process.stdin.on("data", (d) => (input += d)).on("end", () => {
-  fs.writeFileSync(${JSON.stringify(join(dir, "call.json"))}, JSON.stringify({ args: process.argv.slice(2), input, headless: process.env.ACHAT_HEADLESS, token: process.env.CLAUDE_CODE_OAUTH_TOKEN, apiTimeout: process.env.API_TIMEOUT_MS, cwd: process.cwd(), files: fs.readdirSync(process.cwd(), { recursive: true }) }));
+  // Judging runs in the system's temp folder, which is large and changes under
+  // other processes while it is read; what is there is not looked at.
+  const inTemp = fs.realpathSync(process.cwd()) === fs.realpathSync(require("node:os").tmpdir());
+  const files = inTemp ? [] : fs.readdirSync(process.cwd(), { recursive: true });
+  fs.writeFileSync(${JSON.stringify(join(dir, "call.json"))}, JSON.stringify({ args: process.argv.slice(2), input, headless: process.env.ACHAT_HEADLESS, token: process.env.CLAUDE_CODE_OAUTH_TOKEN, apiTimeout: process.env.API_TIMEOUT_MS, cwd: process.cwd(), files }));
   const args = process.argv.slice(2);
   const flag = args.includes("--resume") ? "--resume" : "--session-id";
   const sid = args[args.indexOf(flag) + 1];
