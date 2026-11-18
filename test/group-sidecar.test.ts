@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { after, afterEach, before, describe, test } from "node:test";
+import { after, afterEach, before, describe, mock, test } from "node:test";
+import { RelayClientError } from "../src/client.js";
 import type { RunningCloud } from "../src/cloud/server.js";
 import type { AgentRunner, RunInput, RunOutput } from "../src/sidecar/runners.js";
 import { Sidecar } from "../src/sidecar/sidecar.js";
@@ -113,4 +114,33 @@ describe("an AI @ed in a group answers in the background", () => {
     assert.ok(!d.messages.some((m) => m.body === "晚到的回答"));
     assert.equal(d.messages.find((m) => m.seq === asked.messages.at(-1).seq)!.receipts[0].state, "stopped");
   });
+});
+
+test("a computer that updated before the cloud asks again in ten minutes, not never", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  let beats = 0;
+  const relay = {
+    subscribe: () => () => {},
+    beat: async () => {
+      beats += 1;
+      if (beats === 1) throw new RelayClientError(404, "没有这个接口");
+    },
+  };
+  const sidecar = new Sidecar({ client: { patient: () => relay } as any, agents: [], runners: {}, notify: () => {}, webUrl: "http://x", log: () => {} });
+  try {
+    sidecar.start();
+    await until(async () => beats === 1);
+    await new Promise((r) => setImmediate(r));
+    mock.timers.tick(30_000);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(beats, 1, "not after 30 seconds");
+    mock.timers.tick(10 * 60_000);
+    await until(async () => beats === 2);
+    await new Promise((r) => setImmediate(r));
+    mock.timers.tick(30_000);
+    await until(async () => beats === 3);
+  } finally {
+    sidecar.stop();
+    mock.timers.reset();
+  }
 });

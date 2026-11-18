@@ -12,17 +12,21 @@ export class Presence {
 
   constructor(private now: () => number = () => Date.now()) {}
 
-  // Returns what to call when that stream closes. Opening it counts as a beat.
+  // Returns what to call when that stream closes. Opening it is not a beat:
+  // a computer from before groups opens one too and never beats, and it
+  // would never answer an @.
   connect(deviceId: string): () => void {
     this.open.set(deviceId, (this.open.get(deviceId) ?? 0) + 1);
-    this.beat(deviceId);
     let closed = false;
     return () => {
       if (closed) return;
       closed = true;
       const left = (this.open.get(deviceId) ?? 1) - 1;
       if (left > 0) this.open.set(deviceId, left);
-      else this.open.delete(deviceId);
+      else {
+        this.open.delete(deviceId);
+        this.beats.delete(deviceId);
+      }
     };
   }
 
@@ -32,6 +36,7 @@ export class Presence {
 
   online(deviceId: string | null | undefined): boolean {
     if (!deviceId || (this.open.get(deviceId) ?? 0) === 0) return false;
-    return this.now() - (this.beats.get(deviceId) ?? 0) <= BEAT_WITHIN_MS;
+    const beat = this.beats.get(deviceId);
+    return beat !== undefined && this.now() - beat <= BEAT_WITHIN_MS;
   }
 }

@@ -971,6 +971,8 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     // A computer's event stream is open while this request lasts, and it
     // beats every half minute to say it is still there.
     if (route === "GET /events" && p?.kind === "device") res.on("close", presence.connect(p.device.id));
+    // A new computer asks for group work as soon as it connects: that is its first beat.
+    if (route === "GET /groups/work" && p?.kind === "device") presence.beat(p.device.id);
     if (route === "POST /presence") {
       if (p?.kind !== "device") throw new RelayError(403, "只有电脑上的 Achat 会报在线");
       presence.beat(p.device.id);

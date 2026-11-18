@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -18,10 +18,13 @@ test("a database from before keeps its files, and a group's files go in the same
     INSERT INTO threads (id, topic, from_agent, to_agent, status, max_rounds, budget_usd, created_at, updated_at) VALUES ('t1', '话题', 'a', 'b', 'active', 5, 5, '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z');
     INSERT INTO messages (thread_id, seq, sender, kind, body, created_at) VALUES ('t1', 1, 'a', 'request', '看图', '2026-11-01T00:00:00Z');
     INSERT INTO files VALUES ('f_old', 1, 't1', 0, 'a.png', 'image/png', 3, x'010203');
+    INSERT INTO files VALUES ('f_big', 1, 'big', 1, 'big.bin', 'application/octet-stream', 3000000, zeroblob(3000000));
   `);
   old.close();
 
   const store = new Store(path);
+  // The rebuild went through the -wal file; it is given back, not left as big as the attachments.
+  assert.ok(!existsSync(`${path}-wal`) || statSync(`${path}-wal`).size === 0, "the -wal file is emptied after the rebuild");
   assert.deepEqual(store.messages("t1")[0].files.map((f) => f.name), ["a.png"]);
   assert.deepEqual([...store.file("f_old")!.data], [1, 2, 3]);
   // No row in messages has this id: a group message's files are keyed by its group.
@@ -41,7 +44,7 @@ test("a database from before keeps its files, and a group's files go in the same
   };
   const first = check();
   assert.equal(first.links, 0);
-  assert.equal(first.rows.length, 2);
+  assert.equal(first.rows.length, 3);
   new Store(path).close();
   assert.deepEqual(check(), first);
   assert.deepEqual({ ...(first.rows.find((r) => (r as { id: string }).id === "f_old") as object) }, { id: "f_old", message_id: 1, thread_id: "t1", position: 0, name: "a.png", type: "image/png", size: 3, data: "010203" });

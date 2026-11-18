@@ -10,7 +10,9 @@ test("a computer is online while its stream is open and it beat within 90 second
   const presence = new Presence(() => now);
   assert.equal(presence.online("d1"), false);
   const close = presence.connect("d1");
-  assert.equal(presence.online("d1"), true, "opening the stream counts as a beat");
+  assert.equal(presence.online("d1"), false, "an open stream that never beat: an old computer");
+  presence.beat("d1");
+  assert.equal(presence.online("d1"), true);
   now = 91_000;
   assert.equal(presence.online("d1"), false, "a half-open stream that stopped beating");
   presence.beat("d1");
@@ -57,8 +59,16 @@ describe("群 over the API", () => {
     assert.equal(invited.role, "invited");
     await wang.call("POST", `/api/groups/${g.id}/invites/${invited.myInvite.id}/accept`, { agents: [wangCodex] });
 
-    const off = wangLaptop.client.subscribe(undefined, () => {});
+    let open!: () => void;
+    const streaming = new Promise<void>((r) => (open = r));
+    const off = wangLaptop.client.subscribe(undefined, () => {}, () => open());
     try {
+      // A stream alone is an old computer: not online until it beats or asks for work.
+      await streaming;
+      assert.equal((await fang.call("GET", `/api/groups/${g.id}`)).members.find((m: any) => m.agent === wangCodex)?.online, false);
+      const early = await fang.call("POST", `/api/groups/${g.id}/messages`, { from: fangSeat, body: "@老王的 Codex 在吗", mentions: [wangCodex] });
+      assert.equal(early.messages.at(-1).receipts[0].state, "offline");
+      await wangLaptop.client.groupWork([wangCodex]);
       await until(async () => (await fang.call("GET", `/api/groups/${g.id}`)).members.find((m: any) => m.agent === wangCodex)?.online);
       const asked = await fang.call("POST", `/api/groups/${g.id}/messages`, { from: fangSeat, body: "@老王的 Codex 回调好了吗", mentions: [wangCodex] });
       const seq = asked.messages.at(-1).seq;
@@ -71,6 +81,20 @@ describe("群 over the API", () => {
     await until(async () => !(await fang.call("GET", `/api/groups/${g.id}`)).members.find((m: any) => m.agent === wangCodex).online);
     const missed = await fang.call("POST", `/api/groups/${g.id}/messages`, { from: fangSeat, body: "@老王的 Codex 在吗", mentions: [wangCodex] });
     assert.equal(missed.messages.at(-1).receipts[0].state, "offline");
+
+    // A beat does it too, the way the 30 second beat of a new computer does.
+    let open2!: () => void;
+    const streaming2 = new Promise<void>((r) => (open2 = r));
+    const off2 = wangLaptop.client.subscribe(undefined, () => {}, () => open2());
+    try {
+      await streaming2;
+      const online = async () => (await fang.call("GET", `/api/groups/${g.id}`)).members.find((m: any) => m.agent === wangCodex).online;
+      assert.equal(await online(), false);
+      await wangLaptop.client.beat();
+      assert.equal(await online(), true);
+    } finally {
+      off2();
+    }
   });
 
   test("a group's files are for its members, and its events reach their computers only", async () => {

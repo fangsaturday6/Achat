@@ -72,6 +72,9 @@ export interface SidecarOptions {
 // have picked another default in Claude Code or Codex meanwhile.
 const OFFERS_EVERY_MS = 30 * 60 * 1000;
 const BEAT_EVERY_MS = 30_000;
+// A 404 means the Achat service is from before groups, or not updated yet:
+// the computer may update first, so it asks again later instead of never.
+const BEAT_RETRY_MS = 10 * 60_000;
 
 // Only AIs that run on a computer answer, so the owner is Claude or Codex.
 // The history is a plain copy, one .md per conversation, whose first lines
@@ -353,18 +356,19 @@ export class Sidecar {
   // Tells the Achat service every half minute that this computer is still
   // here, so a connection left half open by sleep is not taken for AIs that
   // can answer. On this computer alone, or with a service from before
-  // groups, it says 404 and the beating stops.
+  // groups, it says 404 and the next try is ten minutes later.
   private async beat(): Promise<void> {
+    let wait = BEAT_EVERY_MS;
     try {
       await this.relay.beat();
     } catch (err) {
-      if (err instanceof RelayClientError && err.status === 404) return;
+      if (err instanceof RelayClientError && err.status === 404) wait = BEAT_RETRY_MS;
     }
     if (this.stopping.signal.aborted) return;
     const timer = setTimeout(() => {
       this.timers.delete(timer);
       void this.beat();
-    }, BEAT_EVERY_MS);
+    }, wait);
     this.timers.add(timer);
   }
 

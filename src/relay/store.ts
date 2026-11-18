@@ -271,6 +271,9 @@ export class Store {
           CREATE INDEX IF NOT EXISTS files_by_thread ON files (thread_id, message_id, position);
         `),
       );
+      // The new table went into the -wal file first; empty it so the disk is not
+      // held at the old database plus the attachments twice over.
+      this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     }
   }
 
