@@ -6,7 +6,7 @@ import { connect, type Connection } from "./connection.js";
 import { agentIdFor } from "./device.js";
 import { checkLink } from "./link.js";
 import { startRelay } from "./relay/server.js";
-import { desktopAlert, desktopAsk, type Asker } from "./sidecar/dialog.js";
+import { desktopAlert, desktopAsk, desktopChoose, type Asker, type Chooser } from "./sidecar/dialog.js";
 import { historyFor } from "./sidecar/history.js";
 import { claudeOffer, codexOffer } from "./sidecar/models.js";
 import type { ModelOffer } from "./models.js";
@@ -74,6 +74,17 @@ export class Activity {
       return asking;
     };
   }
+
+  chooser(choose: Chooser): Chooser {
+    return (prompt) => {
+      const choosing = choose(prompt);
+      if (!choosing) return null;
+      this.begin();
+      const end = (): void => this.end();
+      choosing.answer.then(end, end);
+      return choosing;
+    };
+  }
 }
 
 // Puts the date and time in front of each line, so the log shows how long
@@ -88,6 +99,7 @@ export function stamped(write: (...args: unknown[]) => void, now: () => Date = (
 
 const activity = new Activity();
 const ask = activity.asker(desktopAsk);
+const choose = activity.chooser(desktopChoose);
 
 function runnerFor(client: AchatConfig["agents"][number]["client"]): AgentRunner {
   return activity.runner(client === "claude" ? new ClaudeRunner() : new CodexRunner());
@@ -170,6 +182,7 @@ async function startLocal(cfg: AchatConfig, webDir: string, wait: boolean): Prom
     doers: doersFor(cfg, (a) => a.id),
     offers: offersFor(cfg, (a) => a.id),
     ask,
+    choose,
     alert: desktopAlert,
     notify: desktopNotify,
     webUrl: relay.url,
@@ -192,7 +205,7 @@ async function startCloudMode(cfg: AchatConfig, conn: Connection, wait: boolean)
   const runners = Object.fromEntries(cfg.agents.map((a) => [agentIdFor(deviceId, a.client), runnerFor(a.client)]));
   const doers = doersFor(cfg, (a) => agentIdFor(deviceId, a.client));
   const offers = offersFor(cfg, (a) => agentIdFor(deviceId, a.client));
-  const sidecar = new Sidecar({ client: conn.client, agents: [], runners, doers, offers, ask, alert: desktopAlert, notify: desktopNotify, webUrl: conn.webUrl });
+  const sidecar = new Sidecar({ client: conn.client, agents: [], runners, doers, offers, ask, choose, alert: desktopAlert, notify: desktopNotify, webUrl: conn.webUrl });
   sidecar.start();
   console.log(`Achat 已启动（账号模式）：${conn.webUrl}`);
   return {

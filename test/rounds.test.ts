@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { lastRoundTitle, usageLine } from "../src/asking.js";
 import type { RelayEvent } from "../src/types.js";
-import { CLAUDE, CODEX, startTestRelay } from "./helpers.js";
+import type { Choice, ChoicePrompt } from "../src/sidecar/dialog.js";
+import type { RunInput, RunOutput } from "../src/sidecar/runners.js";
+import { Sidecar } from "../src/sidecar/sidecar.js";
+import { CLAUDE, CODEX, ScriptedRunner, startTestRelay, until } from "./helpers.js";
 
 test("the asker's question that opens the last round says so, and the asked side's person adds ten more", async () => {
   const { relay, client } = await startTestRelay();
@@ -75,4 +78,99 @@ test("the last-round dialog names both AIs and what was used", () => {
   const t = { mode: "answer" as const, roundsUsed: 9, costUsd: 3.2, scope: { maxRounds: 10, budgetUsd: 10 } };
   assert.equal(usageLine(t), "问答 · 9 / 10 轮 · $3.20 / $10.00");
   assert.equal(usageLine({ ...t, mode: "do" }), "动手 · 9 / 10 轮");
+});
+
+// Holds the second answer until the test lets it go, so the dialog is shown
+// while the last round is still being answered.
+class HeldRunner extends ScriptedRunner {
+  private release!: () => void;
+  private held = new Promise<void>((r) => (this.release = r));
+  letGo(): void {
+    this.release();
+  }
+  async run(input: RunInput): Promise<RunOutput> {
+    if (this.calls.length === 1) await this.held;
+    return super.run(input);
+  }
+}
+
+test("the computer asks once, when the last round opens, and 加 10 轮 lets the thread go on", async () => {
+  const { relay, client, config } = await startTestRelay();
+  const asked: ChoicePrompt[] = [];
+  const answers: ((c: Choice) => void)[] = [];
+  const runner = new HeldRunner(["先写分镜", "用 Midjourney 出的"]);
+  const sidecar = new Sidecar({
+    client,
+    agents: config.agents,
+    runners: { [CLAUDE]: runner },
+    choose: (prompt) => {
+      asked.push(prompt);
+      let resolve!: (c: Choice) => void;
+      const answer = new Promise<Choice>((r) => (resolve = r));
+      answers.push(resolve);
+      return { answer, close: () => resolve("stop") };
+    },
+    notify: () => {},
+    webUrl: relay.url,
+    log: () => {},
+  });
+  sidecar.start();
+  try {
+    const t = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "视频制作流程", message: "第一步怎么做？" });
+    await client.approve(t.id, { maxRounds: 2, budgetUsd: 1 });
+    await until(async () => (await client.getThread(t.id)).roundsUsed === 1);
+    assert.equal(asked.length, 0, "rounds left, nothing to ask");
+
+    await client.postMessage(t.id, { from: CODEX, body: "封面图怎么出的？" });
+    await until(async () => asked.length === 1);
+    assert.deepEqual(asked[0], {
+      icon: "answer",
+      title: "我的 Codex 和你的 Claude 到最后 1 轮了",
+      body: "视频制作流程\n\n问答 · 1 / 2 轮 · $0.05 / $1.00",
+      more: "加 10 轮",
+      stop: "用完就停",
+    });
+    answers[0]("more");
+    await until(async () => (await client.getThread(t.id)).scope.maxRounds === 12);
+
+    runner.letGo();
+    const done = await until(async () => {
+      const d = await client.getThread(t.id);
+      return d.roundsUsed === 2 ? d : null;
+    });
+    assert.equal(done.status, "active");
+    assert.equal(asked.length, 1, "asked once");
+  } finally {
+    sidecar.stop();
+    await relay.close();
+  }
+});
+
+test("where no dialog can be shown, a notification points to the conversation", async () => {
+  const { relay, client, config } = await startTestRelay();
+  const told: string[][] = [];
+  const sidecar = new Sidecar({
+    client,
+    agents: config.agents,
+    runners: { [CLAUDE]: new ScriptedRunner(["先写分镜", "用 Midjourney 出的"]) },
+    choose: () => null,
+    notify: (title, body, url) => told.push([title, body, url]),
+    webUrl: relay.url,
+    log: () => {},
+  });
+  sidecar.start();
+  try {
+    const t = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "视频制作流程", message: "第一步怎么做？" });
+    await client.approve(t.id, { maxRounds: 2, budgetUsd: 1 });
+    await until(async () => (await client.getThread(t.id)).roundsUsed === 1);
+    await client.postMessage(t.id, { from: CODEX, body: "封面图怎么出的？" });
+    await until(async () => told.some(([title]) => title.includes("最后 1 轮")));
+    assert.deepEqual(
+      told.find(([title]) => title.includes("最后 1 轮")),
+      ["我的 Codex 和你的 Claude 到最后 1 轮了", "视频制作流程", `${relay.url}/#/t/${t.id}`],
+    );
+  } finally {
+    sidecar.stop();
+    await relay.close();
+  }
 });

@@ -1,14 +1,14 @@
 import { mkdirSync } from "node:fs";
 import { filesDir, saveAllFiles, savedLines } from "../attachments.js";
-import { ownerOf, pendingMessage, requestReason, requestTitle, scopeLine, speaker, withFileNames } from "../asking.js";
+import { lastRoundTitle, ownerOf, pendingMessage, requestReason, requestTitle, scopeLine, speaker, usageLine, withFileNames } from "../asking.js";
 import { RelayClientError, type RelayClient } from "../client.js";
 import type { AgentClient, AgentConfig } from "../config.js";
 import { NO_PICK, resolveUse, type ModelOffer, type ModelUse } from "../models.js";
 import { redact } from "../redact.js";
 import { cjk } from "../text.js";
 import { MIN_ROUND_BUDGET_USD } from "../relay/service.js";
-import { MODE_LABELS, waitingForAsker, type Message, type RelayEvent, type ThreadDetail, type ThreadMode } from "../types.js";
-import type { Alerter, Asker, Asking } from "./dialog.js";
+import { MODE_LABELS, MORE_SCOPE, waitingForAsker, type Message, type RelayEvent, type ThreadDetail, type ThreadMode } from "../types.js";
+import type { Alerter, Asker, Asking, Chooser } from "./dialog.js";
 import type { Notifier } from "./notify.js";
 import { BudgetExceededError, LoginExpiredError, SessionLostError, type AgentRunner, type RunOutput } from "./runners.js";
 import { TaskBook, type TaskOpener, type TaskRecord } from "./tasks.js";
@@ -48,6 +48,10 @@ export interface SidecarOptions {
   // Puts a new request in front of the person as a dialog; where it cannot,
   // or without one, a notification says the request is waiting.
   ask?: Asker;
+  // Asks the person here to choose, such as whether to give a conversation
+  // more rounds when its last one opens; where it cannot, or without one, a
+  // notification points to the conversation, which has the same button.
+  choose?: Chooser;
   // Tells the person something they must do on this computer, such as log in again.
   alert?: Alerter;
   // Finds out what each AI here can use and is set to use, keyed by agent id;
@@ -250,6 +254,8 @@ export class Sidecar {
   // Shown once already, up to which message; "稍后" means the web page, not
   // the same dialog again. A request made later in the thread is new.
   private shown = new Map<string, number>();
+  // Last rounds already put to the person, by thread and question.
+  private offered = new Set<string>();
   // The asker's words being judged 问答 or 动手, once each.
   private judging = new Map<string, Promise<ThreadDetail>>();
   // Threads waiting for a login on this computer, since when, and the
@@ -380,6 +386,10 @@ export class Sidecar {
   private onEvent(e: RelayEvent): void {
     if (e.type === "message.created" && this.mine(e.from) && e.sender === e.to) this.watchSeen(e.threadId);
     if (!this.mine(e.to)) return;
+    if (e.type === "thread.lastRound") {
+      void this.offerMore(e.threadId, e.seq ?? 0);
+      return;
+    }
     // A request, or one inside a thread shown before: to 动手, or to go on
     // once it ended or ran out. It is judged before it is shown; a quiet one
     // is only judged, for the web page.
@@ -504,6 +514,36 @@ export class Sidecar {
       this.opts.notify(cjk(from, "还在等你批准"), t.topic, `${this.opts.webUrl}/#/t/${t.id}`);
     } catch (err) {
       if (!this.stopping.signal.aborted) this.log(`${threadId} 的提醒：${(err as Error).message}`);
+    }
+  }
+
+  // The asker's question opened the last round of a thread with another
+  // person's AI: the person here is asked, once for that question, whether
+  // to give ten more before it runs out. The AI goes on answering meanwhile;
+  // added right after the rounds ran out, the thread opens again.
+  private async offerMore(threadId: string, seq: number): Promise<void> {
+    const key = `${threadId}:${seq}`;
+    if (this.offered.has(key)) return;
+    this.offered.add(key);
+    try {
+      const t = await this.relay.getThread(threadId);
+      const from = (await this.agent(t.from))?.name ?? t.from;
+      const to = ((await this.agent(t.to))?.name ?? t.to).replace(/^我的/, "你的");
+      const title = lastRoundTitle(from, to);
+      const choosing = this.opts.choose?.({
+        icon: t.mode,
+        title,
+        body: `${t.topic}\n\n${usageLine(t)}`,
+        more: `加 ${MORE_SCOPE.maxRounds} 轮`,
+        stop: "用完就停",
+      });
+      if (!choosing) {
+        this.opts.notify(title, t.topic, `${this.opts.webUrl}/#/t/${threadId}`);
+        return;
+      }
+      if ((await choosing.answer) === "more") await this.relay.addRounds(threadId);
+    } catch (err) {
+      if (!this.stopping.signal.aborted) this.log(`${threadId} 的加轮弹框：${(err as Error).message}`);
     }
   }
 
