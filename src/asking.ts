@@ -19,7 +19,7 @@ export function requestTitle(t: Thread, from: string, to: string): string {
 }
 
 // Why it is asked again: the note the thread ended or paused with, such as
-// "已到 5 轮上限，协作结束" or "花费到了上限 $1.00".
+// "已到 10 轮上限，协作结束" or "花费到了上限 $10.00".
 export function requestReason(t: ThreadDetail): string | null {
   if (!t.prior || upgrade(t)) return null;
   return t.messages.filter((m) => m.kind === "system").at(-1)?.body ?? null;
@@ -38,12 +38,24 @@ export function pendingMessage(t: ThreadDetail): Message | undefined {
   return t.messages.filter((m) => m.kind !== "system" && m.sender === t.from).at(-1);
 }
 
-// 问答 · 5 轮 · $5.00, or 动手 · 5 轮: 动手 runs on the person's Claude
+// 问答 · 10 轮 · $10.00, or 动手 · 10 轮: 动手 runs on the person's Claude
 // subscription and has no dollar figure. The model comes first once the
-// asked AI's computer said what it uses: Opus 4.8 · 中 · 问答 · 5 轮 · $5.00.
+// asked AI's computer said what it uses: Opus 4.8 · 中 · 问答 · 10 轮 · $10.00.
 export function scopeLine(t: Thread & { uses?: ModelUse | null }): string {
   const rounds = `${t.uses ? `${useLine(t.uses)} · ` : ""}${MODE_LABELS[t.mode]} · ${t.scope.maxRounds} 轮`;
   return t.mode === "do" ? rounds : `${rounds} · $${t.scope.budgetUsd.toFixed(2)}`;
+}
+
+// What a thread has used of what it was allowed, the same words as under
+// the conversation on the web page: "问答 · 9 / 10 轮 · $3.20 / $10.00".
+export function usageLine(t: Pick<Thread, "mode" | "roundsUsed" | "costUsd" | "scope">): string {
+  const rounds = `${MODE_LABELS[t.mode]} · ${t.roundsUsed} / ${t.scope.maxRounds} 轮`;
+  return t.mode === "do" ? rounds : `${rounds} · $${t.costUsd.toFixed(2)} / $${t.scope.budgetUsd.toFixed(2)}`;
+}
+
+// 老王的 Codex 和你的 Claude 到最后 1 轮了.
+export function lastRoundTitle(from: string, to: string): string {
+  return cjk(from, "和", to, "到最后 1 轮了");
 }
 
 // Whose an AI is, from its name: "老王" for 老王的 Codex, "我" for 我的 Claude.

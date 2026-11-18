@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { lastRoundTitle, usageLine } from "../src/asking.js";
 import type { RelayEvent } from "../src/types.js";
 import { CLAUDE, CODEX, startTestRelay } from "./helpers.js";
 
@@ -67,4 +68,11 @@ test("rounds that just ran out can still be added; a thread waiting or stopped c
   } finally {
     await relay.close();
   }
+});
+
+test("the last-round dialog names both AIs and what was used", () => {
+  assert.equal(lastRoundTitle("老王的 Codex", "你的 Claude"), "老王的 Codex 和你的 Claude 到最后 1 轮了");
+  const t = { mode: "answer" as const, roundsUsed: 9, costUsd: 3.2, scope: { maxRounds: 10, budgetUsd: 10 } };
+  assert.equal(usageLine(t), "问答 · 9 / 10 轮 · $3.20 / $10.00");
+  assert.equal(usageLine({ ...t, mode: "do" }), "动手 · 9 / 10 轮");
 });
