@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { RelayClient } from "../src/client.js";
+import { createMcpServer } from "../src/mcp/server.js";
 import { lastRoundTitle, usageLine } from "../src/asking.js";
 import type { RelayEvent } from "../src/types.js";
 import type { Choice, ChoicePrompt } from "../src/sidecar/dialog.js";
@@ -171,6 +175,36 @@ test("where no dialog can be shown, a notification points to the conversation", 
     );
   } finally {
     sidecar.stop();
+    await relay.close();
+  }
+});
+
+async function mcp(client: RelayClient, agentId: string, url: string): Promise<Client> {
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await createMcpServer({ connection: () => ({ client, agentId, webUrl: url, mode: "local" }), waitSeconds: 5 }).connect(serverSide);
+  const c = new Client({ name: "test", version: "1" });
+  await c.connect(clientSide);
+  return c;
+}
+
+function textOf(result: Awaited<ReturnType<Client["callTool"]>>): string {
+  return (result.content as { type: string; text: string }[]).map((c) => c.text).join("\n");
+}
+
+test("the asked AI adds ten rounds with add_rounds when its person says so", async () => {
+  const { relay, client } = await startTestRelay();
+  try {
+    const t = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "视频制作流程", message: "第一步怎么做？" });
+    await client.approve(t.id, { maxRounds: 2, budgetUsd: 1 });
+    const claude = await mcp(client, CLAUDE, relay.url);
+    const added = await claude.callTool({ name: "add_rounds", arguments: { thread_id: t.id } });
+    assert.equal(textOf(added), `协作 ${t.id} 加了 10 轮 · $10.00，现在最多 12 轮 · $11.00。`);
+
+    const codex = await mcp(client, CODEX, relay.url);
+    const refused = await codex.callTool({ name: "add_rounds", arguments: { thread_id: t.id } });
+    assert.equal(refused.isError, true);
+    assert.match(textOf(refused), /不是别人问你的协作/);
+  } finally {
     await relay.close();
   }
 });

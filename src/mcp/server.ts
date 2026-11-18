@@ -12,7 +12,7 @@ import { ownerOf, pendingMessage, requestReason, requestTitle, scopeLine, speake
 import { redact } from "../redact.js";
 import { markTaskSeen, TaskBook } from "../sidecar/tasks.js";
 import { EFFORT_LABELS, EFFORTS, resolveUse, useLine, type AgentModels, type Effort } from "../models.js";
-import { isTerminal, MODE_LABELS, personWaiting, STATUS_LABELS, type Message, type ThreadDetail } from "../types.js";
+import { isTerminal, MODE_LABELS, MORE_SCOPE, personWaiting, STATUS_LABELS, type Message, type ThreadDetail } from "../types.js";
 
 export interface McpConnection {
   client: RelayClient;
@@ -535,6 +535,26 @@ export function createMcpServer(opts: McpOptions): McpServer {
         }
         const after = await c.client.pickModels(target.id, pick);
         return text(`${target.name}改成用 ${modelsLine(after)}。以后别人问它、请它动手都用这个；某一次协作要另换，填 thread_id。`);
+      }),
+    );
+
+    server.registerTool(
+      "add_rounds",
+      {
+        title: "给协作加轮数",
+        description:
+          `别人的 AI 问主人的 AI 的那次协作，轮数快用完或刚用完时，再加 ${MORE_SCOPE.maxRounds} 轮（问答同时加 $${MORE_SCOPE.budgetUsd.toFixed(2)}），` +
+          "协作接着进行，不用对方再申请。花的是主人的额度，只在主人说了时用。",
+        inputSchema: { thread_id: z.string().describe("协作 id") },
+      },
+      guard(async ({ thread_id }: { thread_id: string }) => {
+        const c = opts.connection();
+        const thread = await c.client.getThread(thread_id);
+        if (thread.to !== c.agentId) throw new Error(`协作 ${thread_id} 不是别人问你的协作，加不了轮数`);
+        const t = await c.client.addRounds(thread_id);
+        const added = t.mode === "do" ? `${MORE_SCOPE.maxRounds} 轮` : `${MORE_SCOPE.maxRounds} 轮 · $${MORE_SCOPE.budgetUsd.toFixed(2)}`;
+        const now = t.mode === "do" ? `${t.scope.maxRounds} 轮` : `${t.scope.maxRounds} 轮 · $${t.scope.budgetUsd.toFixed(2)}`;
+        return text(`协作 ${thread_id} 加了 ${added}，现在最多 ${now}。`);
       }),
     );
   }
