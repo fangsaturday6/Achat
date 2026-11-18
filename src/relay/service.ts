@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { cleanName, filesProblem, typeOf, type NewFile } from "../attachments.js";
+import { cleanFiles, type NewFile } from "../attachments.js";
 import { canDo, type AchatConfig, type AgentConfig } from "../config.js";
 import { choiceOf, EFFORT_LABELS, isEffort, readOffer, resolveUse, useLine, type AgentModels, type Effort, type ModelPick, type ModelUse } from "../models.js";
 import {
@@ -183,14 +183,12 @@ export class RelayService {
     return said === true || this.agents.get(agent)?.client === "person";
   }
 
-  // Names without folders, types by the name, and no more than a message may carry.
   private checkFiles(files: NewFile[] = []): NewFile[] {
-    const problem = filesProblem(files);
-    if (problem) throw new RelayError(400, problem);
-    return files.map((f) => {
-      const name = cleanName(f.name);
-      return { name, type: typeOf(name, f.type), data: f.data };
-    });
+    try {
+      return cleanFiles(files);
+    } catch (err) {
+      throw new RelayError(400, (err as Error).message);
+    }
   }
 
   file(id: string): (Attachment & { threadId: string; data: Uint8Array }) | null {

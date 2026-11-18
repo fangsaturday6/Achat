@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS thread_reads (
 -- Pictures and other files sent with a message.
 CREATE TABLE IF NOT EXISTS files (
   id TEXT PRIMARY KEY,
-  message_id INTEGER NOT NULL REFERENCES messages(id),
+  -- A thread's message, or a group's (thread_id then holds the group's id).
+  message_id INTEGER NOT NULL,
   thread_id TEXT NOT NULL,
   position INTEGER NOT NULL,
   name TEXT NOT NULL,
@@ -248,6 +249,29 @@ export class Store {
     add("threads", "effort", "TEXT");
     add("messages", "model", "TEXT");
     add("messages", "effort", "TEXT");
+    // Group messages keep their files here too, keyed by the group, so the
+    // link to messages(id) goes; a database from before is rebuilt once.
+    const links = this.db.prepare("PRAGMA foreign_key_list(files)").all() as { table: string }[];
+    if (links.some((l) => l.table === "messages")) {
+      this.transaction(() =>
+        this.db.exec(`
+          CREATE TABLE files_new (
+            id TEXT PRIMARY KEY,
+            message_id INTEGER NOT NULL,
+            thread_id TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            data BLOB NOT NULL
+          );
+          INSERT INTO files_new SELECT id, message_id, thread_id, position, name, type, size, data FROM files;
+          DROP TABLE files;
+          ALTER TABLE files_new RENAME TO files;
+          CREATE INDEX IF NOT EXISTS files_by_thread ON files (thread_id, message_id, position);
+        `),
+      );
+    }
   }
 
   close(): void {
@@ -364,29 +388,35 @@ export class Store {
       )
       .run(threadId, next.seq, m.sender, m.kind, m.body, m.redactions ?? 0, m.costUsd ?? 0, m.byPerson ? 1 : 0, m.toPerson ? 1 : 0, m.model ?? null, m.effort ?? null, now);
     const messageId = Number(result.lastInsertRowid);
-    const insert = this.db.prepare(
-      "INSERT INTO files (id, message_id, thread_id, position, name, type, size, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    );
-    (m.files ?? []).forEach((f, position) =>
-      insert.run(`f_${randomBytes(9).toString("base64url")}`, messageId, threadId, position, f.name, f.type, f.data.length, f.data),
-    );
+    this.addFiles(threadId, messageId, m.files ?? []);
     const row = this.db.prepare("SELECT * FROM messages WHERE id = ?").get(messageId) as unknown as MessageRow;
-    return this.withFiles(threadId, [toMessage(row)])[0];
+    return this.filesFor(threadId, [toMessage(row)])[0];
   }
 
   messages(threadId: string, afterSeq = 0): Message[] {
     const rows = this.db
       .prepare("SELECT * FROM messages WHERE thread_id = ? AND seq > ? ORDER BY seq")
       .all(threadId, afterSeq) as unknown as MessageRow[];
-    return this.withFiles(threadId, rows.map(toMessage));
+    return this.filesFor(threadId, rows.map(toMessage));
   }
 
-  // Fills in each message's files, without their bytes.
-  private withFiles(threadId: string, messages: Message[]): Message[] {
+  // Files sent with a message. `owner`: its thread, or its group.
+  addFiles(owner: string, messageId: number, files: NewFile[]): void {
+    const insert = this.db.prepare(
+      "INSERT INTO files (id, message_id, thread_id, position, name, type, size, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    files.forEach((f, position) =>
+      insert.run(`f_${randomBytes(9).toString("base64url")}`, messageId, owner, position, f.name, f.type, f.data.length, f.data),
+    );
+  }
+
+  // Fills in each message's files, without their bytes. `owner`: their
+  // thread, or their group; `messages` in order.
+  filesFor<T extends { id: number; files: Attachment[] }>(owner: string, messages: T[]): T[] {
     if (!messages.length) return messages;
     const rows = this.db
       .prepare("SELECT id, message_id, name, type, size FROM files WHERE thread_id = ? AND message_id >= ? ORDER BY message_id, position")
-      .all(threadId, messages[0].id) as unknown as (Attachment & { message_id: number })[];
+      .all(owner, messages[0].id) as unknown as (Attachment & { message_id: number })[];
     const byMessage = new Map<number, Attachment[]>();
     for (const { message_id, ...f } of rows) {
       if (!byMessage.has(message_id)) byMessage.set(message_id, []);
@@ -467,7 +497,7 @@ export class Store {
     const row = this.db
       .prepare("SELECT * FROM messages WHERE thread_id = ? ORDER BY seq DESC LIMIT 1")
       .get(threadId) as MessageRow | undefined;
-    return row ? this.withFiles(threadId, [toMessage(row)])[0] : null;
+    return row ? this.filesFor(threadId, [toMessage(row)])[0] : null;
   }
 
   // What an AI's computer offered and its person picked; null before its

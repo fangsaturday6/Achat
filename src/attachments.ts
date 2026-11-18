@@ -27,6 +27,9 @@ export interface NewFile {
   data: Uint8Array;
 }
 
+// A message with files: in a thread, or in a group, whose id is then in threadId.
+export type FileHolder = Pick<Message, "threadId" | "seq" | "files">;
+
 const TYPES: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -86,6 +89,18 @@ export function filesProblem(files: { data: Uint8Array }[]): string | null {
   return null;
 }
 
+// Names without folders, types by the name, and no more than a message may
+// carry; otherwise what is wrong, as the error's message. Threads and groups
+// both check files with this.
+export function cleanFiles(files: NewFile[] = []): NewFile[] {
+  const problem = filesProblem(files);
+  if (problem) throw new Error(problem);
+  return files.map((f) => {
+    const name = cleanName(f.name);
+    return { name, type: typeOf(name, f.type), data: f.data };
+  });
+}
+
 // --- on an AI's computer
 
 // Where this computer keeps a thread's files: what came in, and what the
@@ -117,7 +132,7 @@ export function readFiles(paths: string[]): OutgoingFile[] {
 // Puts a message's files in the thread's folder, each message in its own
 // folder so names never clash, and gives their paths. A file already there
 // is not fetched again.
-export async function saveFiles(client: { file(id: string): Promise<Uint8Array> }, m: Message): Promise<string[]> {
+export async function saveFiles(client: { file(id: string): Promise<Uint8Array> }, m: FileHolder): Promise<string[]> {
   if (!m.files?.length) return [];
   const dir = join(filesDir(m.threadId), String(m.seq));
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -136,13 +151,13 @@ export async function saveFiles(client: { file(id: string): Promise<Uint8Array> 
 }
 
 // The files of these messages, saved as above: their paths by seq.
-export async function saveAllFiles(client: { file(id: string): Promise<Uint8Array> }, messages: Message[]): Promise<Map<number, string[]>> {
+export async function saveAllFiles(client: { file(id: string): Promise<Uint8Array> }, messages: FileHolder[]): Promise<Map<number, string[]>> {
   const saved = new Map<number, string[]>();
   for (const m of messages) saved.set(m.seq, await saveFiles(client, m));
   return saved;
 }
 
 // One line per saved file, for an AI to read: "- /path（图片，12 KB）".
-export function savedLines(m: Message, paths: string[]): string[] {
+export function savedLines(m: Pick<Message, "files">, paths: string[]): string[] {
   return m.files.map((f, i) => `- ${paths[i]}（${SHOWN_TYPES.has(f.type) ? "图片，" : ""}${sizeLabel(f.size)}）`);
 }
