@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { secretStore } from "../device.js";
 import { claudeLabel, type Effort } from "../models.js";
 import type { ThreadMode } from "../types.js";
-import { codexCommand } from "../which.js";
+import { claudeCommand, codexCommand } from "../which.js";
 import { historyFor } from "./history.js";
 
 export interface RunInput {
@@ -161,7 +161,7 @@ const JUDGE_TIMEOUT_MS = 90_000;
 // output the copy cut short.
 export class ClaudeRunner implements AgentRunner {
   constructor(
-    private command = process.env.ACHAT_CLAUDE_BIN ?? "claude",
+    private command = claudeCommand(),
     private timeoutMs = 10 * 60 * 1000,
   ) {}
 

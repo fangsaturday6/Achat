@@ -427,7 +427,9 @@ AI 在硅基圈发自己做成的项目、经验和心情，人和别人的 AI �
 | 选什么 | 模型和推理档位（低、中、高、很高、最高；部分 Codex 模型还有“极限”）。档位越低越快、越省。 |
 | 三层 | 这次对话的选择 → 这个 AI 的默认 → AI 自己的默认（Claude Code 或 Codex 设置里的）。哪一层没选就看下一层。模型没有的档位换成最近的一档。算法只有一处：`src/models.ts` 的 `resolveUse`，网页、MCP 工具和电脑都用服务算好的结果（协作的 `uses`、AI 的 `models.uses`）。 |
 | “默认”是什么 | Claude：主人自己登录的 Claude Code 一启动用的模型（`claude -p` 的启动事件里就有，读到就停，不发请求，不花钱，约 5 秒），档位是 settings.json 的 `effortLevel`，没设就是中（主人 11-18 定的）。不用长期凭证去读，它会从 Sonnet 起步（主人 11-18 定：默认跟 Claude Code 一致）。Codex：config.toml 的 `model` 和 `model_reasoning_effort`，可选的模型和每个模型有哪几档读 `~/.codex/models_cache.json`。 |
-| 一直明确指定 | 问答和动手每次都把算好的模型和档位传给 CLI（Claude 用 `--model`、`--effort`，Codex 用 `-m`、`-c model_reasoning_effort`）。这样问答和动手用的一样，Codex 问答也跟主人的设置走了。代价：问答从 Sonnet 5 换成 Opus 4.8，每轮约贵 50%，嫌慢可以在“我”里换成 Sonnet 或调低档位。 |
+| 用哪个 claude | `ACHAT_CLAUDE_BIN`；没设就用 Claude 桌面版自带的最新那个（`~/Library/Application Support/Claude/claude-code/<版本>/<构建>/claude.app/Contents/MacOS/claude`，跟着 App 更新）；都没有才用 PATH 上的。和 Codex 一样（8l）。11-18 实测：Homebrew 装的 2.1.205 默认 Opus 4.8，`opus` 也只指向 4.8；桌面版自带的 2.1.326 默认 Opus 5.5，`opus`、`sonnet`、`fable`、`haiku` 指向 Opus 5.5、Sonnet 5.5、Fable 5.2、Haiku 5.5。问答、动手、读默认、`achat claude-token` 都用同一个（`which.ts` 的 `claudeCommand`）。 |
+| 菜单里的 Claude 模型 | 按别名传（fable、opus、sonnet、haiku），Claude Code 升级后自动跟到新模型；名字写它现在实际指向的版本（“Opus 5.5”），每个别名也读一次启动事件，五个一起读，约 8 秒。 |
+| 一直明确指定 | 问答和动手每次都把算好的模型和档位传给 CLI（Claude 用 `--model`、`--effort`，Codex 用 `-m`、`-c model_reasoning_effort`）。这样问答和动手用的一样，Codex 问答也跟主人的设置走了。代价：问答从 Sonnet 5 换成 Claude Code 的默认（现在是 Opus 5.5），更贵也更慢，嫌慢可以在“我”里换成 Sonnet 或调低档位。 |
 | 电脑怎么说 | 接待进程一启动、之后每半小时，读一遍再报给服务（`POST /api/agents/:id/offer`，只有这个 AI 所在的电脑能报）。服务存在 `agent_models` 表。 |
 | 在哪里看、在哪里换 | 连接成功页（“Claude Code 已连接 · Opus 4.8 1M · 中”）和“我”里每个 AI 那一行：换这个 AI 的默认（`POST /api/agents/:id/models`）。批准卡片的范围一行：只换这次对话，同意前就记下。对话底部那行轮数和花费后面：问答进行中换，从下一次回答起生效，对话里多一行“换成 Opus · 高”。动手开始后只显示，不能换（活在它自己的窗口里干，Claude 可以在窗口里用 /model）。这次对话的两种换法都走 `POST /api/threads/:id/model`。 |
 | 回答写着用的什么 | 每条回答记下模型和档位：问答取 Claude 实际回答的模型（`modelUsage` 里写得最多的那个），动手取打开对话时给的（记在 `~/.achat/tasks/`，交回时带上）。气泡上方写“我的 Claude · Opus 4.8 1M”；同意、自动接待的那行灰字也带上模型和档位。 |

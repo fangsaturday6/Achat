@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { achatHome } from "../config.js";
 import { isEffort, type Effort } from "../models.js";
-import { codexCommand, onPath } from "../which.js";
+import { claudeCommand, codexCommand, onPath } from "../which.js";
 import { claudeModelArgs, codexModelArgs } from "./runners.js";
 
 // 动手: the receiving person's Claude Code or Codex does the work in a
@@ -156,7 +156,7 @@ export function backgroundId(output: string): string | null {
 // keeps running in the background, where `claude agents` lists it.
 export class ClaudeTaskOpener implements TaskOpener {
   constructor(
-    private command = process.env.ACHAT_CLAUDE_BIN ?? "claude",
+    private command = claudeCommand(),
     private scripts = join(achatHome(), "tasks"),
     // Where the tasks' folders go.
     private root = join(homedir(), "Achat"),

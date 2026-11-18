@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeLabel, isEffort, EFFORTS, type Effort, type ModelChoice, type ModelOffer } from "../models.js";
+import { claudeCommand } from "../which.js";
 
 // What Claude Code and Codex on this computer can use, and what they are set
 // to use, as the person sees it when they open them. Achat passes the model
@@ -10,13 +11,9 @@ import { claudeLabel, isEffort, EFFORTS, type Effort, type ModelChoice, type Mod
 
 const CLAUDE_EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
 
-// Aliases Claude Code takes for the latest model of each kind.
-const CLAUDE_MODELS: ModelChoice[] = [
-  { id: "fable", label: "Fable", efforts: CLAUDE_EFFORTS },
-  { id: "opus", label: "Opus", efforts: CLAUDE_EFFORTS },
-  { id: "sonnet", label: "Sonnet", efforts: CLAUDE_EFFORTS },
-  { id: "haiku", label: "Haiku", efforts: CLAUDE_EFFORTS },
-];
+// Aliases Claude Code takes for the latest model of each kind; which model
+// that is depends on the Claude Code, so each is named after what it starts on.
+const CLAUDE_ALIASES = ["fable", "opus", "sonnet", "haiku"];
 
 function readJson(path: string): Record<string, unknown> | null {
   try {
@@ -26,15 +23,19 @@ function readJson(path: string): Record<string, unknown> | null {
   }
 }
 
-// The model Claude Code starts with: what `claude -p` says when it starts,
-// before it asks anything, so finding out costs nothing. It runs on the
-// person's own login, as Claude Code does when they open it, not on the
-// credential from `achat claude-token`, which starts on another model.
-export function claudeDefaultModel(command: string, timeoutMs = 30_000): Promise<string | null> {
+// The model Claude Code starts on, by default or for `model` (an alias such
+// as "opus"): what `claude -p` says when it starts, before it asks anything,
+// so finding out costs nothing. It runs on the person's own login, as Claude
+// Code does when they open it, not on the credential from `achat
+// claude-token`, which starts on another model.
+export function claudeStartsOn(command: string, model?: string, timeoutMs = 30_000): Promise<string | null> {
   return new Promise((resolve) => {
     const env: NodeJS.ProcessEnv = { ...process.env, ACHAT_HEADLESS: "1" };
     delete env.CLAUDE_CODE_OAUTH_TOKEN;
-    const args = ["-p", "--output-format", "stream-json", "--verbose", "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--max-budget-usd", "0.01", "--system-prompt", "."];
+    const args = [
+      ...["-p", "--output-format", "stream-json", "--verbose", "--tools", "", "--strict-mcp-config", "--no-session-persistence"],
+      ...["--max-budget-usd", "0.01", "--system-prompt", ".", ...(model ? ["--model", model] : [])],
+    ];
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(command, args, { cwd: tmpdir(), env, stdio: ["pipe", "pipe", "ignore"] });
@@ -76,15 +77,17 @@ export function claudeConfigDir(): string {
   return process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
 }
 
-// Claude Code's models and default. Its 推理档位 is the effortLevel the
-// person set in Claude Code, or else 中.
-export async function claudeOffer(command = process.env.ACHAT_CLAUDE_BIN ?? "claude", configDir = claudeConfigDir()): Promise<ModelOffer | null> {
+// Claude Code's models and default, found all at once. Its 推理档位 is the
+// effortLevel the person set in Claude Code, or else 中.
+export async function claudeOffer(command = claudeCommand(), configDir = claudeConfigDir()): Promise<ModelOffer | null> {
   const settings = readJson(join(configDir, "settings.json"));
   const set = typeof settings?.model === "string" ? settings.model : null;
-  const model = (await claudeDefaultModel(command)) ?? set;
+  const [started, ...aliases] = await Promise.all([claudeStartsOn(command), ...CLAUDE_ALIASES.map((a) => claudeStartsOn(command, a))]);
+  const model = started ?? set;
   if (!model) return null;
   const effort = isEffort(settings?.effortLevel) && CLAUDE_EFFORTS.includes(settings.effortLevel) ? settings.effortLevel : "medium";
-  return { models: CLAUDE_MODELS, default: { id: model, label: claudeLabel(model), efforts: CLAUDE_EFFORTS, effort } };
+  const models = CLAUDE_ALIASES.map((id, i) => ({ id, label: claudeLabel(aliases[i] ?? id), efforts: CLAUDE_EFFORTS }));
+  return { models, default: { id: model, label: claudeLabel(model), efforts: CLAUDE_EFFORTS, effort } };
 }
 
 export function codexHome(): string {

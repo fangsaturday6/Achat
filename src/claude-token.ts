@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { secretStore } from "./device.js";
-import { onPath } from "./which.js";
+import { claudeCommand, onPath } from "./which.js";
 
 // Reads a line without echoing it, so a pasted credential does not stay on screen.
 // A paste arrives in one piece; line breaks inside it come from the terminal
@@ -132,7 +132,7 @@ export async function claudeTokenCommand(args: string[]): Promise<string> {
   // --paste: the credential came from running `claude setup-token` by hand,
   // for example with a proxy set in that terminal.
   if (!args.includes("--paste")) {
-    const bin = process.env.ACHAT_CLAUDE_BIN ?? "claude";
+    const bin = claudeCommand();
     if (!onPath(bin)) throw new Error("这台电脑上找不到 claude 命令");
     console.log("在浏览器里登录 Claude，点“授权”。凭证会自动保存，不用复制。\n");
     const run = runSetupToken(bin);

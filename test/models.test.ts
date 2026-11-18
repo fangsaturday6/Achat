@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,7 +8,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { RelayClientError, type RelayClient } from "../src/client.js";
 import { createMcpServer } from "../src/mcp/server.js";
 import { claudeLabel, NO_PICK, readOffer, resolveUse, type AgentModels, type ModelOffer } from "../src/models.js";
-import { claudeDefaultModel, claudeOffer, codexOffer } from "../src/sidecar/models.js";
+import { claudeOffer, claudeStartsOn, codexOffer } from "../src/sidecar/models.js";
+import { bundledClaude, claudeCommand } from "../src/which.js";
 import { Sidecar } from "../src/sidecar/sidecar.js";
 import { claudeTaskArgs, codexTaskArgs, TaskBook } from "../src/sidecar/tasks.js";
 import { addComputer, CLAUDE, CODEX, logIn, ScriptedRunner, startTestCloud, startTestRelay, until } from "./helpers.js";
@@ -78,16 +79,19 @@ test("Codex offers what its login can use, defaulting to config.toml", () => {
   assert.equal(codexOffer(mkdtempSync(join(tmpdir(), "achat-codex-none-"))), null);
 });
 
-// A claude that says which model it starts on, then would go on to ask; it
-// writes down what it was given.
-function fakeClaude(dir: string, model: string): string {
+// A claude that says which model it starts on, by default or for --model,
+// then would go on to ask; it writes down what it was given by default.
+function fakeClaude(dir: string, model: string, aliases: Record<string, string> = {}): string {
   const bin = join(dir, "claude");
   writeFileSync(
     bin,
     `#!/usr/bin/env node
-require("node:fs").writeFileSync(${JSON.stringify(join(dir, "call.json"))}, JSON.stringify({ args: process.argv.slice(2), token: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null }));
+const args = process.argv.slice(2);
+const asked = args.includes("--model") ? args[args.indexOf("--model") + 1] : null;
+if (!asked) require("node:fs").writeFileSync(${JSON.stringify(join(dir, "call.json"))}, JSON.stringify({ args, token: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null }));
+const model = asked ? (${JSON.stringify(aliases)}[asked] ?? asked) : ${JSON.stringify(model)};
 process.stdout.write(JSON.stringify({ type: "system", subtype: "hook_started" }) + "\\n");
-process.stdout.write(JSON.stringify({ type: "system", subtype: "init", model: ${JSON.stringify(model)} }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", model }) + "\\n");
 setTimeout(() => process.stdout.write(JSON.stringify({ type: "result", result: "asked anyway" }) + "\\n"), 20000);
 `,
   );
@@ -97,11 +101,12 @@ setTimeout(() => process.stdout.write(JSON.stringify({ type: "result", result: "
 
 test("Claude Code's default is what it starts on with the person's own login, found before it asks anything", async () => {
   const dir = mkdtempSync(join(tmpdir(), "achat-claude-probe-"));
-  const bin = fakeClaude(dir, "claude-opus-4-8[1m]");
+  const bin = fakeClaude(dir, "claude-opus-5-5", { fable: "claude-fable-5-2", opus: "claude-opus-5-5", sonnet: "claude-sonnet-5-5" });
   process.env.CLAUDE_CODE_OAUTH_TOKEN = "long-lived";
   try {
     const started = Date.now();
-    assert.equal(await claudeDefaultModel(bin), "claude-opus-4-8[1m]");
+    assert.equal(await claudeStartsOn(bin), "claude-opus-5-5");
+    assert.equal(await claudeStartsOn(bin, "sonnet"), "claude-sonnet-5-5");
     assert.ok(Date.now() - started < 15000, "it stops once it knows, without waiting for an answer");
     const call = JSON.parse(readFileSync(join(dir, "call.json"), "utf8"));
     assert.equal(call.token, null, "not the credential from achat claude-token, which starts on another model");
@@ -113,8 +118,17 @@ test("Claude Code's default is what it starts on with the person's own login, fo
   const config = mkdtempSync(join(tmpdir(), "achat-claude-config-"));
   writeFileSync(join(config, "settings.json"), JSON.stringify({ effortLevel: "high" }));
   const offer = (await claudeOffer(bin, config))!;
-  assert.deepEqual(offer.default, { id: "claude-opus-4-8[1m]", label: "Opus 4.8 1M", efforts: ["low", "medium", "high", "xhigh", "max"], effort: "high" });
-  assert.deepEqual(offer.models.map((m) => m.id), ["fable", "opus", "sonnet", "haiku"]);
+  assert.deepEqual(offer.default, { id: "claude-opus-5-5", label: "Opus 5.5", efforts: ["low", "medium", "high", "xhigh", "max"], effort: "high" });
+  // Picked by alias, so they follow Claude Code to newer models, and named by what they start on now.
+  assert.deepEqual(
+    offer.models.map((m) => [m.id, m.label]),
+    [
+      ["fable", "Fable 5.2"],
+      ["opus", "Opus 5.5"],
+      ["sonnet", "Sonnet 5.5"],
+      ["haiku", "Haiku"],
+    ],
+  );
   // No effortLevel: 中.
   assert.equal((await claudeOffer(bin, mkdtempSync(join(tmpdir(), "achat-claude-empty-"))))!.default.effort, "medium");
 });
@@ -288,4 +302,21 @@ test("in the cloud a computer reports for its own AIs, and only their person see
   } finally {
     await cloud.close();
   }
+});
+
+test("Achat runs the newest Claude Code the desktop app brings, which starts on newer models than an old one on the PATH", () => {
+  const root = mkdtempSync(join(tmpdir(), "achat-claude-app-"));
+  const add = (version: string, withProgram = true): string => {
+    const dir = join(root, version, "c4434d650cb3", "claude.app", "Contents", "MacOS");
+    mkdirSync(dir, { recursive: true });
+    if (withProgram) writeFileSync(join(dir, "claude"), "");
+    return join(dir, "claude");
+  };
+  add("2.1.9");
+  const newest = add("2.1.10");
+  add("2.1.11", false); // still being downloaded
+  assert.equal(bundledClaude(root), newest, "2.1.10 is newer than 2.1.9");
+  assert.equal(claudeCommand({}, () => bundledClaude(root)), newest);
+  assert.equal(claudeCommand({ ACHAT_CLAUDE_BIN: "/opt/claude" }, () => bundledClaude(root)), "/opt/claude");
+  assert.equal(claudeCommand({}, () => bundledClaude(join(root, "none"))), "claude");
 });
