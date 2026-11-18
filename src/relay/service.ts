@@ -8,6 +8,9 @@ import {
   latestAnswer,
   MODE_LABELS,
   MORE_SCOPE,
+  allowanceSpent,
+  canAddRounds,
+  inLastRound,
   personWaiting,
   waitingForAsker,
   type Attachment,
@@ -33,9 +36,6 @@ export class RelayError extends Error {
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
-// Below this a 问答 round cannot do anything useful, so asking again needs
-// more money, approved like the first time.
-export const MIN_ROUND_BUDGET_USD = 0.1;
 // A request nobody handled: its person is reminded once, and after three
 // days it is given up.
 export const REMIND_AFTER_MS = 4 * HOUR_MS;
@@ -175,7 +175,12 @@ export class RelayService {
 
   // The rounds, or for 问答 the money, the person allowed are used up.
   private spent(t: Thread): boolean {
-    return t.roundsUsed >= t.scope.maxRounds || (t.mode === "answer" && t.scope.budgetUsd - t.costUsd < MIN_ROUND_BUDGET_USD);
+    return allowanceSpent(t);
+  }
+
+  // What the page and the tools read about "加 10 轮", decided here once.
+  private roundsView(t: Thread): { canAddRounds: boolean; lastRound: boolean } {
+    return { canAddRounds: canAddRounds(t), lastRound: inLastRound(t, this.store.lastSpoken(t.id)) };
   }
 
   // The person's own seat writes as a person, not as an AI.
@@ -280,7 +285,7 @@ export class RelayService {
 
   getThread(id: string): ThreadDetail {
     const thread = this.requireThread(id);
-    return { ...thread, messages: this.store.messages(id), uses: this.uses(thread) };
+    return { ...thread, messages: this.store.messages(id), uses: this.uses(thread), ...this.roundsView(thread) };
   }
 
   listThreads(filter: {
@@ -294,7 +299,7 @@ export class RelayService {
     return this.store
       .listThreads(filter)
       .filter((t) => !filter.surfaced || !t.quiet)
-      .map((t) => ({ ...t, lastMessage: this.store.lastMessage(t.id) }));
+      .map((t) => ({ ...t, lastMessage: this.store.lastMessage(t.id), ...this.roundsView(t) }));
   }
 
   // Whether the reader has a message they have not seen: one from the other
@@ -363,7 +368,7 @@ export class RelayService {
         { sender: input.from, kind: "request", body: message, byPerson: this.byPerson(input.from, input.byPerson), files },
         now,
       );
-      if (!opts.autoApprove) return { ...thread, messages: [msg], uses: this.uses(thread) };
+      if (!opts.autoApprove) return { ...thread, messages: [msg], uses: this.uses(thread), ...this.roundsView(thread) };
       const started = this.store.updateThread(thread.id, { status: "active" }, now);
       const note = this.store.addMessage(
         thread.id,
@@ -374,7 +379,7 @@ export class RelayService {
         },
         now,
       );
-      return { ...started, messages: [msg, note], uses: this.uses(started) };
+      return { ...started, messages: [msg, note], uses: this.uses(started), ...this.roundsView(started) };
     });
     this.emit("thread.created", detail);
     return detail;
@@ -506,8 +511,11 @@ export class RelayService {
   // being approved again.
   addRounds(id: string): ThreadDetail {
     const thread = this.requireThread(id);
-    const ranOut = thread.status === "closed" && this.spent(thread);
-    if (thread.status !== "active" && !ranOut) throw new RelayError(409, "只有进行中、或者刚用完轮数的协作可以加轮数");
+    if (!canAddRounds(thread)) {
+      if (thread.own) throw new RelayError(409, "自己的 AI 之间不用加轮数");
+      if (thread.status === "active") throw new RelayError(409, "还没到最后一轮，不用加轮数");
+      throw new RelayError(409, "只有进行中、或者刚用完轮数和花费的协作可以加轮数");
+    }
     const scope: Scope = {
       maxRounds: thread.scope.maxRounds + MORE_SCOPE.maxRounds,
       budgetUsd: thread.mode === "do" ? thread.scope.budgetUsd : Math.round((thread.scope.budgetUsd + MORE_SCOPE.budgetUsd) * 100) / 100,

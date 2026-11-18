@@ -503,6 +503,14 @@ export class Store {
     return row ? this.filesFor(threadId, [toMessage(row)])[0] : null;
   }
 
+  // The latest thing anyone said, system notes left out.
+  lastSpoken(threadId: string): Message | null {
+    const row = this.db
+      .prepare("SELECT * FROM messages WHERE thread_id = ? AND kind != 'system' ORDER BY seq DESC LIMIT 1")
+      .get(threadId) as MessageRow | undefined;
+    return row ? this.filesFor(threadId, [toMessage(row)])[0] : null;
+  }
+
   // What an AI's computer offered and its person picked; null before its
   // computer said anything.
   agentModels(agent: string): { offer: ModelOffer; picked: ModelPick } | null {

@@ -32,6 +32,31 @@ export interface Scope {
 // the money for them too. web/app.js writes the same number on its button.
 export const MORE_SCOPE: Scope = { maxRounds: 10, budgetUsd: 10 };
 
+// Below this a 问答 round cannot do anything useful, so asking again needs
+// more money, approved like the first time.
+export const MIN_ROUND_BUDGET_USD = 0.1;
+
+// The rounds, or for 问答 the money, the person allowed are used up.
+export function allowanceSpent(t: Pick<Thread, "mode" | "scope" | "roundsUsed" | "costUsd">): boolean {
+  return t.roundsUsed >= t.scope.maxRounds || (t.mode === "answer" && t.scope.budgetUsd - t.costUsd < MIN_ROUND_BUDGET_USD);
+}
+
+type RoundsView = Pick<Thread, "status" | "own" | "from" | "mode" | "scope" | "roundsUsed" | "costUsd">;
+
+// The one rule for "加 10 轮": the asked side's person (never between one
+// person's own AIs) can use it in the last round, or once rounds or money ran
+// out, even if the thread has closed. The relay checks it; the page and the
+// tools read what the relay computed.
+export function canAddRounds(t: RoundsView): boolean {
+  return !t.own && ((t.status === "active" && (t.scope.maxRounds - t.roundsUsed <= 1 || allowanceSpent(t))) || (t.status === "closed" && allowanceSpent(t)));
+}
+
+// The asker's question that opened the last round waits for its answer.
+// `last`: the thread's last message that is not a system note.
+export function inLastRound(t: RoundsView, last: Pick<Message, "sender" | "toPerson"> | null | undefined): boolean {
+  return t.status === "active" && !t.own && t.roundsUsed + 1 >= t.scope.maxRounds && last?.sender === t.from && !last.toPerson;
+}
+
 export interface Thread {
   id: string;
   topic: string;
@@ -108,9 +133,13 @@ export interface ThreadDetail extends Thread {
   // What the asked AI answers and works with now; null while its computer
   // has not said what it can use.
   uses: ModelUse | null;
+  canAddRounds: boolean;
+  lastRound: boolean;
 }
 
 export interface ThreadSummary extends Thread {
+  canAddRounds: boolean;
+  lastRound: boolean;
   lastMessage: Message | null;
   // Set in lists: a message the caller has not seen yet.
   unread?: boolean;

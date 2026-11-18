@@ -599,22 +599,10 @@ function renderList(r) {
 // A conversation that has something new for the person, or waits on their
 // approval, or another person's AI asks one of theirs its last round.
 function needsYou(t) {
-  return t.unread || (t.status === "pending" && isMine(t.to)) || (t.status === "active" && othersAsk(t) && t.scope.maxRounds - t.roundsUsed <= 1);
+  return t.unread || (t.status === "pending" && isMine(t.to)) || (isMine(t.to) && t.lastRound);
 }
 
-// Someone else's AI asking one of the person's own: the same rule as the
-// relay's `own`, which also holds on a computer on its own, where the person
-// approves for both sides.
-function othersAsk(t) {
-  return isMine(t.to) && !t.own;
-}
-
-// The person can give ten more rounds (MORE_SCOPE in src/types.ts) to a
-// conversation in its last round, or right after its rounds ran out.
-function canAddRounds(t) {
-  const left = t.scope.maxRounds - t.roundsUsed;
-  return othersAsk(t) && ((t.status === "active" && left <= 1) || (t.status === "closed" && left <= 0));
-}
+// "加 10 轮" and "last round" are decided by the relay (t.canAddRounds, t.lastRound).
 
 // Whose conversation it is: the other person's account, or "me" between one's own AIs.
 function personOf(t) {
@@ -1104,7 +1092,7 @@ function renderThread(t) {
   const ran = t.uses && isMine(t.to) && t.status === "active" ? (t.mode === "answer" ? threadModelPicker(t, { redraw: true }) : useText(t.uses)) : null;
   if (writes) {
     const stop = t.status === "active" ? [h("button", { type: "button", class: "btn danger", onclick: () => act(() => api("POST", `/api/threads/${t.id}/stop`, {})) }, "停止")] : [];
-    const more = canAddRounds(t)
+    const more = isMine(t.to) && t.canAddRounds
       ? h("button", { type: "button", class: "text-btn", id: "add-rounds", onclick: () => act(() => api("POST", `/api/threads/${t.id}/rounds`, {})) }, "加 10 轮")
       : null;
     const status = h("span", { class: "muted usage" }, t.status === "active" ? usage : `${usage} · ${STATUS[t.status]}`, ran ? [" · ", ran] : null, more);

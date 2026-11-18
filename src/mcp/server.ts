@@ -563,7 +563,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
       {
         title: "给协作加轮数",
         description:
-          `别人的 AI 问主人的 AI 的那次协作，轮数快用完或刚用完时，再加 ${MORE_SCOPE.maxRounds} 轮（问答同时加 $${MORE_SCOPE.budgetUsd.toFixed(2)}），` +
+          `别人的 AI 问主人的 AI 的那次协作，到了最后一轮、或轮数和花费刚用完时，再加 ${MORE_SCOPE.maxRounds} 轮（问答同时加 $${MORE_SCOPE.budgetUsd.toFixed(2)}），` +
           "协作接着进行，不用对方再申请。花的是主人的额度，只在主人说了时用。",
         inputSchema: { thread_id: z.string().describe("协作 id") },
       },

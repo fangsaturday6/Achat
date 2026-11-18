@@ -68,10 +68,62 @@ test("rounds that just ran out can still be added; a thread waiting or stopped c
     await assert.rejects(client.addRounds(stopped.id), /进行中/);
 
     const doing = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "写脚本", message: "写一个", mode: "do" });
-    await client.approve(doing.id);
+    await client.approve(doing.id, { maxRounds: 1 });
     const more = await client.addRounds(doing.id);
-    assert.deepEqual(more.scope, { maxRounds: 20, budgetUsd: 10 });
+    assert.deepEqual(more.scope, { maxRounds: 11, budgetUsd: 10 });
     assert.equal(more.messages.at(-1)!.body, "加了 10 轮");
+  } finally {
+    await relay.close();
+  }
+});
+
+test("one rule: 加 10 轮 shows when the last round opens or the allowance ran out, money included, never between one's own AIs", async () => {
+  const { relay, client } = await startTestRelay();
+  try {
+    const early = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "还早", message: "问题" });
+    await client.approve(early.id);
+    assert.equal((await client.getThread(early.id)).canAddRounds, false);
+    await assert.rejects(client.addRounds(early.id), /还没到最后一轮/);
+
+    const broke = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "钱用完", message: "问题" });
+    await client.approve(broke.id, { maxRounds: 5, budgetUsd: 0.5 });
+    const closed = await client.postMessage(broke.id, { from: CLAUDE, body: "答了", costUsd: 0.5 });
+    assert.equal(closed.status, "closed");
+    assert.ok(closed.roundsUsed < closed.scope.maxRounds);
+    assert.equal(closed.canAddRounds, true);
+    const revived = await client.addRounds(broke.id);
+    assert.equal(revived.status, "active");
+    assert.deepEqual(revived.scope, { maxRounds: 15, budgetUsd: 10.5 });
+    assert.equal(revived.canAddRounds, false);
+
+    const own = await relay.service.createRequest({ from: CODEX, to: CLAUDE, topic: "自己的", message: "问题" }, { autoApprove: true });
+    assert.equal(own.canAddRounds, false);
+    await assert.rejects(client.addRounds(own.id), /自己的 AI 之间不用加轮数/);
+  } finally {
+    await relay.close();
+  }
+});
+
+test("lastRound is true only while the asker's last question waits for its answer, in details and in lists", async () => {
+  const { relay, client } = await startTestRelay();
+  try {
+    const t = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "最后一轮", message: "第一步？" });
+    await client.approve(t.id, { maxRounds: 2, budgetUsd: 1 });
+    assert.equal((await client.getThread(t.id)).lastRound, false, "before the question");
+    await client.postMessage(t.id, { from: CLAUDE, body: "先写分镜", costUsd: 0.1 });
+    assert.equal((await client.getThread(t.id)).lastRound, false);
+    await client.postMessage(t.id, { from: CODEX, body: "封面图？" });
+    const detail = await client.getThread(t.id);
+    assert.equal(detail.lastRound, true);
+    assert.equal(detail.canAddRounds, true);
+    const row = (await client.listThreads({ agent: CLAUDE })).find((r) => r.id === t.id)!;
+    assert.equal(row.lastRound, true);
+    assert.equal(row.canAddRounds, true);
+    const answered = await client.postMessage(t.id, { from: CLAUDE, body: "Midjourney", costUsd: 0.1 });
+    assert.equal(answered.lastRound, false);
+    const after = (await client.listThreads({ agent: CLAUDE })).find((r) => r.id === t.id)!;
+    assert.equal(after.lastRound, false);
+    assert.equal(after.canAddRounds, true, "ran out");
   } finally {
     await relay.close();
   }
@@ -197,6 +249,10 @@ test("the asked AI adds ten rounds with add_rounds when its person says so", asy
     const t = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "视频制作流程", message: "第一步怎么做？" });
     await client.approve(t.id, { maxRounds: 2, budgetUsd: 1 });
     const claude = await mcp(client, CLAUDE, relay.url);
+    const early = await claude.callTool({ name: "add_rounds", arguments: { thread_id: t.id } });
+    assert.equal(early.isError, true);
+    assert.match(textOf(early), /还没到最后一轮/);
+    await client.postMessage(t.id, { from: CLAUDE, body: "先写分镜", costUsd: 0.1 });
     const added = await claude.callTool({ name: "add_rounds", arguments: { thread_id: t.id } });
     assert.equal(textOf(added), `协作 ${t.id} 加了 10 轮 · $10.00，现在最多 12 轮 · $11.00。`);
 
