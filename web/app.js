@@ -596,9 +596,22 @@ function renderList(r) {
 
 // --- 消息: one row per person, their conversations underneath
 
-// A conversation that has something new for the person, or waits on their approval.
+// A conversation that has something new for the person, or waits on their
+// approval, or another person's AI asks one of theirs its last round.
 function needsYou(t) {
-  return t.unread || (t.status === "pending" && isMine(t.to));
+  return t.unread || (t.status === "pending" && isMine(t.to)) || (t.status === "active" && othersAsk(t) && t.scope.maxRounds - t.roundsUsed <= 1);
+}
+
+// Another person's AI asking one of the person's own.
+function othersAsk(t) {
+  return isMine(t.to) && !isMine(t.from) && !t.own;
+}
+
+// The person can give ten more rounds (MORE_SCOPE in src/types.ts) to a
+// conversation in its last round, or right after its rounds ran out.
+function canAddRounds(t) {
+  const left = t.scope.maxRounds - t.roundsUsed;
+  return othersAsk(t) && ((t.status === "active" && left <= 1) || (t.status === "closed" && left <= 0));
 }
 
 // Whose conversation it is: the other person's account, or "me" between one's own AIs.
@@ -1089,7 +1102,10 @@ function renderThread(t) {
   const ran = t.uses && isMine(t.to) && t.status === "active" ? (t.mode === "answer" ? threadModelPicker(t, { redraw: true }) : useText(t.uses)) : null;
   if (writes) {
     const stop = t.status === "active" ? [h("button", { type: "button", class: "btn danger", onclick: () => act(() => api("POST", `/api/threads/${t.id}/stop`, {})) }, "停止")] : [];
-    const status = h("span", { class: "muted usage" }, t.status === "active" ? usage : `${usage} · ${STATUS[t.status]}`, ran ? [" · ", ran] : null);
+    const more = canAddRounds(t)
+      ? h("button", { type: "button", class: "text-btn", id: "add-rounds", onclick: () => act(() => api("POST", `/api/threads/${t.id}/rounds`, {})) }, "加 10 轮")
+      : null;
+    const status = h("span", { class: "muted usage" }, t.status === "active" ? usage : `${usage} · ${STATUS[t.status]}`, ran ? [" · ", ran] : null, more);
     ({ foot, take: drop } = writeBox({
       label: `发给${agentName(side === t.from ? t.to : t.from)}`,
       status,
