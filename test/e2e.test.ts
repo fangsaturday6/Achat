@@ -236,7 +236,7 @@ describe("experiment 0 end to end", () => {
       const t = await client.getThread(pending.id);
       return t.status === "pending" && t.prior ? t : null;
     });
-    assert.match(paused.messages.at(-1)!.body, /花费到了上限 \$5\.00/);
+    assert.match(paused.messages.at(-1)!.body, /花费到了上限 \$10\.00/);
     await client.approve(pending.id, { budgetUsd: 2 });
     const outcome = textOf(await asking);
     assert.match(outcome, /加了额度后的回答/);
@@ -328,7 +328,7 @@ test("a dialog on the computer approves or declines, one at a time, and goes awa
     const first = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "对话框同意", message: "怎么做的？" });
     const second = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "对话框拒绝", message: "问题" });
     await until(async () => asked.length === 1);
-    assert.deepEqual(asked[0], { mode: "answer", title: "我的 Codex 想问你的 Claude", topic: "对话框同意", body: "怎么做的？", scope: "问答 · 5 轮 · $5.00" });
+    assert.deepEqual(asked[0], { mode: "answer", title: "我的 Codex 想问你的 Claude", topic: "对话框同意", body: "怎么做的？", scope: "问答 · 10 轮 · $10.00" });
     answers[0]("approve");
     await until(async () => (await client.getThread(first.id)).status !== "pending");
     await until(async () => runner.calls.length === 1);

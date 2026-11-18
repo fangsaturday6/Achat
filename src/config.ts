@@ -86,7 +86,7 @@ export function defaultConfig(): AchatConfig {
     port: DEFAULT_PORT,
     token: randomBytes(24).toString("base64url"),
     agents: DEFAULT_AGENTS,
-    defaults: { maxRounds: 5, budgetUsd: 5 },
+    defaults: { maxRounds: 10, budgetUsd: 10 },
     limits: { surfacedPerContactPerDay: 5, sentPerDay: 20 },
   };
 }

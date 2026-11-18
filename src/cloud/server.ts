@@ -61,7 +61,7 @@ const IMAGE_TYPES: Record<string, (b: Buffer) => boolean> = {
 };
 
 export const CLOUD_DEFAULTS: RelaySettings = {
-  defaults: { maxRounds: 5, budgetUsd: 5 },
+  defaults: { maxRounds: 10, budgetUsd: 10 },
   limits: { surfacedPerContactPerDay: 5, sentPerDay: 20 },
 };
 

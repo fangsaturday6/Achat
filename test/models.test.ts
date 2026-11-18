@@ -177,7 +177,7 @@ test("the asked side's person picks the model for their AI and for one conversat
     assert.deepEqual(t.uses, { model: "sonnet", label: "Sonnet", effort: "low" });
     // Approved on another model for this conversation only.
     const approved = await client.approve(t.id, { model: "opus", effort: "high" });
-    assert.equal(approved.messages.at(-1)!.body, "已同意：Opus · 高 · 问答 · 5 轮 · $5.00");
+    assert.equal(approved.messages.at(-1)!.body, "已同意：Opus · 高 · 问答 · 10 轮 · $10.00");
     assert.deepEqual(approved.uses, { model: "opus", label: "Opus", effort: "high" });
     assert.equal(resolveUse((await client.agents()).find((a) => a.id === CLAUDE)!.models!).model, "sonnet", "the AI's own pick stays");
 

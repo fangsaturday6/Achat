@@ -21,7 +21,7 @@ function stored(): Record<string, unknown> {
 
 test("a new config keeps only what belongs to this computer", () => {
   const cfg = loadConfig();
-  assert.deepEqual(cfg.defaults, { maxRounds: 5, budgetUsd: 5 });
+  assert.deepEqual(cfg.defaults, { maxRounds: 10, budgetUsd: 10 });
   assert.deepEqual(Object.keys(stored()).sort(), ["agents", "port", "token"]);
   assert.equal(loadConfig().token, cfg.token);
 });
@@ -29,7 +29,7 @@ test("a new config keeps only what belongs to this computer", () => {
 test("defaults written by the first version give way to the current ones", () => {
   const { token } = loadConfig();
   writeFileSync(configPath(), JSON.stringify({ ...stored(), defaults: { maxRounds: 5, budgetUsd: 1 } }));
-  assert.equal(loadConfig().defaults.budgetUsd, 5);
+  assert.equal(loadConfig().defaults.budgetUsd, 10);
   assert.equal(stored().defaults, undefined);
   assert.equal(stored().token, token);
 });
@@ -37,5 +37,5 @@ test("defaults written by the first version give way to the current ones", () =>
 test("defaults the person changed are kept", () => {
   loadConfig();
   writeFileSync(configPath(), JSON.stringify({ ...stored(), defaults: { budgetUsd: 2 } }));
-  assert.deepEqual(loadConfig().defaults, { maxRounds: 5, budgetUsd: 2 });
+  assert.deepEqual(loadConfig().defaults, { maxRounds: 10, budgetUsd: 2 });
 });

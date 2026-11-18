@@ -58,17 +58,17 @@ describe("动手 on the relay", () => {
     const doing = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "写脚本", message: "写一个", mode: "do" });
     assert.equal(doing.mode, "do");
     const approved = await client.approve(doing.id);
-    assert.equal(approved.messages.at(-1)!.body, "已同意：动手 · 5 轮");
+    assert.equal(approved.messages.at(-1)!.body, "已同意：动手 · 10 轮");
 
     const turned = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "改成问答", message: "写一个", mode: "do" });
     const asAnswer = await client.approve(turned.id, { mode: "answer" });
     assert.equal(asAnswer.mode, "answer");
-    assert.equal(asAnswer.messages.at(-1)!.body, "已同意：问答 · 5 轮 · $5.00");
+    assert.equal(asAnswer.messages.at(-1)!.body, "已同意：问答 · 10 轮 · $10.00");
 
     const asking = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "只是问问", message: "怎么做的？" });
     const asDo = await client.approve(asking.id, { mode: "do" });
     assert.equal(asDo.mode, "do");
-    assert.equal(asDo.messages.at(-1)!.body, "已同意：动手 · 5 轮");
+    assert.equal(asDo.messages.at(-1)!.body, "已同意：动手 · 10 轮");
 
     const toCodex = await client.createRequest({ from: CLAUDE, to: CODEX, topic: "问 Codex", message: "怎么做的？" });
     assert.equal((await client.approve(toCodex.id, { mode: "do" })).mode, "do");
@@ -150,7 +150,7 @@ describe("动手 on the receiving computer", () => {
     const prompt = asked.find((p) => p.topic === "字幕脚本")!;
     assert.equal(prompt.mode, "do");
     assert.equal(prompt.title, "我的 Codex 请你的 Claude 动手");
-    assert.equal(prompt.scope, "动手 · 5 轮");
+    assert.equal(prompt.scope, "动手 · 10 轮");
     answers[asked.indexOf(prompt)]("approve");
 
     await until(async () => opener.starts.length === 1);

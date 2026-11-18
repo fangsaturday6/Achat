@@ -53,7 +53,7 @@ describe("问答 or 动手, judged by the asked computer: the relay", () => {
 
     const asAnswer = await client.approve(t.id, { mode: "answer" });
     assert.equal(asAnswer.mode, "answer");
-    assert.equal(asAnswer.messages.at(-1)!.body, "已同意：问答 · 5 轮 · $5.00");
+    assert.equal(asAnswer.messages.at(-1)!.body, "已同意：问答 · 10 轮 · $10.00");
   });
 
   test("judged 动手 in a 问答 under way is a request the person approves; declined, the 问答 goes on and is not judged again", async () => {
@@ -84,7 +84,7 @@ describe("问答 or 动手, judged by the asked computer: the relay", () => {
     const judged = await client.judge(t.id, t.messages.find((m) => m.kind === "request")!.seq, "do");
     assert.equal(judged.status, "active");
     assert.equal(judged.mode, "do");
-    assert.equal(judged.messages.at(-1)!.body, "改成动手 · 5 轮");
+    assert.equal(judged.messages.at(-1)!.body, "改成动手 · 10 轮");
   });
 
   test("only what the asker said is judged, and Codex can be judged into 动手 too", async () => {
