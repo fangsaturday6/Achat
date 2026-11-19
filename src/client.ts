@@ -3,7 +3,7 @@ import type { OutgoingFile } from "./attachments.js";
 import type { AgentClient, AgentConfig } from "./config.js";
 import { signRequest, type DeviceKey } from "./device.js";
 import type { AgentModels, Effort, ModelOffer } from "./models.js";
-import type { GroupAct, GroupDetail, GroupEvent, GroupSummary, GroupTarget, GroupWork, RelayEvent, Scope, ThreadDetail, ThreadMode, ThreadStatus, ThreadSummary } from "./types.js";
+import type { GroupAct, GroupDetail, GroupEvent, GroupSummary, GroupTarget, GroupWork, RelayEvent, Scope, ThreadDetail, ThreadMode, ThreadStatus, ThreadSummary, UnseenGroup } from "./types.js";
 
 // A pick as sent: a model's id or 推理档位, or "default" for the next one down.
 export interface PickBody {
@@ -454,8 +454,8 @@ export class RelayClient {
 
   // The groups where someone answered what `agent` said since its front
   // session last looked, with the newest answer.
-  async unseenGroups(agent: string): Promise<{ id: string; name: string; seq: number }[]> {
-    return (await this.call<{ groups: { id: string; name: string; seq: number }[] }>("GET", `/api/groups/unseen?${new URLSearchParams({ agent })}`)).groups;
+  async unseenGroups(agent: string): Promise<UnseenGroup[]> {
+    return (await this.call<{ groups: UnseenGroup[] }>("GET", `/api/groups/unseen?${new URLSearchParams({ agent })}`)).groups;
   }
 
   leaveGroup(id: string, agent: string): Promise<{ ok: boolean }> {

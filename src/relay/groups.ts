@@ -21,6 +21,7 @@ import {
   type GroupWork,
   type ReceiptState,
   todayTotal,
+  type UnseenGroup,
 } from "../types.js";
 import { GroupStore, type InviteRow, type MemberRow, type StoredReceipt } from "./group-store.js";
 import { checkAttachments, RelayError } from "./service.js";
@@ -1046,7 +1047,7 @@ export class GroupService {
   // The groups where someone answered what the AI said in front since its
   // front session last looked: its person's next words to it bring them up
   // (8e). Answers to what it said in the background are not its session's news.
-  unseen(caller: Caller, agent: string): { id: string; name: string; seq: number }[] {
+  unseen(caller: Caller, agent: string): UnseenGroup[] {
     if (!caller.actsAs(agent)) throw new RelayError(403, "只能查自己的 AI 有没有人回");
     return this.store.unseenReplies(agent).map((r) => ({ id: r.groupId, name: this.store.group(r.groupId)!.name, seq: r.seq }));
   }

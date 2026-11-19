@@ -192,6 +192,11 @@ test("a reply that comes later in a group is brought up in the session that spok
     assert.equal(await userPromptHook(fangMac.client, claude, { transcriptPath: other }), null, "not in a session that never spoke there");
     assert.equal(await userPromptHook(fangMac.client, fangMac.agent("codex"), { transcriptPath: spoke }), null, "nor for another AI");
 
+    // Saying more there does not show it what came back: the tool says so, and it is still brought up.
+    const more = textOf(await ai.callTool({ name: "send_group_message", arguments: { group: "支付对接", message: "我再想想" } }));
+    assert.ok(more.endsWith(`\n你之前在这个群里说的话也有人回了，用 check_group（group: ${g.id}）看。`), more);
+    assert.notEqual(await userPromptHook(fangMac.client, claude, { transcriptPath: spoke }), null, "still brought up");
+
     assert.match(textOf(await ai.callTool({ name: "check_group", arguments: { group: "支付对接" } })), /微信还没商户号/);
     assert.equal(await userPromptHook(fangMac.client, claude, { transcriptPath: spoke }), null, "once read, no more reminders");
 
@@ -200,6 +205,62 @@ test("a reply that comes later in a group is brought up in the session that spok
     assert.match(textOf(await ai.callTool({ name: "check_group", arguments: { group: "支付对接" } })), /我的 Claude 今天被叫醒 0\/60 次/);
   } finally {
     sidecar?.stop();
+    await cloud.close();
+  }
+});
+
+test("a send_group_message given up while it waits does not count the answers it got as seen", async () => {
+  const { cloud, mailer } = await startTestCloud();
+  const fang = await logIn(cloud, mailer, "fang@example.com", "老方");
+  const wang = await logIn(cloud, mailer, "wang@example.com", "老王");
+  await befriend(fang, wang, "wang@example.com");
+  const fangMac = await addComputer(cloud, fang, "MacBook", ["claude"]);
+  const wangLaptop = await addComputer(cloud, wang, "ThinkPad", ["codex"]);
+  const claude = fangMac.agent("claude");
+  const wangCodex = wangLaptop.agent("codex");
+  const wangId = (await wang.call("GET", "/api/me")).account.id;
+  const g = await fangMac.client.createGroup({ from: claude, name: "支付对接", members: [{ account: wangId }] });
+  const invited = (await wang.call("GET", "/api/groups")).find((x: any) => x.id === g.id);
+  await wang.call("POST", `/api/groups/${g.id}/invites/${invited.myInvite.id}/accept`, { agents: [wangCodex] });
+  const sidecar = new Sidecar({
+    client: wangLaptop.client,
+    agents: [],
+    runners: { [wangCodex]: new ScriptedRunner(["微信还没商户号"]) },
+    notify: () => {},
+    webUrl: cloud.url,
+    log: () => {},
+  });
+  sidecar.start();
+  try {
+    await until(async () => (await fangMac.client.group(g.id)).members.find((m) => m.agent === wangCodex)?.online);
+    const ai = await mcp(fangMac.client, claude);
+    const marked: number[] = [];
+    const markGroupSeen = fangMac.client.markGroupSeen.bind(fangMac.client);
+    fangMac.client.markGroupSeen = async (id, agent, seq) => {
+      marked.push(seq);
+      return markGroupSeen(id, agent, seq);
+    };
+    // The answer comes, and the call is given up before the tool hands it back.
+    const giveUp = new AbortController();
+    let waited = false;
+    fangMac.client.waitGroup = async (id, _timeoutMs, signal) => {
+      const answered = await until(async () => {
+        const d = await fangMac.client.group(id);
+        return d.messages.some((m) => m.sender === wangCodex) && d;
+      });
+      giveUp.abort();
+      await until(async () => signal?.aborted);
+      waited = true;
+      return answered;
+    };
+    const asking = ai.callTool({ name: "send_group_message", arguments: { group: "支付对接", message: "@老王的 Codex 微信呢", mentions: ["老王的 Codex"] } }, undefined, { signal: giveUp.signal });
+    await assert.rejects(asking);
+    await until(async () => waited);
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepEqual(marked, []);
+    assert.deepEqual((await fangMac.client.unseenGroups(claude)).map((u) => u.id), [g.id], "brought up when its person next talks to it");
+  } finally {
+    sidecar.stop();
     await cloud.close();
   }
 });

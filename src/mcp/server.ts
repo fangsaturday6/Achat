@@ -874,6 +874,10 @@ export function createMcpServer(opts: McpOptions): McpServer {
         return text(`你不在「${g.name}」里，先用 invite_to_group 把自己拉进来（members 填「${me}」）`, true);
       }
       const ids = mentionIds(before, mentions ?? [], c.agentId, await ownSeat(c));
+      // Answers to what it said here before that it has not been shown: this
+      // tool shows only those to what it says now, so they are still brought
+      // up, and it is told where to read them.
+      const earlier = (await c.client.unseenGroups(c.agentId).catch(() => [])).some((u) => u.id === g.id);
       // 动手's result answers the request it was for (reply_to), as a background answer does.
       const posted = await c.client.postGroupMessage(g.id, {
         from: c.agentId,
@@ -883,19 +887,19 @@ export function createMcpServer(opts: McpOptions): McpServer {
         ...(reply_to !== undefined ? { replyTo: reply_to, epoch: before.epoch } : {}),
       });
       const seq = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!.seq;
+      // What it was shown is seen, unless it missed earlier answers or the call was given up.
+      const done = async (d: GroupDetail, lines: string[]) => {
+        if (!earlier && !extra.signal.aborted) await groupSeen(c, d);
+        if (earlier) lines.push(`你之前在这个群里说的话也有人回了，用 check_group（group: ${d.id}）看。`);
+        return text(lines.join("\n"));
+      };
       // Sent and done: whoever asked @s it again for more.
-      if (wait === false) {
-        await groupSeen(c, posted);
-        return text(`已发到群「${posted.name}」（${posted.id}），不等回复。`);
-      }
+      if (wait === false) return done(posted, [`已发到群「${posted.name}」（${posted.id}），不等回复。`]);
       if (!posted.messages.find((m) => m.seq === seq)!.receipts.length) {
-        await groupSeen(c, posted);
-        return text(`已发到群「${posted.name}」（${posted.id}），没有叫醒谁，不用等回复。后面有人回你，主人下次跟你说话时会提醒你。`);
+        return done(posted, [`已发到群「${posted.name}」（${posted.id}），没有叫醒谁，不用等回复。后面有人回你，主人下次跟你说话时会提醒你。`]);
       }
-      const done = await waitGroupUntil(c, posted, answeredAll(seq), extra);
-      const lines = [`群「${done.name}」（${done.id}）里的回复：`, "", ...(await groupOutcome(c, done, seq))];
-      await groupSeen(c, done);
-      return text(lines.join("\n"));
+      const answered = await waitGroupUntil(c, posted, answeredAll(seq), extra);
+      return done(answered, [`群「${answered.name}」（${answered.id}）里的回复：`, "", ...(await groupOutcome(c, answered, seq))]);
     }),
   );
 

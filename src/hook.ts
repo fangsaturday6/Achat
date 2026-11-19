@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { RelayClient } from "./client.js";
 import { ownerOf } from "./asking.js";
 import { cjk } from "./text.js";
-import type { ThreadSummary } from "./types.js";
+import type { ThreadSummary, UnseenGroup } from "./types.js";
 
 export interface HookInput {
   // The session's own conversation log, as Claude Code and Codex hand it to hooks.
@@ -33,7 +33,7 @@ export async function userPromptHook(client: RelayClient, agentId: string, input
   if (process.env.ACHAT_HEADLESS) return null;
   let pending: ThreadSummary[];
   let news: ThreadSummary[];
-  let replied: { id: string; name: string; seq: number }[];
+  let replied: UnseenGroup[];
   try {
     [pending, news, replied] = await Promise.all([
       client.listThreads({ to: agentId, status: "pending", surfaced: true }),

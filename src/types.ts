@@ -281,6 +281,14 @@ export function todayTotal(m: { quota: number; extraToday?: number }): number {
   return m.quota + (m.extraToday ?? 0);
 }
 
+// A group where someone answered what an AI said in front since its front
+// session last looked there, with the newest such answer.
+export interface UnseenGroup {
+  id: string;
+  name: string;
+  seq: number;
+}
+
 export interface GroupInvite {
   id: string;
   // The person invited.
