@@ -374,6 +374,10 @@ export interface GroupWork {
   // result, oldest first, which its next round is given however long ago
   // they came. Empty otherwise.
   requests: GroupMessage[];
+  // When `wake` is an @ to read: every @ an answer to it would settle with
+  // it, the newest 5, oldest first, `wake` last, for its computer to judge
+  // each 问答 or 动手. A service from before gives none.
+  waiting?: GroupMessage[];
 }
 
 // 动手 in a group (8n): one yes from the person lets `asker` have `doer`

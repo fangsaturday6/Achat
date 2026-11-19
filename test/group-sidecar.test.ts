@@ -432,6 +432,26 @@ describe("an AI @ed in a group answers in the background", () => {
     assert.ok(next.prompt.includes(`reply_to: ${again}`), next.prompt);
   });
 
+  test("two @s waiting at once, one asking to 动手 and a newer question, are each judged: the first goes to the person, the question is answered, and the first is not taken for answered", async () => {
+    const { g, claude, codex, shown, more, sidecar } = await actingMeeting("先后", 0);
+    sidecar.stop();
+    await until(async () => !(await fang.call("GET", `/api/groups/${g.id}`)).members.find((m: any) => m.agent === claude)?.online);
+    const ask = async (body: string) => (await wangLaptop.client.postGroupMessage(g.id, { from: codex, body, mentions: [claude] })).messages.at(-1)!.seq;
+    const sixth = await ask("@老方的 Claude 帮我动手把验签挪到网关");
+    const seventh = await ask("@老方的 Claude 验签放哪？");
+    // Judged by what each says, whichever order they come in.
+    const runner = new ByPrompt(() => "在网关统一验签") as ByPrompt & { judge: (input: { message: string }) => Promise<"do" | "answer"> };
+    runner.judge = async ({ message }) => (message.includes("动手") ? "do" : "answer");
+    sidecarFor(fangMac, claude, runner, more);
+    const prompt = await until(async () => shown.asked.find((p) => p.title.includes("「先后」")));
+    assert.equal(prompt.body, "@老方的 Claude 帮我动手把验签挪到网关");
+    const answer = await until(async () => (await fang.call("GET", `/api/groups/${g.id}`) as GroupDetail).messages.find((m) => m.sender === claude && m.kind === "message"));
+    assert.deepEqual([answer.body, answer.replyTo], ["在网关统一验签", seventh]);
+    assert.equal(await stateOf(g.id, sixth, claude), "asking");
+    shown.answer(shown.asked.indexOf(prompt), "decline");
+    await until(async () => (await stateOf(g.id, sixth, claude)) === "passed");
+  });
+
   test("a round waiting its turn is let go once 叫停 ends its act", async () => {
     const { g, claude, codex, opener, shown, sidecar } = await actingMeeting("叫停排队", 2);
     const ask = async (body: string) => (await wangLaptop.client.postGroupMessage(g.id, { from: codex, body, mentions: [claude] })).messages.at(-1)!.seq;

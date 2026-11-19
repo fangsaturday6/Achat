@@ -1130,6 +1130,36 @@ describe("groups", () => {
     assert.equal(groups.detail(web("fang"), g.id).messages.filter((m) => m.kind === "system").at(-1)!.body, "老方的 Claude 动手 10 轮用完了");
   });
 
+  test("an answer's computer is given every @ it would settle, so one asked to 动手 among them goes to its person instead of being taken for answered", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    const ask = (body: string) => groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body, mentions: ["fang/claude"] }).messages.at(-1)!.seq;
+    const receipt = (seq: number) => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts.find((r) => r.agent === "fang/claude")!;
+    // 老方's computer is off while 老王's Codex asks twice: to 动手, then a question.
+    online.delete("fang/claude");
+    const sixth = ask("@老方的 Claude 帮我动手把验签挪到网关");
+    const seventh = ask("@老方的 Claude 验签放哪？");
+    online.add("fang/claude");
+    assert.deepEqual(groups.work(computer("fang"), ["fang/claude"]), [{ groupId: g.id, agent: "fang/claude", seq: seventh }]);
+    const work = groups.workFor(computer("fang"), g.id, "fang/claude")!;
+    assert.deepEqual([work.wake.seq, work.waiting.map((m) => m.seq)], [seventh, [sixth, seventh]]);
+
+    const asked = groups.requestAct(computer("fang"), g.id, { doer: "fang/claude", seq: sixth });
+    assert.deepEqual([asked.run, asked.act.status], [false, "asking"]);
+    groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "在网关", replyTo: seventh, epoch: 0, sessionId: "s1" });
+    assert.deepEqual([receipt(sixth).state, receipt(seventh).state], ["asking", "replied"]);
+    groups.declineAct(computer("fang"), g.id, asked.act.id);
+
+    // At most the newest 5: an answer settles older ones with it, as before.
+    online.delete("fang/claude");
+    const many = Array.from({ length: 6 }, (_, i) => ask(`@老方的 Claude 第 ${i + 1} 个问题`));
+    online.add("fang/claude");
+    groups.work(computer("fang"), ["fang/claude"]);
+    assert.deepEqual(groups.workFor(computer("fang"), g.id, "fang/claude")!.waiting.map((m) => m.seq), many.slice(1));
+    groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "都答了", replyTo: many.at(-1)!, epoch: 0, sessionId: "s1" });
+    assert.equal(receipt(many[0]).state, "replied");
+  });
+
   test("reply_to from the front only sends back 动手's result: what the background is reading stays its to answer", () => {
     const g = start();
     groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });

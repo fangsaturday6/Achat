@@ -45,6 +45,9 @@ export const GROUP_LIMITS = {
   inviteTtlMs: 7 * DAY_MS,
   // An @ missed while the computer was off, or kept for 每天次数, is taken up within this.
   catchUpMs: DAY_MS,
+  // The most @s still waiting on an AI that its computer judges 问答 or 动手
+  // before one background answer; older ones are answered with them.
+  judgeCap: 5,
 };
 
 export const GROUPS_NEED_ACCOUNT = "登录 Achat 账号后才能用群。先调用 link_account，让主人登录并确认添加这台电脑";
@@ -353,17 +356,23 @@ export class GroupService {
   // background is reading is still to be answered, and the background
   // session read none of the work.
   private settle(groupId: string, agent: string, seq: number, state: ReceiptState, reason: string | null, input: { sessionId?: string; readTo?: number }, now: string): void {
-    const since = this.now().getTime() - this.limits.catchUpMs;
     const result = this.store.receipt(groupId, seq, agent)?.state === "acting";
     const waiting = result
-      ? this.askedBy(groupId, agent, this.store.message(groupId, seq)?.sender, "acting")
-      : this.store.receiptsOf(groupId, agent, ["reading", "offline", "quota"]);
-    for (const r of waiting) {
-      // What was left over a day ago was never going to be taken up (更早的不补): still 不在线.
-      if (r.seq > seq || ((r.state === "offline" || r.state === "quota") && Date.parse(r.updatedAt) < since)) continue;
-      this.store.setReceipt(groupId, r.seq, agent, state, r.seq === seq ? reason : null, r.epoch, now);
-    }
+      ? this.askedBy(groupId, agent, this.store.message(groupId, seq)?.sender, "acting").filter((r) => r.seq <= seq)
+      : this.answeredWith(groupId, agent, seq);
+    for (const r of waiting) this.store.setReceipt(groupId, r.seq, agent, state, r.seq === seq ? reason : null, r.epoch, now);
     if (!result) this.store.setRead(groupId, agent, input.readTo ?? seq, input.sessionId ?? null);
+  }
+
+  // What an answer to `seq` settles with it (settle): every @ still waiting
+  // on the AI up to it, those it had to leave while its computer was off or
+  // its 每天次数 ran out too, within a day; newest first. What was left over
+  // a day ago was never going to be taken up (更早的不补): still 不在线.
+  private answeredWith(groupId: string, agent: string, seq: number): StoredReceipt[] {
+    const since = this.now().getTime() - this.limits.catchUpMs;
+    return this.store
+      .receiptsOf(groupId, agent, ["reading", "offline", "quota"])
+      .filter((r) => r.seq <= seq && (r.state === "reading" || Date.parse(r.updatedAt) >= since));
   }
 
   // The newest @ an AI had to leave for `states` (its computer off, its 每天次数
@@ -733,7 +742,9 @@ export class GroupService {
   requestAct(caller: Caller, groupId: string, input: { doer: string; seq: number }): { act: GroupAct; run: boolean } {
     const member = this.requireDoer(caller, groupId, input.doer);
     const r = this.store.receipt(groupId, input.seq, input.doer);
-    if (!r || !(["reading", "asking", "acting"] as ReceiptState[]).includes(r.state)) throw new RelayError(409, "这条已经不用回了");
+    // Also an @ it had to leave, which an answer now would settle with it (answeredWith).
+    const left = r?.state === "offline" || r?.state === "quota" ? this.answeredWith(groupId, input.doer, input.seq).some((x) => x.seq === input.seq) : false;
+    if (!r || !(left || (["reading", "asking", "acting"] as ReceiptState[]).includes(r.state))) throw new RelayError(409, "这条已经不用回了");
     const msg = this.store.message(groupId, input.seq)!;
     const asker = msg.sender!;
     const open = this.store.openAct(groupId, asker, input.doer);
@@ -746,7 +757,7 @@ export class GroupService {
     if (r.state === "asking" && open?.status === "active" && this.due(open)) return { act: open, run: false };
     const now = this.stamp();
     const result = this.transaction((): { act: GroupAct; run: boolean } => {
-      if (open?.status === "active" && r.state === "reading" && this.covers(open, this.ownAsk(msg, member.owner))) {
+      if (open?.status === "active" && r.state !== "asking" && this.covers(open, this.ownAsk(msg, member.owner))) {
         this.store.setReceipt(groupId, input.seq, input.doer, "acting", null, r.epoch, now);
         // askSeq is the latest request: two that came together may be judged newest first.
         return { act: this.store.updateAct(open.id, { roundsUsed: open.roundsUsed + 1, askSeq: Math.max(open.askSeq, input.seq) }, now), run: true };
@@ -957,7 +968,9 @@ export class GroupService {
   // lists them); and from where its background session left off (the 20
   // before it joined, the first time or with `fresh`). `act`: what the one
   // who wrote it asked of this AI; `requests`: what an act under way has
-  // still to answer. Null when nothing waits on it.
+  // still to answer; `waiting`: for an @ it reads, every @ an answer to it
+  // would settle, the newest few (judgeCap), so its computer judges each.
+  // Null when nothing waits on it.
   workFor(caller: Caller, groupId: string, agent: string, fresh = false, seq?: number): GroupWork | null {
     const group = this.requireGroup(groupId);
     if (!caller.actsAs(agent)) throw new RelayError(403, "只能取自己的 AI 要回的消息");
@@ -990,6 +1003,13 @@ export class GroupService {
       requests: this.askedBy(groupId, agent, wake.sender, "acting")
         .reverse()
         .map((r) => this.store.message(groupId, r.seq)!),
+      waiting:
+        waiting.state === "reading"
+          ? this.answeredWith(groupId, agent, waiting.seq)
+              .slice(0, this.limits.judgeCap)
+              .reverse()
+              .map((r) => this.store.message(groupId, r.seq)!)
+          : [],
     };
   }
 

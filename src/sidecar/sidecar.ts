@@ -678,10 +678,10 @@ export class Sidecar {
   // An AI here was @ed in a group: it reads what came since it last did and
   // says something, or that it need not, from its person's history, at most
   // $1 a time; answers that come after a 叫停 are refused by the service. An
-  // AI that can 动手 has the words judged first (8k): asked to 动手, it goes
-  // to its person instead (groupAct). 动手 already asked of it with the
-  // message, waiting for its person or under way, is never answered in the
-  // background.
+  // AI that can 动手 has each @ the answer would settle judged first (8k,
+  // sortOut): one asked to 动手 goes to its person instead (groupAct). 动手
+  // already asked of it with the message, waiting for its person or under
+  // way, is never answered in the background.
   async answerGroup(groupId: string, agent: string): Promise<void> {
     const key = `${groupId}:${agent}`;
     if (this.inFlight.has(key)) {
@@ -705,7 +705,11 @@ export class Sidecar {
         await this.actOn(work, agent, me);
         return;
       }
-      if (this.opts.doers?.[agent] && (await this.judgeGroup(work, runner)) === "do" && (await this.groupAct(work, agent, me))) return;
+      if (this.opts.doers?.[agent]) {
+        const left = await this.sortOut(work, agent, me, runner);
+        if (!left) return;
+        work = { ...work, wake: left };
+      }
       const use = await this.ownUse(agent);
       mkdirSync(filesDir(groupId), { recursive: true, mode: 0o700 });
       const run = async (w: GroupWork): Promise<RunOutput> => {
@@ -787,6 +791,22 @@ export class Sidecar {
       this.inFlight.delete(key);
       if (this.again.delete(key)) void this.answerGroup(groupId, agent);
     }
+  }
+
+  // Every @ a background answer now would settle (GroupWork.waiting; only
+  // `wake` from a service from before), judged 问答 or 动手 each, oldest
+  // first: those asked to 动手 go to its person (groupAct), so none is taken
+  // for answered, and the newest of the rest is what the answer is for.
+  // Null when all of them asked to 动手.
+  private async sortOut(work: GroupWork, agent: string, me: AgentConfig, runner: AgentRunner): Promise<GroupMessage | null> {
+    const asks = work.waiting?.length ? work.waiting : [work.wake];
+    const modes = await Promise.all(asks.map((m) => this.judgeGroup({ ...work, wake: m }, runner)));
+    let left: GroupMessage | null = null;
+    for (const [i, m] of asks.entries()) {
+      if (modes[i] === "do" && (await this.groupAct({ ...work, wake: m }, agent, me))) continue;
+      left = m;
+    }
+    return left;
   }
 
   // 问答 or 动手, as for a thread's words (8k); a judgment that fails is 问答.
