@@ -14,13 +14,16 @@ import { addComputer, type Browser, logIn, MemoryMailer, until } from "./helpers
 const PORT = Number(process.env.PORT ?? 8095);
 const base = `http://127.0.0.1:${PORT}`;
 
-// Codes for logging in from the browser are printed; those the script uses itself are not.
+// Codes for logging in from the browser are printed, and once the demo is
+// ready any other mail too, such as an invite to a group; what the script
+// sends while setting up is not.
 class DemoMailer extends MemoryMailer {
   loud = false;
   async send(email: Email): Promise<void> {
     await super.send(email);
+    if (!this.loud) return;
     const code = email.subject.match(/(\d{6})/)?.[1];
-    if (this.loud && code) console.log(`登录验证码 ${email.to}：${code}`);
+    console.log(code ? `登录验证码 ${email.to}：${code}` : `[achat mail] 给 ${email.to}：${email.subject}\n${email.text}`);
   }
 }
 
@@ -103,6 +106,12 @@ async function answer(c: Computer, groupId: string, agent: string): Promise<void
   await new Promise((r) => setTimeout(r, delayMs.get(agent) ?? 1500));
   const work = await c.client.groupWorkFor(groupId, agent).catch(() => null);
   if (!work) return;
+  // Asked to 动手: here the words say so (a real computer has Haiku judge
+  // it), and the request goes to the person; nothing is answered.
+  if (work.wake.body.includes("请你动手")) {
+    await c.client.requestGroupAct(groupId, agent, work.wake.seq).catch((err) => console.log(`（${agent} 没请到动手：${(err as Error).message}）`));
+    return;
+  }
   const steps = groupId === pay.id ? script.get(agent) : undefined;
   const step: Step = steps?.shift() ?? (agent.endsWith("/codex") ? { say: `（演示）收到：${work.wake.body.slice(0, 20)}` } : { pass: "演示：这条交给 Codex" });
   if (step === "hang") return;
@@ -144,6 +153,22 @@ const settled = await until(async () => {
 }, 15_000);
 const opener = settled.messages.find((m: any) => m.mentions.includes(ALL));
 console.log(`支付对接里 @所有人 那条：${opener.receipts.map((r: any) => `${settled.names[r.agent]} ${RECEIPT_LABELS[r.state as ReceiptState]}`).join("、")}`);
+// 动手：老王的 Codex 请老方的 Claude 动手，老方在电脑上点了同意（这里替他点），群里写
+// “老方的 Claude 开始动手 · 10 轮”，那条下面是“正在动手…”；王闯的 Codex 也请它动手，
+// 还在等老方同意（“等主人同意”）。演示里没有真的动手对话，所以一直在做。
+const stateOf = async (seq: number, agent: string): Promise<string | undefined> =>
+  (await fang.call("GET", `/api/groups/${pay.id}`)).messages.find((m: any) => m.seq === seq)?.receipts.find((r: any) => r.agent === agent)?.state;
+async function askToAct(c: Computer, from: string, body: string): Promise<{ id: string }> {
+  const posted = await c.client.postGroupMessage(pay.id, { from, body, mentions: [fangClaude] });
+  const seq = posted.messages.at(-1)!.seq;
+  await until(async () => (await stateOf(seq, fangClaude)) === "asking");
+  // Asked again for the same message: the act that waits, unchanged.
+  return (await fangMac.client.requestGroupAct(pay.id, fangClaude, seq)).act;
+}
+const fromWang = await askToAct(wangLaptop, wangCodex, "@老方的 Claude 请你动手：把回调验签挪到网关，改完发我看看");
+await fangMac.client.approveGroupAct(pay.id, fromWang.id);
+await askToAct(chuangMac, chuangCodex, "@老方的 Claude 对账要从网关拿原始报文，请你动手加一个导出接口");
+
 // 老方看过支付对接：消息列表里只有周会纪要亮红点。
 await fang.call("POST", `/api/groups/${pay.id}/read`, {});
 // 老方在电脑上给支付对接里的 Claude 加了一份：底部和群设置写的是今天的总数。
@@ -170,7 +195,8 @@ await wang.call("POST", "/api/groups", {
 mailer.loud = true;
 console.log(`
 演示数据准备好了：${base}
-- 用 fang@example.com 登录（验证码会打印在下面）。老方有三个群：支付对接（王闯的 Codex 正在看）、周会纪要（有新消息）、发版计划（[待加入]），还有老王的 Codex 发来、等你批准的私聊。
+- 用 fang@example.com 登录（验证码会打印在下面）。老方有三个群：支付对接（王闯的 Codex 正在看；我的 Claude 在替老王的 Codex 动手，王闯的 Codex 请它动手、等你同意；我的 Claude 今天还剩 6 次）、周会纪要（有新消息）、发版计划（[待加入]），还有老王的 Codex 发来、等你批准的私聊。
+- 网页上发起群聊、拉朋友进群，对方收到的邮件也打印在下面。
 - 换一个无痕窗口，用 wang@、lin@、chuang@example.com 登录，看别人那边（王闯的“发版计划”也是 [待加入]，点名了他的 Codex 和 Claude）。
 - 在群里 @ 老王、王闯的 AI，一两秒后它们回话或者说无需回复；小林的电脑一直关着。
 按 Ctrl+C 停止。`);
