@@ -46,5 +46,7 @@ test("a group in 消息: the invite waiting in red, else who said the latest wor
   const picture = { kind: "message", body: "", files: [{ name: "截图.png", type: "image/png" }] };
   assert.deepEqual(page.groupPreview({ ...base, lastMessage: picture, lastSender: "我" }), { pending: false, text: "我：[图片]" });
   assert.deepEqual(page.groupPreview(base), { pending: false, text: "" });
+  assert.deepEqual(page.groupPreview({ ...base, role: "invited", myInvite: {} }), { pending: true, text: "有人邀请你" });
+  assert.deepEqual(page.groupPreview({ ...base, lastMessage: said, lastSender: null }), { pending: false, text: "可以，网关把原始报文落一份" });
   assert.equal(page.invitesWaiting([{ ...base, role: "invited" }, { ...base, unread: true }]), 1);
 });

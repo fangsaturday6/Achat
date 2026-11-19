@@ -1604,6 +1604,36 @@ function renderPosts(r) {
 
 // --- loading and drawing the app
 
+// Groups need an account: only the cloud has them. Fetched alongside the
+// conversations; when /api/groups fails, 消息 keeps the groups it had.
+// Returns whether the group in the address is one the person cannot open.
+async function loadGroups(r) {
+  if (!cloud) {
+    state.groups = [];
+    state.group = null;
+    return false;
+  }
+  let gone = false;
+  const [groups, group] = await Promise.all([
+    api("GET", "/api/groups").catch(() => state.groups),
+    r.group
+      ? api("GET", `/api/groups/${encodeURIComponent(r.group)}`).catch((err) => {
+          gone = err.status === 404;
+          return state.group?.id === r.group && !gone ? state.group : null;
+        })
+      : null,
+  ]);
+  state.groups = groups;
+  state.group = group;
+  const shown = group && groups.find((g) => g.id === group.id);
+  // Read once it is on screen, as a conversation is.
+  if (shown?.unread && shown.role === "member" && document.visibilityState === "visible") {
+    shown.unread = false;
+    void api("POST", `/api/groups/${encodeURIComponent(shown.id)}/read`, {}).catch(() => {});
+  }
+  return gone;
+}
+
 async function loadPeople() {
   state.agents = new Map((await api("GET", "/api/agents")).map((a) => [a.id, a]));
   if (cloud) state.contacts = await api("GET", "/api/contacts");
@@ -1623,17 +1653,11 @@ async function refresh() {
   const shown = document.querySelector("#main .main-body");
   const scroll = r.view === "posts" && shown && state.shown === location.hash ? shown.scrollTop : 0;
   try {
-    if (cloud) state.me = await api("GET", "/api/me");
-    state.threads = await api("GET", "/api/threads");
-    // Groups need an account: only the cloud has them.
-    state.groups = cloud ? await api("GET", "/api/groups").catch(() => []) : [];
-    state.group = cloud && r.group ? await api("GET", `/api/groups/${encodeURIComponent(r.group)}`).catch(() => null) : null;
-    const shownGroup = state.group && state.groups.find((g) => g.id === state.group.id);
-    // Read once it is on screen, as a conversation is.
-    if (shownGroup?.unread && shownGroup.role === "member" && document.visibilityState === "visible") {
-      shownGroup.unread = false;
-      void api("POST", `/api/groups/${encodeURIComponent(shownGroup.id)}/read`, {}).catch(() => {});
-    }
+    const [me, threads, gone] = await Promise.all([cloud ? api("GET", "/api/me") : state.me, api("GET", "/api/threads"), loadGroups(r)]);
+    state.me = me;
+    state.threads = threads;
+    // A group the person is not in (removed from it, or a wrong link): back to 消息.
+    if (gone) return void location.replace("#/");
     const unknown = state.threads.some((t) => !state.agents.has(t.from) || !state.agents.has(t.to));
     if (unknown || r.view !== "messages") await loadPeople();
     if (cloud && r.view === "contacts" && r.id === "new") state.friends = await api("GET", "/api/invites");
