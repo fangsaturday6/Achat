@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync as readdir, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync as readdir, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, describe, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -11,7 +11,7 @@ import { createMcpServer } from "../src/mcp/server.js";
 import type { RunningRelay } from "../src/relay/server.js";
 import type { Answer, ApprovalPrompt } from "../src/sidecar/dialog.js";
 import { doerSystemPrompt, Sidecar } from "../src/sidecar/sidecar.js";
-import { actKey, backgroundId, claudeTaskArgs, codexSessionId, codexTaskArgs, CodexTaskOpener, TaskBook, taskDir, taskFor, type TaskOpener, type TaskRecord, type TaskStart } from "../src/sidecar/tasks.js";
+import { actKey, backgroundId, claudeConfigFile, ClaudeTaskOpener, claudeTaskArgs, codexSessionId, codexTaskArgs, CodexTaskOpener, TaskBook, taskDir, taskFor, trustFolder, type TaskOpener, type TaskRecord, type TaskStart } from "../src/sidecar/tasks.js";
 import { codexCommand } from "../src/which.js";
 import { CLAUDE, CODEX, JudgingRunner, ScriptedRunner, startTestRelay, until } from "./helpers.js";
 
@@ -344,5 +344,96 @@ describe("a Codex conversation for 动手", () => {
   test("a run that fails at the start says why instead of waiting", async () => {
     const opener = new CodexTaskOpener(fakeCodex("echo 'ERROR: model is not supported'; exit 1"), mkdtempSync(join(tmpdir(), "achat-scripts-")), mkdtempSync(join(tmpdir(), "achat-root-")), false, 10_000);
     await assert.rejects(opener.open({ threadId: "t10", topic: "画", prompt: "画", systemPrompt: "规则" }), /打不开动手的对话：model is not supported/);
+  });
+});
+
+describe("a Claude Code conversation for 动手", () => {
+  // The person's Claude Code config: their own settings and the folders they trusted.
+  function claudeConfig(projects: Record<string, unknown> = {}, format = (c: unknown) => JSON.stringify(c, null, 2)): string {
+    const file = join(mkdtempSync(join(tmpdir(), "achat-claude-config-")), ".claude.json");
+    const config = { numStartups: 3, oauthAccount: { emailAddress: "me@example.com" }, projects: { "/Users/me/code": { hasTrustDialogAccepted: true, allowedTools: ["Bash(ls)"] }, ...projects } };
+    writeFileSync(file, format(config), { mode: 0o600 });
+    return file;
+  }
+
+  // A stand-in for `claude`: like Claude Code 2.1.326, `--bg` will not start
+  // in a folder the config does not trust (by its real path), and `agents
+  // --json` lists the session it started.
+  function fakeClaude(config: string): string {
+    const dir = mkdtempSync(join(tmpdir(), "achat-fake-claude-"));
+    const bin = join(dir, "claude");
+    const trusted = `const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.exit(c.projects?.[process.cwd().normalize("NFC")]?.hasTrustDialogAccepted === true ? 0 : 1)`;
+    writeFileSync(
+      bin,
+      [
+        "#!/bin/bash",
+        `if [ "$1" = agents ]; then echo '[{"id":"5af4910f","sessionId":"5af4910f-0000-full"}]'; exit 0; fi`,
+        `if ! ${shellWord(process.execPath)} -e ${shellWord(trusted)} ${shellWord(config)}; then echo "Workspace not trusted. Run \\\`claude\\\` in $PWD once and accept the trust prompt, then retry." >&2; exit 1; fi`,
+        `echo "backgrounded · 5af4910f · Achat · 画小刘"`,
+        "",
+      ].join("\n"),
+    );
+    chmodSync(bin, 0o755);
+    return bin;
+  }
+
+  function shellWord(value: string): string {
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+  }
+
+  const read = (file: string) => JSON.parse(readFileSync(file, "utf8"));
+
+  test("its new folder is trusted for Claude Code before the background session starts, and nothing else of the person's config changes", async () => {
+    const config = claudeConfig();
+    const before = read(config);
+    const opener = new ClaudeTaskOpener(fakeClaude(config), mkdtempSync(join(tmpdir(), "achat-scripts-")), mkdtempSync(join(tmpdir(), "achat-root-")), false, config);
+    const rec = await opener.open({ threadId: "t1", topic: "画小刘", prompt: "照设定图画", systemPrompt: "规则" });
+    assert.equal(rec.sessionId, "5af4910f-0000-full");
+    const after = read(config);
+    const key = realpathSync(rec.dir);
+    assert.deepEqual(after.projects[key], { hasTrustDialogAccepted: true }, "kept by the folder's real path, as Claude Code looks it up");
+    delete after.projects[key];
+    assert.deepEqual(after, before);
+    assert.equal(statSync(config).mode & 0o777, 0o600, "still only the person's to read");
+  });
+
+  test("a later conversation in a folder from before is trusted too, keeping what Claude Code keeps for that folder", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "achat-old-task-")));
+    const config = claudeConfig({ [dir]: { hasTrustDialogAccepted: false, allowedTools: ["Edit"], lastSessionId: "old" } });
+    const opener = new ClaudeTaskOpener(fakeClaude(config), mkdtempSync(join(tmpdir(), "achat-scripts-")), mkdtempSync(join(tmpdir(), "achat-root-")), false, config);
+    const rec = await opener.open({ threadId: "t1", topic: "画小刘", prompt: "接着画", systemPrompt: "规则", from: { sessionId: "old", dir } });
+    assert.equal(rec.dir, dir);
+    assert.deepEqual(read(config).projects[dir], { hasTrustDialogAccepted: true, allowedTools: ["Edit"], lastSessionId: "old" });
+  });
+
+  test("a folder already trusted leaves the config as it was, and a config missing or unreadable is not touched", () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "achat-task-")));
+    const compact = claudeConfig({ [dir]: { hasTrustDialogAccepted: true } }, (c) => JSON.stringify(c));
+    const text = readFileSync(compact, "utf8");
+    trustFolder(dir, compact);
+    assert.equal(readFileSync(compact, "utf8"), text, "not written again");
+
+    const missing = join(mkdtempSync(join(tmpdir(), "achat-no-config-")), ".claude.json");
+    trustFolder(dir, missing);
+    assert.equal(existsSync(missing), false, "Claude Code makes its own config");
+
+    const broken = claudeConfig({}, () => '{"numStartups": 3,');
+    trustFolder(dir, broken);
+    assert.equal(readFileSync(broken, "utf8"), '{"numStartups": 3,');
+  });
+
+  test("a config kept as a link to another file stays a link, and the file it links to is the one updated", () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "achat-task-")));
+    const real = claudeConfig();
+    const link = join(mkdtempSync(join(tmpdir(), "achat-dotfiles-")), ".claude.json");
+    symlinkSync(real, link);
+    trustFolder(dir, link);
+    assert.ok(lstatSync(link).isSymbolicLink());
+    assert.equal(read(real).projects[dir].hasTrustDialogAccepted, true);
+  });
+
+  test("the config is where Claude Code keeps it: in CLAUDE_CONFIG_DIR when set, else the home folder", () => {
+    assert.equal(claudeConfigFile({ CLAUDE_CONFIG_DIR: "/opt/claude" }), join("/opt/claude", ".claude.json"));
+    assert.equal(claudeConfigFile({}), join(homedir(), ".claude.json"));
   });
 });

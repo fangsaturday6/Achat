@@ -1,5 +1,5 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -194,9 +194,65 @@ function commandPath(command: string): string {
   }
 }
 
+// Where Claude Code keeps the person's config, which among other things says
+// which folders they trusted.
+export function claudeConfigFile(env: NodeJS.ProcessEnv = process.env): string {
+  return join(env.CLAUDE_CONFIG_DIR || homedir(), ".claude.json");
+}
+
+type ClaudeConfig = { projects?: Record<string, unknown> };
+
+// Claude Code will not start a background session in a folder nobody has
+// trusted ("Workspace not trusted", 2.1.326), and nobody is there to say yes.
+// The folder is one Achat made for the 动手, or one an earlier conversation
+// worked in, so it says yes for it, as Claude Code records the person's yes:
+// projects[<the folder's real path>].hasTrustDialogAccepted. Only that entry
+// changes, and only when it is not yet trusted. A config missing or not
+// readable is left to Claude Code, which then says why it does not start.
+export function trustFolder(dir: string, config = claudeConfigFile()): void {
+  const key = realPath(dir).normalize("NFC");
+  let file: string;
+  try {
+    // A config kept as a link to another file stays a link.
+    file = realpathSync(config);
+  } catch {
+    return;
+  }
+  // Claude Code rewrites it often; written beside it and moved in place in one
+  // step, as Claude Code does, and again if it changed meanwhile.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const text = readText(file);
+    let parsed: ClaudeConfig;
+    try {
+      parsed = JSON.parse(text) as ClaudeConfig;
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    const projects = parsed.projects && typeof parsed.projects === "object" ? parsed.projects : {};
+    const entry = projects[key] && typeof projects[key] === "object" ? (projects[key] as Record<string, unknown>) : {};
+    if (entry.hasTrustDialogAccepted === true) return;
+    const next = { ...parsed, projects: { ...projects, [key]: { ...entry, hasTrustDialogAccepted: true } } };
+    const tmp = `${file}.achat-${process.pid}-${Date.now()}-${attempt}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: statSync(file).mode & 0o777 });
+      if (readText(file) !== text) {
+        rmSync(tmp, { force: true });
+        continue;
+      }
+      renameSync(tmp, file);
+      return;
+    } catch {
+      rmSync(tmp, { force: true });
+      return;
+    }
+  }
+}
+
 // The arguments for `claude --bg`: edits inside the task's folder go ahead, a
 // command or anything outside it asks the person first. A background session
-// picks its own id, and needs no folder trust question answered first.
+// picks its own id, and starts only in a folder Claude Code trusts
+// (trustFolder).
 export function claudeTaskArgs(start: TaskStart): string[] {
   return [
     "--bg",
@@ -229,18 +285,23 @@ export class ClaudeTaskOpener implements TaskOpener {
     private scripts = join(achatHome(), "tasks"),
     // Where the tasks' folders go.
     private root = join(homedir(), "Achat"),
+    // False in tests: no terminal window.
+    private window = true,
+    // Claude Code's config, where the folder is trusted.
+    private config = claudeConfigFile(),
   ) {}
 
   async open(start: TaskStart): Promise<TaskRecord> {
     const dir = start.from?.dir ?? taskDir(start.topic, start.threadId, this.root);
     mkdirSync(dir, { recursive: true });
+    trustFolder(dir, this.config);
     start.claim?.(dir);
     const claude = commandPath(this.command);
     const output = await capture(claude, claudeTaskArgs(start), dir);
     const id = backgroundId(output);
     if (!id) throw new Error(`打不开动手的对话：${output.trim().split("\n").at(-1) || "claude --bg 没有给出会话"}`);
     const sessionId = await fullSessionId(claude, id, dir);
-    await showWindow(this.scripts, `${safe(start.threadId)}-${id}`, dir, [`exec ${[claude, "attach", id].map(shellQuote).join(" ")}`]);
+    if (this.window) await showWindow(this.scripts, `${safe(start.threadId)}-${id}`, dir, [`exec ${[claude, "attach", id].map(shellQuote).join(" ")}`]);
     return { sessionId, dir, ...workingWith(start) };
   }
 }
