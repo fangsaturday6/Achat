@@ -1,4 +1,4 @@
-import { avatarColor, cjk, escapeHtml as escape } from "../text.js";
+import { avatarColor, cjk, clip, escapeHtml as escape } from "../text.js";
 
 // Emails the cloud sends. Each has a plain-text version and an HTML version
 // built from tables and inline styles, which is what mail clients render.
@@ -72,7 +72,7 @@ function optOut(settingsLink: string): string {
 
 // What was said, cut to what an email shows.
 function excerpt(text: string): string {
-  return text.length > 300 ? text.slice(0, 300) + "……" : text;
+  return clip(text, 300);
 }
 
 export function loginCodeEmail(to: string, code: string, site: string): Email {

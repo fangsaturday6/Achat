@@ -4,6 +4,13 @@ export function cjk(...parts: string[]): string {
   return parts.reduce((out, part) => (/[A-Za-z0-9]$/.test(out) || /^[A-Za-z0-9]/.test(part) ? `${out} ${part}` : out + part));
 }
 
+// The first `max` characters of a text, with "……" when some were left out.
+// An emoji counts as one character, so it is never cut in half.
+export function clip(text: string, max: number): string {
+  const chars = Array.from(text);
+  return chars.length > max ? chars.slice(0, max).join("") + "……" : text;
+}
+
 const ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 
 export function escapeHtml(text: string): string {

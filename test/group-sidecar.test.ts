@@ -466,9 +466,13 @@ describe("an AI @ed in a group answers in the background", () => {
     const body = "@老方 微信商户号用哪家公司的营业执照，你来定";
     await fangMac.client.postGroupMessage(g.id, { from: claude, body, mentions: [fangSeat] });
     assert.deepEqual(await until(async () => fangTold.find(([, said]) => said.includes("营业执照"))), ["支付对接", `我的 Claude：${body}`, page]);
-    const long = `@老方 ${"这句话很长".repeat(30)}`;
+    // Cut by characters, an emoji being one, and said to be cut.
+    const long = `@老方 ${"这句话很长😀".repeat(30)}`;
     await fangMac.client.postGroupMessage(g.id, { from: claude, body: long, mentions: [fangSeat] });
-    assert.deepEqual(await until(async () => fangTold.find(([, said]) => said.includes("这句话很长"))), ["支付对接", `我的 Claude：${long.slice(0, 100)}`, page]);
+    assert.deepEqual(await until(async () => fangTold.find(([, said]) => said.includes("这句话很长"))), ["支付对接", `我的 Claude：${Array.from(long).slice(0, 100).join("")}……`, page]);
+    // Only files: their names, as the dialog to approve shows them.
+    await fangMac.client.postGroupMessage(g.id, { from: claude, body: "", mentions: [fangSeat], files: [{ name: "执照.png", type: "image/png", data: Buffer.from("png").toString("base64") }] });
+    assert.deepEqual(await until(async () => fangTold.find(([, said]) => said.includes("执照.png"))), ["支付对接", "我的 Claude：[附件] 执照.png", page]);
     assert.ok(!wangTold.some(([, said]) => said.startsWith("我的 Claude")), "only 老方 is told");
 
     // 老方 starts another group on the web and invites 老王, whose computer is on.

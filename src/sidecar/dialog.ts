@@ -2,6 +2,7 @@ import { execFile, execFileSync, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { platform } from "node:os";
 import { join } from "node:path";
+import { clip } from "../text.js";
 import type { ThreadMode } from "../types.js";
 import { desktopNotify } from "./notify.js";
 
@@ -42,8 +43,7 @@ const WAIT_SECONDS = 600;
 
 // What a dialog says under its title.
 export function approvalText(p: ApprovalPrompt): string {
-  const body = p.body.length > 400 ? p.body.slice(0, 400) + "……" : p.body;
-  return [...(p.topic ? [p.topic, ""] : []), body, "", ...(p.reason ? [p.reason] : []), p.scope].join("\n");
+  return [...(p.topic ? [p.topic, ""] : []), clip(p.body, 400), "", ...(p.reason ? [p.reason] : []), p.scope].join("\n");
 }
 
 function onPath(command: string): boolean {

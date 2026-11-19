@@ -5,7 +5,7 @@ import { RelayClientError, type RelayClient } from "../client.js";
 import type { AgentClient, AgentConfig } from "../config.js";
 import { NO_PICK, resolveUse, type ModelOffer, type ModelUse } from "../models.js";
 import { redact } from "../redact.js";
-import { cjk } from "../text.js";
+import { cjk, clip } from "../text.js";
 import { mentionsIn, passReason } from "../groups.js";
 import { MIN_ROUND_BUDGET_USD, MODE_LABELS, MORE_SCOPE, quotaLowAt, todayTotal, waitingForAsker, type GroupAct, type GroupEvent, type GroupMessage, type GroupWork, type Message, type RelayEvent, type ThreadDetail, type ThreadMode } from "../types.js";
 import type { Alerter, Asker, Asking, Chooser, Choosing } from "./dialog.js";
@@ -621,14 +621,15 @@ export class Sidecar {
   }
 
   // The person's own AI @ed them in a group: the group's name, then who said
-  // what, cut short; the notification opens the group.
+  // what, cut short, or the names of the files when it sent only files; the
+  // notification opens the group.
   private async tellMention(groupId: string, seq: number): Promise<void> {
     try {
       const g = await this.relay.group(groupId);
       const m = g.messages.find((x) => x.seq === seq);
       if (!m?.sender) return;
       // Not cjk(): it puts a space before "：" after a Latin name.
-      this.opts.notify(g.name, `${g.names[m.sender] ?? m.sender}：${m.body.slice(0, 100)}`, `${this.opts.webUrl}/#/g/${groupId}`);
+      this.opts.notify(g.name, `${g.names[m.sender] ?? m.sender}：${clip(m.body || withFileNames(m), 100)}`, `${this.opts.webUrl}/#/g/${groupId}`);
     } catch (err) {
       if (!this.stopping.signal.aborted) this.log(`${groupId} 的 @ 提醒：${(err as Error).message}`);
     }
