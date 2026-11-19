@@ -579,10 +579,11 @@ export class GroupService {
         now,
       );
       if (answering) this.settle(groupId, from.id, input.replyTo!, "replied", null, input, now);
-      // The act's last round answered: its rounds are used.
-      const used = acting ? this.lastRound(groupId, from.id, input.replyTo!) : null;
-      if (used) this.finish(used, now);
-      return { seq: msg.seq, wake: this.wake(this.store.group(groupId)!, msg, from.id) };
+      const wake = this.wake(this.store.group(groupId)!, msg, from.id);
+      // The act's last round answered, and what its asker asked past it is
+      // to be put to its person: its computer looks again, as if woken.
+      if (acting && this.resultBack(groupId, from.id, input.replyTo!, now)) wake.push(from.id);
+      return { seq: msg.seq, wake };
     });
     this.emit("group.message", groupId, posted);
     // An AI calling its own person (@老方): they alone are told, on the page and their computer.
@@ -660,25 +661,48 @@ export class GroupService {
     return asker ? this.store.requests(groupId, asker, [state], agent) : [];
   }
 
-  // The rounds start, the first being what asked: its person said yes, or it
-  // is between one person's own. Every request of it still waiting is under way now.
+  // The rounds start, the first being what asked: its person said yes, or
+  // asked themself (own). Every request of it still waiting is under way now.
   private startAct(act: GroupAct, now: string): GroupAct {
     for (const r of this.askedBy(act.groupId, act.doer, act.asker, "asking")) this.store.setReceipt(act.groupId, r.seq, act.doer, "acting", null, r.epoch, now);
     this.store.addMessage(act.groupId, { sender: null, kind: "system", body: cjk(this.nameFor(act.doer), `开始动手 · ${act.maxRounds} 轮`) }, now);
     return this.store.updateAct(act.id, { status: "active", roundsUsed: 1 }, now);
   }
 
-  // Its rounds are used: it is done, and the group is told.
-  private finish(act: GroupAct, now: string): void {
-    this.store.updateAct(act.id, { status: "done" }, now);
-    this.store.addMessage(act.groupId, { sender: null, kind: "system", body: cjk(this.nameFor(act.doer), `动手 ${act.maxRounds} 轮用完了`) }, now);
+  // Whether `act` takes a request as one more of its rounds: it has rounds
+  // left, and what its person started themself (own) goes on only with
+  // their own asking, never with words that may be someone else's.
+  private covers(act: GroupAct, ownAsk: boolean): boolean {
+    return act.roundsUsed < act.maxRounds && (!act.own || ownAsk);
   }
 
-  // The act whose last round `seq` asked for, once its result comes back.
-  private lastRound(groupId: string, doer: string, seq: number): GroupAct | null {
+  // Rounds of `act` still to be done here: requests under way, their result not back.
+  private due(act: GroupAct): boolean {
+    return this.askedBy(act.groupId, act.doer, act.asker, "acting").length > 0;
+  }
+
+  // An act is over, with nothing of it left to do: its rounds used (the
+  // group is told), or its person's own act now asked for by words that
+  // may not be theirs. What its asker asked past it waits for a yes.
+  private end(act: GroupAct, now: string): void {
+    this.store.updateAct(act.id, { status: "done" }, now);
+    if (act.roundsUsed >= act.maxRounds) {
+      this.store.addMessage(act.groupId, { sender: null, kind: "system", body: cjk(this.nameFor(act.doer), `动手 ${act.maxRounds} 轮用完了`) }, now);
+    }
+  }
+
+  // 动手's result for `seq` came back. Once nothing of its act is left to
+  // do, an act whose rounds are used, or that a request it does not cover
+  // waits on (requestAct), ends. True when such a request waits: its
+  // computer is to put it to its person now.
+  private resultBack(groupId: string, doer: string, seq: number, now: string): boolean {
     const asker = this.store.message(groupId, seq)?.sender;
     const act = asker ? this.store.openAct(groupId, asker, doer) : null;
-    return act?.status === "active" && act.askSeq === seq && act.roundsUsed >= act.maxRounds ? act : null;
+    if (act?.status !== "active" || this.due(act)) return false;
+    const waiting = this.askedBy(groupId, doer, asker, "asking").length > 0;
+    if (act.roundsUsed < act.maxRounds && !waiting) return false;
+    this.end(act, now);
+    return waiting;
   }
 
   // Its person's own asking, which needs no dialog: their words in person,
@@ -694,9 +718,12 @@ export class GroupService {
   // The computer of the AI woken for `seq` judged it is asked to 动手 (8k).
   // Asked by its own person in person, or by another of their AIs from the
   // front, it starts at once (ownAsk); within an act's rounds the same
-  // asker's next request goes on with it; otherwise the person decides in a
-  // dialog on that computer (approveAct, declineAct). `run`: the computer
-  // starts the work, or goes on with it, now.
+  // asker's next request goes on with it (covers); otherwise the person
+  // decides in a dialog on that computer (approveAct, declineAct). A request
+  // the act under way does not cover, such as an 11th, waits for what that
+  // act has still to do (its rounds were approved), then for a yes; the
+  // service tells its computer once that is back (resultBack). `run`: the
+  // computer starts the work, or goes on with it, now.
   requestAct(caller: Caller, groupId: string, input: { doer: string; seq: number }): { act: GroupAct; run: boolean } {
     const member = this.requireDoer(caller, groupId, input.doer);
     const r = this.store.receipt(groupId, input.seq, input.doer);
@@ -705,21 +732,28 @@ export class GroupService {
     const asker = msg.sender!;
     const open = this.store.openAct(groupId, asker, input.doer);
     // Asked for already, such as a retry or after a restart: nothing changes.
-    if (open && r.state !== "reading") return { act: open, run: open.status === "active" };
+    if (r.state === "acting" && open?.status === "active") return { act: open, run: true };
+    if (r.state === "acting") throw new RelayError(409, "这条已经不用回了");
+    if (r.state === "asking" && open?.status === "asking") return { act: open, run: false };
     const now = this.stamp();
     const result = this.transaction((): { act: GroupAct; run: boolean } => {
-      if (open?.status === "active" && open.roundsUsed < open.maxRounds) {
+      if (open?.status === "active" && r.state === "reading" && this.covers(open, this.ownAsk(msg, member.owner))) {
         this.store.setReceipt(groupId, input.seq, input.doer, "acting", null, r.epoch, now);
         // askSeq is the latest request: two that came together may be judged newest first.
         return { act: this.store.updateAct(open.id, { roundsUsed: open.roundsUsed + 1, askSeq: Math.max(open.askSeq, input.seq) }, now), run: true };
       }
-      // Its rounds are used and the last result is not back yet: done all the same, and asked for anew.
-      if (open?.status === "active") this.finish(open, now);
       this.store.setReceipt(groupId, input.seq, input.doer, "asking", null, r.epoch, now);
+      // Past what the act under way covers: what it has still to do comes first.
+      if (open?.status === "active") {
+        if (this.due(open)) return { act: open, run: false };
+        this.end(open, now);
+      }
       if (open?.status === "asking") return { act: this.store.updateAct(open.id, { askSeq: Math.max(open.askSeq, input.seq) }, now), run: false };
-      const own = this.ownAsk(msg, member.owner);
+      // A new act answers the latest of what waits: several may have waited for the one before to end.
+      const askSeq = Math.max(input.seq, ...this.askedBy(groupId, input.doer, asker, "asking").map((x) => x.seq));
+      const own = this.ownAsk(this.store.message(groupId, askSeq)!, member.owner);
       const act = this.store.addAct(
-        { id: `ga_${randomBytes(6).toString("hex")}`, groupId, asker, doer: input.doer, status: "asking", own, maxRounds: GROUP_ACT_ROUNDS, roundsUsed: 0, askSeq: input.seq },
+        { id: `ga_${randomBytes(6).toString("hex")}`, groupId, asker, doer: input.doer, status: "asking", own, maxRounds: GROUP_ACT_ROUNDS, roundsUsed: 0, askSeq },
         now,
       );
       return own ? { act: this.startAct(act, now), run: true } : { act, run: false };

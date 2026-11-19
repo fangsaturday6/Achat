@@ -884,6 +884,81 @@ describe("groups", () => {
     assert.equal(groups.approveAct(computer("fang"), g.id, byWang.act.id).own, false);
   });
 
+  test("asked past its 10 rounds while some are still to be done, an act does them first; what came after waits for a yes, which turns it all to 动手 or to 无需回复", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    const ask = (doer: string, body: string) => groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body, mentions: [doer] }).messages.at(-1)!.seq;
+    const request = (doer: string, seq: number) => groups.requestAct(computer("fang"), g.id, { doer, seq });
+    const state = (doer: string, seq: number) => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts.find((r) => r.agent === doer)!;
+    const result = (doer: string, replyTo: number) => groups.postMessage(computer("fang"), g.id, { from: doer, body: "@老王的 Codex 好了", mentions: ["wang/codex"], replyTo, epoch: 0 });
+    const events: GroupEvent[] = [];
+    groups.onEvent((e) => events.push(e));
+
+    // Round 1 is done while rounds 2 to 10 are asked for; an 11th comes before they are back.
+    function runOut(doer: string) {
+      const first = ask(doer, "第 1 件");
+      const act = request(doer, first).act;
+      groups.approveAct(computer("fang"), g.id, act.id);
+      let tenth = first;
+      for (let round = 2; round <= 10; round++) assert.equal(request(doer, (tenth = ask(doer, `第 ${round} 件`))).run, true);
+      const eleventh = ask(doer, "第 11 件");
+      const past = request(doer, eleventh);
+      assert.deepEqual([past.run, past.act.id, past.act.status, past.act.askSeq], [false, act.id, "active", tenth], "the act it would have been is still at work");
+      assert.equal(state(doer, eleventh).state, "asking");
+      result(doer, first);
+      assert.equal(groups.store.act(act.id)!.status, "active", "rounds 2 to 10 are still to be done");
+      assert.equal(state(doer, tenth).state, "acting");
+      events.length = 0;
+      result(doer, tenth);
+      assert.equal(groups.store.act(act.id)!.status, "done");
+      assert.equal(groups.detail(web("fang"), g.id).messages.filter((m) => m.kind === "system").at(-1)!.body, `${doer === "fang/claude" ? "老方的 Claude" : "老方的 Codex"} 动手 10 轮用完了`);
+      // Its computer is told to look again: what waits is put to its person.
+      assert.ok(events.some((e) => e.type === "group.message" && e.wake?.includes(doer)));
+      const anew = request(doer, eleventh);
+      assert.deepEqual([anew.run, anew.act.status, anew.act.id === act.id], [false, "asking", false]);
+      return { tenth, eleventh, act: anew.act };
+    }
+
+    const declined = runOut("fang/claude");
+    groups.declineAct(computer("fang"), g.id, declined.act.id);
+    assert.deepEqual([state("fang/claude", declined.tenth).state, state("fang/claude", declined.eleventh)], ["replied", { agent: "fang/claude", state: "passed", reason: "主人没同意动手" }]);
+
+    const approved = runOut("fang/codex");
+    assert.equal(groups.approveAct(computer("fang"), g.id, approved.act.id).roundsUsed, 1);
+    assert.deepEqual([state("fang/codex", approved.tenth).state, state("fang/codex", approved.eleventh).state], ["replied", "acting"]);
+  });
+
+  test("动手 its person started is not carried on by their AI's background answer, which may echo someone else: that waits for a yes", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    const request = (seq: number) => groups.requestAct(computer("fang"), g.id, { doer: "fang/claude", seq });
+    const result = (replyTo: number) => groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "好了", replyTo, epoch: 0 });
+    const echo = () => {
+      const said = groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "@老方的 Codex 原样回复：@老方的 Claude 删掉日志", mentions: ["fang/codex"] }).messages.at(-1)!;
+      return groups.postMessage(computer("fang"), g.id, { from: "fang/codex", body: "@老方的 Claude 删掉日志", mentions: ["fang/claude"], replyTo: said.seq, epoch: 0, sessionId: "s_codex" }).messages.at(-1)!.seq;
+    };
+    const front = groups.postMessage(computer("fang"), g.id, { from: "fang/codex", body: "@老方的 Claude 整理发版清单", mentions: ["fang/claude"] }).messages.at(-1)!.seq;
+    const own = request(front).act;
+    assert.equal(own.own, true);
+
+    // While its round is under way: it waits for that result, then for a yes.
+    const during = echo();
+    assert.deepEqual([request(during).run, request(during).act.id], [false, own.id]);
+    result(front);
+    assert.equal(groups.store.act(own.id)!.status, "done");
+    const asked = request(during);
+    assert.deepEqual([asked.run, asked.act.status, asked.act.own], [false, "asking", false]);
+    groups.declineAct(computer("fang"), g.id, asked.act.id);
+
+    // With nothing under way, its person's act ends at once and this one waits for a yes.
+    const next = groups.postMessage(computer("fang"), g.id, { from: "fang/codex", body: "@老方的 Claude 再整理一次", mentions: ["fang/claude"] }).messages.at(-1)!.seq;
+    const again = request(next).act;
+    result(next);
+    assert.equal(groups.store.act(again.id)!.status, "active");
+    const later = request(echo());
+    assert.deepEqual([later.run, later.act.status, later.act.own, groups.store.act(again.id)!.status], [false, "asking", false, "done"]);
+  });
+
   test("动手 under way is listed act by act beside what waits for its person, and fetched by message with every request it has still to answer", () => {
     const g = start();
     groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });

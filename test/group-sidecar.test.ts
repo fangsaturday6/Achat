@@ -359,26 +359,39 @@ describe("an AI @ed in a group answers in the background", () => {
     await fangMac.client.postGroupMessage(g.id, { from: claude, body: "@老王的 Codex 挪好了", mentions: [codex], replyTo: seq, epoch: 0 });
   });
 
-  test("asked again once ten rounds are used and approved anew, the work goes on in the same conversation and folder", async () => {
+  test("asked past ten rounds while the last are still to be done, it does them first, then asks the person, and goes on in the same conversation and folder", async () => {
     const { g, claude, codex, opener, shown } = await actingMeeting("十轮", 11);
     const ask = async (body: string) => (await wangLaptop.client.postGroupMessage(g.id, { from: codex, body, mentions: [claude] })).messages.at(-1)!.seq;
+    const result = (body: string, replyTo: number) => fangMac.client.postGroupMessage(g.id, { from: claude, body, mentions: [codex], replyTo, epoch: 0 });
     const started = () => opener.starts.filter((s) => s.topic === "十轮");
     const dialogs = () => shown.asked.map((p, i) => [p, i] as const).filter(([p]) => p.title.includes("「十轮」"));
-    for (let round = 1; round <= 10; round++) {
-      const seq = await ask(`@老方的 Claude 第 ${round} 件`);
+    let ninth = 0;
+    for (let round = 1; round <= 9; round++) {
+      ninth = await ask(`@老方的 Claude 第 ${round} 件`);
       if (round === 1) shown.answer((await until(async () => dialogs()[0]))[1], "approve");
       await until(async () => started().length === round);
-      await fangMac.client.postGroupMessage(g.id, { from: claude, body: `@老王的 Codex 第 ${round} 件好了`, mentions: [codex], replyTo: seq, epoch: 0 });
+      if (round < 9) await result(`@老王的 Codex 第 ${round} 件好了`, ninth);
     }
+    // While round 9 is done: the 10th waits its turn, and an 11th is past the ten rounds.
+    const tenth = await ask("@老方的 Claude 第 10 件");
+    await until(async () => (await stateOf(g.id, tenth, claude)) === "acting");
     const eleventh = await ask("@老方的 Claude 第 11 件");
+    await until(async () => (await stateOf(g.id, eleventh, claude)) === "asking");
+    await result("@老王的 Codex 第 9 件好了", ninth);
+    const last = await until(async () => started()[9]);
+    assert.ok(last.prompt.includes(`reply_to: ${tenth}`), last.prompt);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(dialogs().length, 1, "no dialog while the rounds approved are still to be done");
+
+    await result("@老王的 Codex 第 10 件好了", tenth);
     shown.answer((await until(async () => dialogs()[1]))[1], "approve");
     const again = await until(async () => started()[10]);
     assert.equal(again.from?.dir, "/tmp/十轮");
     // The FakeOpener names each conversation by how many it opened.
-    assert.equal(again.from?.sessionId, `session-${opener.starts.indexOf(started()[9]) + 1}`);
-    assert.match(again.prompt, /第 11 件/);
+    assert.equal(again.from?.sessionId, `session-${opener.starts.indexOf(last) + 1}`);
+    assert.ok(again.prompt.includes(`reply_to: ${eleventh}`), again.prompt);
     assert.doesNotMatch(again.prompt, /老方的 Claude 第 10 件/, "given only what came since");
-    await fangMac.client.postGroupMessage(g.id, { from: claude, body: "@老王的 Codex 第 11 件好了", mentions: [codex], replyTo: eleventh, epoch: 0 });
+    await result("@老王的 Codex 第 11 件好了", eleventh);
   });
 
   test("a round waiting its turn is let go once 叫停 ends its act", async () => {

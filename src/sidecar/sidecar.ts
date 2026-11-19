@@ -846,7 +846,8 @@ export class Sidecar {
 
   // 动手 asked for in a group: its person says yes here first, except
   // when they asked themself (the service says, GroupAct.own), and within
-  // an act's rounds the same asker goes on without asking again. False when
+  // an act's rounds the same asker goes on without asking again; past them,
+  // what the act has still to do comes first. False when
   // the Achat service does not know 动手 in groups yet: then it is answered
   // as before.
   private async groupAct(work: GroupWork, agent: string, me: AgentConfig): Promise<boolean> {
@@ -862,7 +863,10 @@ export class Sidecar {
       return err.status === 409;
     }
     if (asked.run) await this.nextRound(groupId, agent, asked.act, me);
-    else void this.askGroupAct(work, work.wake, asked.act, me);
+    else if (asked.act.status === "asking") void this.askGroupAct(work, work.wake, asked.act, me);
+    // Past the rounds of an act still at work: its person is asked once
+    // those are back, when the service has this computer look again.
+    else this.log(`${groupId} 第 ${work.wake.seq} 条等这次动手做完再问主人`);
     return true;
   }
 
