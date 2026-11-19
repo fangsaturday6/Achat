@@ -408,7 +408,8 @@ export interface GroupAct {
 // Three tell one account alone, so `members` is one AI or seat: group.quotaLow
 // the AI a wake brought near today's 每天次数, group.mention the seat of the
 // person their AI @ed (`seq`: that message), group.invited the seat of
-// someone newly invited. `wake`: the AIs just woken.
+// someone newly invited. `wake`: the AIs just woken, and on 动手's result
+// the AI that sent it when a request past its act waits for its person.
 export interface GroupEvent {
   type: "group.updated" | "group.message" | "group.quotaLow" | "group.mention" | "group.invited";
   groupId: string;

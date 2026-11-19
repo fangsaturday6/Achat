@@ -12,7 +12,7 @@ import type { Alerter, Asker, Asking, Chooser, Choosing } from "./dialog.js";
 import { LoginWait } from "./login-wait.js";
 import type { Notifier } from "./notify.js";
 import { BudgetExceededError, LoginExpiredError, SessionLostError, type AgentRunner, type RunOutput } from "./runners.js";
-import { TaskBook, type TaskOpener, type TaskRecord } from "./tasks.js";
+import { TaskBook, type TaskOpener, type TaskRecord, type TaskStart } from "./tasks.js";
 
 const RELOGIN = {
   claude: "打开 Claude Code 发一句话就能恢复，等着的问题会自动接着回答。运行一次 achat claude-token 就不会再过期。",
@@ -588,7 +588,9 @@ export class Sidecar {
 
   // A group's message woke AIs here, or the person here is to be told: an AI
   // here has few 每天次数 left, their own AI @ed them, or they were invited.
-  // The last two only come to the person's own pages and computers.
+  // The last two only come to the person's own pages and computers. An AI
+  // whose act of 动手 just ended with a request past it waiting is woken
+  // too: that is put to its person.
   private onGroupEvent(e: GroupEvent): void {
     for (const agent of e.wake ?? []) if (this.mine(agent)) void this.answerGroup(e.groupId, agent);
     // A round of 动手 waiting its turn there: its round before may be back.
@@ -1011,7 +1013,7 @@ export class Sidecar {
       mkdirSync(filesDir(groupId), { recursive: true, mode: 0o700 });
       const saved = await saveAllFiles(this.relay, roundMessages(work, since).map((m) => ({ ...m, threadId: groupId })));
       const use = await this.ownUse(agent);
-      const rec = await opener.open({
+      await this.openWork(key, opener, work.wake.seq, {
         ...(use ? { model: use.model, label: use.label, effort: use.effort } : {}),
         threadId: act.id,
         topic: work.group.name,
@@ -1022,9 +1024,6 @@ export class Sidecar {
         own: act.own,
         inGroup: true,
       });
-      this.tasks.set(key, rec);
-      this.tasks.markSeen(key, work.wake.seq);
-      this.log(`${groupId} 在新对话里动手：${rec.dir}`);
     } catch (err) {
       if (this.stopping.signal.aborted) return;
       const raw = (err as Error).message || "出错了";
@@ -1340,7 +1339,7 @@ export class Sidecar {
     mkdirSync(filesDir(thread.id), { recursive: true, mode: 0o700 });
     const saved = await saveAllFiles(this.relay, thread.messages.filter((m) => m.seq > since));
     const use = this.useFor(thread);
-    const rec = await opener.open({
+    await this.openWork(thread.id, opener, thread.messages.at(-1)?.seq ?? 0, {
       ...(use ? { model: use.model, label: use.label, effort: use.effort } : {}),
       threadId: thread.id,
       topic: thread.topic,
@@ -1350,11 +1349,20 @@ export class Sidecar {
       readDirs: [filesDir(thread.id)],
       own: thread.own,
     });
-    this.tasks.set(thread.id, rec);
-    this.tasks.markSeen(thread.id, thread.messages.at(-1)?.seq ?? 0);
-    this.log(`${thread.id} 在新对话里动手：${rec.dir}`);
     const me = owner.name.replace(/^我的/, "你的");
     this.opts.notify(cjk(me, before ? "接着动手" : "开始动手"), `${thread.topic} · ${from.name}`, `${this.opts.webUrl}/#/t/${thread.id}`);
+  }
+
+  // Opens a conversation for 动手 and keeps it under `key` (a thread's id,
+  // or actKey for a group): which conversation, and, only once it is open,
+  // what it was given (up to `given`), so one that never opened is taken up
+  // again.
+  private async openWork(key: string, opener: TaskOpener, given: number, start: TaskStart): Promise<TaskRecord> {
+    const rec = await opener.open(start);
+    this.tasks.set(key, rec);
+    this.tasks.markSeen(key, given);
+    this.log(`${start.threadId} 在新对话里动手：${rec.dir}`);
+    return rec;
   }
 
   async answer(threadId: string): Promise<void> {
