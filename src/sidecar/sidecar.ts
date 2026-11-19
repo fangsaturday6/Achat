@@ -1007,7 +1007,8 @@ export class Sidecar {
     // Held before anything is awaited: a request that comes meanwhile waits.
     this.opening.add(key);
     try {
-      const before = given ? (await this.relay.group(groupId)).messages.find((m) => m.seq === given) : undefined;
+      // The request the round before answers, however long ago it was asked for.
+      const before = given ? (await this.relay.groupWorkFor(groupId, agent, false, given))?.wake : undefined;
       if (before?.receipts.find((r) => r.agent === agent)?.state === "acting") {
         this.turns.set(key, turn);
         return;
@@ -1059,7 +1060,8 @@ export class Sidecar {
       if (this.stopping.signal.aborted) return;
       const raw = (err as Error).message || "出错了";
       this.log(`${groupId} 第 ${work.wake.seq} 条动手没有开始：${raw}`);
-      if (err instanceof RelayClientError) return;
+      // 叫停 meanwhile, or no longer under way: the line under it says so already.
+      if (err instanceof RelayClientError && err.status === 409) return;
       // Under the latest request, and every one before it this round was for.
       // Everyone in the group reads this: plain words, nothing from this computer.
       await this.relay.failGroup(groupId, { agent, seq: work.wake.seq, reason: failureLine(raw) }).catch((e: Error) => this.log(`${groupId} 的出错没有传到：${e.message}`));

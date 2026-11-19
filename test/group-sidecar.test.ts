@@ -490,6 +490,44 @@ describe("an AI @ed in a group answers in the background", () => {
     await until(async () => (await stateOf(g.id, first, claude)) === "passed");
   });
 
+  test("a round waits for the one before however long ago that was asked for", async () => {
+    const { g, claude, codex, opener, shown } = await actingMeeting("很久以前", 2);
+    const ask = async (body: string) => (await wangLaptop.client.postGroupMessage(g.id, { from: codex, body, mentions: [claude] })).messages.at(-1)!.seq;
+    const result = (body: string, replyTo: number) => fangMac.client.postGroupMessage(g.id, { from: claude, body, mentions: [codex], replyTo, epoch: 0 });
+    const started = () => opener.starts.filter((s) => s.topic === "很久以前");
+    const first = await ask("@老方的 Claude 第一件");
+    await until(async () => shown.asked.find((p) => p.title.includes("「很久以前」")));
+    shown.answer(shown.asked.findIndex((p) => p.title.includes("「很久以前」")), "approve");
+    await until(async () => started()[0]);
+    // More than a group's page of messages since.
+    for (let i = 1; i <= 201; i++) await wang.call("POST", `/api/groups/${g.id}/messages`, { from: `p_${wangId}`, body: `闲聊 ${i}` });
+    const second = await ask("@老方的 Claude 第二件");
+    await until(async () => (await stateOf(g.id, second, claude)) === "acting");
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(started().length, 1, "one round at a time");
+    await result("@老王的 Codex 第一件好了", first);
+    await until(async () => started()[1]);
+    await result("@老王的 Codex 第二件好了", second);
+  });
+
+  test("a round that cannot start because the service would not give its files says so under the request", async () => {
+    const { g, claude, codex, shown, more, sidecar } = await actingMeeting("取不到", 0);
+    sidecar.stop();
+    const client = changed((c) => {
+      c.file = async () => {
+        throw new RelayClientError(500, "Achat 服务出错了");
+      };
+    });
+    sidecarFor(fangMac, claude, new JudgingRunner([], ["do"]), { ...more, client });
+    const png = { name: "设定图.png", type: "image/png", data: Buffer.from("png").toString("base64") };
+    const seq = (await wangLaptop.client.postGroupMessage(g.id, { from: codex, body: "@老方的 Claude 照图改", mentions: [claude], files: [png] })).messages.at(-1)!.seq;
+    await until(async () => shown.asked.find((p) => p.title.includes("「取不到」")));
+    shown.answer(shown.asked.findIndex((p) => p.title.includes("「取不到」")), "approve");
+    await until(async () => (await stateOf(g.id, seq, claude)) === "failed");
+    const d: GroupDetail = await fang.call("GET", `/api/groups/${g.id}`);
+    assert.equal(d.messages.find((m) => m.seq === seq)!.receipts[0].reason, "Achat 服务出错了");
+  });
+
   test("what the dialogs to 动手 shown here remember goes once each act no longer waits for a yes", async () => {
     const { g, claude, codex, shown, sidecar } = await actingMeeting("记性", 2);
     const remembered = () => (sidecar as unknown as { actShown: Map<string, number> }).actShown.size;
