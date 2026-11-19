@@ -11,14 +11,14 @@ const CONTENT_TYPES: Record<string, string> = {
   ".png": "image/png",
 };
 
-// An idle connection stays open 30 seconds for the next request, not Node's
-// 5: fetch reuses one until shortly before the time the server names, so on
-// a busy machine a pause of a second or two had a request sent on a
-// connection the server was just closing ("fetch failed"). Node wants the
-// time to read a request's headers longer than this.
+// An idle connection stays open 125 seconds for the next request, not Node's
+// 5: whoever reuses one must give it up first, or a request goes out on a
+// connection the server is just closing ("fetch failed", or a 502 from the
+// proxy). fetch gives one up shortly before the time the server names; Caddy
+// in front of the cloud keeps an idle one for 2 minutes. The time to read a
+// request's headers stays Node's: it only runs while a request comes in.
 export function keepConnections(server: Server): void {
-  server.keepAliveTimeout = 30_000;
-  server.headersTimeout = 31_000;
+  server.keepAliveTimeout = 125_000;
 }
 
 export function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
