@@ -58,6 +58,11 @@ export function lastRoundTitle(from: string, to: string): string {
   return cjk(from, "和", to, "到最后 1 轮了");
 }
 
+// 「支付对接」群里王闯的 Codex 请你的 Claude 动手; a person who asked is named as one: 「支付对接」群里老王请你的 Claude 动手.
+export function groupActTitle(group: string, from: string, to: string): string {
+  return cjk(`「${group}」群里${from}`, "请", to, "动手");
+}
+
 // Whose an AI is, from its name: "老王" for 老王的 Codex, "我" for 我的 Claude.
 export function ownerOf(name: string): string {
   return name.replace(/的.*$/, "");

@@ -8,8 +8,10 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { RelayClient } from "../src/client.js";
 import { userPromptHook } from "../src/hook.js";
 import { createMcpServer } from "../src/mcp/server.js";
+import type { Answer } from "../src/sidecar/dialog.js";
 import { Sidecar } from "../src/sidecar/sidecar.js";
-import { addComputer, type Browser, logIn, ScriptedRunner, startTestCloud, until } from "./helpers.js";
+import { TaskBook, type TaskOpener, type TaskRecord, type TaskStart } from "../src/sidecar/tasks.js";
+import { addComputer, type Browser, JudgingRunner, logIn, ScriptedRunner, startTestCloud, until } from "./helpers.js";
 
 async function mcp(client: RelayClient, agentId: string): Promise<Client> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
@@ -27,6 +29,14 @@ async function befriend(a: Browser, b: Browser, bEmail: string): Promise<void> {
   await a.call("POST", "/api/invites", { email: bEmail });
   const request = (await b.call("GET", "/api/invites")).find((f: any) => f.direction === "in" && f.status === "pending");
   await b.call("POST", `/api/invites/${request.id}/accept`, {});
+}
+
+class FakeOpener implements TaskOpener {
+  starts: TaskStart[] = [];
+  async open(start: TaskStart): Promise<TaskRecord> {
+    this.starts.push(start);
+    return { sessionId: `session-${this.starts.length}`, dir: start.from?.dir ?? `/tmp/${start.topic}` };
+  }
 }
 
 test("an AI makes a group, talks in it, reads it, sets its 每天次数 and 叫停, with the tools", async () => {
@@ -190,6 +200,65 @@ test("a reply that comes later in a group is brought up in the session that spok
     assert.match(textOf(await ai.callTool({ name: "check_group", arguments: { group: "支付对接" } })), /我的 Claude 今天被叫醒 0\/60 次/);
   } finally {
     sidecar?.stop();
+    await cloud.close();
+  }
+});
+
+test("an AI asking another person's AI to 动手 hears that it waits for that person, then that it is under way; the result goes back with reply_to, not waiting", async () => {
+  const { cloud, mailer } = await startTestCloud();
+  const fang = await logIn(cloud, mailer, "fang@example.com", "老方");
+  const wang = await logIn(cloud, mailer, "wang@example.com", "老王");
+  await befriend(fang, wang, "wang@example.com");
+  const fangMac = await addComputer(cloud, fang, "MacBook", ["claude"]);
+  const wangLaptop = await addComputer(cloud, wang, "ThinkPad", ["codex"]);
+  const claude = fangMac.agent("claude");
+  const wangCodex = wangLaptop.agent("codex");
+  const fangId = (await fang.call("GET", "/api/me")).account.id;
+  // 老方's computer is on: its Claude judges 动手, and he says yes in the dialog.
+  const opener = new FakeOpener();
+  const answers: ((a: Answer) => void)[] = [];
+  const sidecar = new Sidecar({
+    client: fangMac.client,
+    agents: [],
+    runners: { [claude]: new JudgingRunner([], ["do", "do"]) },
+    doers: { [claude]: opener },
+    tasks: new TaskBook(mkdtempSync(join(tmpdir(), "achat-tasks-"))),
+    ask: () => {
+      let resolve!: (a: Answer) => void;
+      const answer = new Promise<Answer>((r) => (resolve = r));
+      answers.push(resolve);
+      return { answer, close: () => resolve("later") };
+    },
+    notify: () => {},
+    webUrl: cloud.url,
+    log: () => {},
+  });
+  sidecar.start();
+  try {
+    const g = await wangLaptop.client.createGroup({ from: wangCodex, name: "网关", members: [{ account: fangId }] });
+    const invite = (await fang.call("GET", "/api/groups")).find((s: any) => s.id === g.id).myInvite;
+    await fang.call("POST", `/api/groups/${g.id}/invites/${invite.id}/accept`, { agents: [claude] });
+    await until(async () => (await wang.call("GET", `/api/groups/${g.id}`)).members.find((m: any) => m.agent === claude)?.online);
+
+    const asker = await mcp(wangLaptop.client, wangCodex);
+    const waiting = textOf(await asker.callTool({ name: "send_group_message", arguments: { group: "网关", message: "@老方的 Claude 请你在网关加验签", mentions: ["老方的 Claude"] } }));
+    assert.match(waiting, /老方的 Claude 等主人同意动手/);
+    assert.match(waiting, /动手的结果会发回群里并 @ 你/);
+
+    answers[0]("approve");
+    await until(async () => opener.starts.length === 1);
+    const seq = (await wangLaptop.client.group(g.id)).messages.find((m) => m.body === "@老方的 Claude 请你在网关加验签")!.seq;
+    const doer = await mcp(fangMac.client, claude);
+    const sent = textOf(await doer.callTool({ name: "send_group_message", arguments: { group: g.id, message: "@老王的 Codex 加好了", mentions: ["老王的 Codex"], reply_to: seq, wait: false } }));
+    assert.match(sent, /已发到群「网关」.*不等回复/);
+    const after = await wangLaptop.client.group(g.id);
+    assert.equal(after.messages.find((m) => m.seq === seq)!.receipts[0].state, "replied");
+    assert.deepEqual([after.messages.at(-1)!.body, after.messages.at(-1)!.replyTo], ["@老王的 Codex 加好了", seq]);
+
+    const underWay = textOf(await asker.callTool({ name: "send_group_message", arguments: { group: "网关", message: "@老方的 Claude 再加一行日志", mentions: ["老方的 Claude"] } }));
+    assert.match(underWay, /老方的 Claude 正在动手，做完会发回群里/);
+  } finally {
+    sidecar.stop();
     await cloud.close();
   }
 });

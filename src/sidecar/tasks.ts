@@ -180,10 +180,10 @@ export class ClaudeTaskOpener implements TaskOpener {
 // Achat, which it hands the work back with. Nobody is there to approve a
 // command, so it writes only inside its folder, and its commands go online
 // only between one person's own AIs. Nor is anybody there to approve an MCP
-// call, which Codex asks for of Achat's tools, so the two it hands the work
-// back with go ahead; asking anyone else does not. A later conversation
-// resumes the earlier one.
-const CODEX_HAND_BACK = ["send_message", "check_thread"];
+// call, which Codex asks for of Achat's tools, so those it hands the work
+// back with go ahead, to a thread or to a group; asking anyone else does
+// not. A later conversation resumes the earlier one.
+const CODEX_HAND_BACK = ["send_message", "check_thread", "send_group_message", "check_group"];
 
 export function codexTaskArgs(start: TaskStart): string[] {
   const common = [

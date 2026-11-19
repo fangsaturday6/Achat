@@ -8,6 +8,7 @@ import { desktopNotify } from "./notify.js";
 export interface ApprovalPrompt {
   mode: ThreadMode;
   title: string; // 老王的 Codex 想问你的 Claude / 老王的 Codex 请你的 Claude 动手
+  // Empty for a request in a group: the dialog starts with the words asked.
   topic: string;
   body: string;
   // Why it is asked again, for a request inside a thread: 已到 10 轮上限.
@@ -39,9 +40,10 @@ export type Asker = (prompt: ApprovalPrompt) => Asking | null;
 // Unanswered questions go away after this; the request stays.
 const WAIT_SECONDS = 600;
 
-function message(p: ApprovalPrompt): string {
+// What a dialog says under its title.
+export function approvalText(p: ApprovalPrompt): string {
   const body = p.body.length > 400 ? p.body.slice(0, 400) + "……" : p.body;
-  return [p.topic, "", body, "", ...(p.reason ? [p.reason] : []), p.scope].join("\n");
+  return [...(p.topic ? [p.topic, ""] : []), body, "", ...(p.reason ? [p.reason] : []), p.scope].join("\n");
 }
 
 function onPath(command: string): boolean {
@@ -75,7 +77,7 @@ function macDialog(title: string, text: string, icon: string | null, buttons: st
 // Esc and no answer are "稍后". A dialog takes an icon of its own; an alert,
 // used when the icon is missing, shows the title larger.
 function macAlert(p: ApprovalPrompt): Asking {
-  const shown = macDialog(p.title, message(p), dialogIcon(p.mode), ["稍后", "拒绝", "同意"], "同意", "稍后");
+  const shown = macDialog(p.title, approvalText(p), dialogIcon(p.mode), ["稍后", "拒绝", "同意"], "同意", "稍后");
   return { answer: shown.answer.then((b) => (b === "同意" ? "approve" : b === "拒绝" ? "decline" : "later")), close: shown.close };
 }
 
@@ -90,7 +92,7 @@ function zenity(p: ApprovalPrompt): Asking {
         "--title",
         p.title,
         "--text",
-        `${p.title}\n\n${message(p)}`,
+        `${p.title}\n\n${approvalText(p)}`,
         "--ok-label",
         "同意",
         "--cancel-label",

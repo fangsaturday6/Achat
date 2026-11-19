@@ -26,6 +26,7 @@ import {
   type GroupSummary,
   type GroupTarget,
   type Message,
+  type ReceiptState,
   type ThreadDetail,
 } from "../types.js";
 
@@ -748,11 +749,15 @@ export function createMcpServer(opts: McpOptions): McpServer {
     return detail;
   }
 
-  // Every AI message `seq` woke is done with it.
+  // Every AI message `seq` woke is done with it, or no longer reading: 动手
+  // waiting for its person, or under way, is not waited for.
   const answeredAll =
     (seq: number) =>
     (d: GroupDetail): boolean =>
       !(d.messages.find((m) => m.seq === seq)?.receipts.some((r) => r.state === "reading") ?? false);
+
+  // What the AI asking is told of 动手, instead of the line under the message.
+  const WAITING_ON: Partial<Record<ReceiptState, string>> = { asking: "等主人同意动手", acting: "正在动手，做完会发回群里" };
 
   // What became of the AIs `seq` woke: replies in full, the rest a line each.
   async function groupOutcome(c: McpConnection, d: GroupDetail, seq: number): Promise<string[]> {
@@ -762,13 +767,16 @@ export function createMcpServer(opts: McpOptions): McpServer {
     const lines: string[] = [];
     for (const r of msg.receipts) {
       if (r.state !== "replied") {
-        lines.push(`${cjk(name(r.agent), RECEIPT_LABELS[r.state])}${r.reason ? `：${r.reason}` : ""}`, "");
+        lines.push(`${cjk(name(r.agent), WAITING_ON[r.state] ?? RECEIPT_LABELS[r.state])}${r.reason ? `：${r.reason}` : ""}`, "");
         continue;
       }
       const reply = d.messages.find((m) => m.seq > seq && m.sender === r.agent && m.replyTo !== null && m.replyTo >= seq);
       lines.push(`${name(r.agent)}：`, ...(reply ? [reply.body, ...(await fileLines(c, { ...reply, threadId: d.id }))] : ["（回复在群里，用 check_group 看）"]), "");
     }
     if (msg.receipts.some((r) => r.state === "reading")) lines.push(`还有 AI 在看，后面的回复用 check_group（group: ${d.id}）看。`);
+    if (msg.receipts.some((r) => r.state === "asking" || r.state === "acting")) {
+      lines.push(`动手的结果会发回群里并 @ 你，主人下次跟你说话时会提醒你；也可以用 check_group（group: ${d.id}）看。`);
+    }
     lines.push("请把上面的回复完整转给主人，原文照给；你的理解放在原文后面另外说。");
     return lines;
   }
@@ -844,15 +852,18 @@ export function createMcpServer(opts: McpOptions): McpServer {
       title: "在群里说话",
       description:
         "在主人的 AI 所在的群里说话。不 @ 就不叫醒任何 AI；@ 某个 AI 叫醒它，@所有人叫醒群里所有能回答的 AI，要主人本人拿主意就 @主人。" +
-        "@ 了 AI 会等它们回复、说“无需回复”或显示不在线，再把原文带回；没 @ 立刻返回。",
+        "@ 了 AI 会等它们回复、说“无需回复”或显示不在线，再把原文带回；没 @ 立刻返回。被 @ 的 AI 要动手时不等它做完，结果会发回群里并 @ 你。" +
+        "替别人动手、做完把结果发回群里时，照提示填 reply_to 和 wait: false。",
       inputSchema: {
         group: z.string().describe("群名或群 id"),
         message: z.string().describe("要说的话"),
         mentions: z.array(z.string()).optional().describe("要 @ 的 AI 的名字，例如“老王的 Codex”；所有人填“所有人”；主人填“主人”"),
         files: z.array(z.string()).max(9).optional().describe("一起发的文件或图片：这台电脑上的完整路径，最多 9 个，合计不超过 20 MB"),
+        reply_to: z.number().int().optional().describe("回复的是群里第几条消息：替别人动手、做完发回结果时照提示填"),
+        wait: z.boolean().optional().describe("默认等 @ 的 AI 回复再返回；动手做完发回结果时填 false，发完立刻返回"),
       },
     },
-    guard(async ({ group, message, mentions, files }: { group: string; message: string; mentions?: string[]; files?: string[] }, extra) => {
+    guard(async ({ group, message, mentions, files, reply_to, wait }: { group: string; message: string; mentions?: string[]; files?: string[]; reply_to?: number; wait?: boolean }, extra) => {
       const c = opts.connection();
       if (c.mode !== "cloud") return text(GROUPS_NEED_ACCOUNT, true);
       const g = await resolveGroup(c, group);
@@ -862,8 +873,20 @@ export function createMcpServer(opts: McpOptions): McpServer {
         return text(`你不在「${g.name}」里，先用 invite_to_group 把自己拉进来（members 填「${me}」）`, true);
       }
       const ids = mentionIds(before, mentions ?? [], c.agentId, await ownSeat(c));
-      const posted = await c.client.postGroupMessage(g.id, { from: c.agentId, body: message, mentions: ids, files: files?.length ? readFiles(files) : undefined });
+      // 动手's result answers the request it was for (reply_to), as a background answer does.
+      const posted = await c.client.postGroupMessage(g.id, {
+        from: c.agentId,
+        body: message,
+        mentions: ids,
+        files: files?.length ? readFiles(files) : undefined,
+        ...(reply_to !== undefined ? { replyTo: reply_to, epoch: before.epoch } : {}),
+      });
       const seq = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!.seq;
+      // Sent and done: whoever asked @s it again for more.
+      if (wait === false) {
+        await groupSeen(c, posted);
+        return text(`已发到群「${posted.name}」（${posted.id}），不等回复。`);
+      }
       if (!posted.messages.find((m) => m.seq === seq)!.receipts.length) {
         await groupSeen(c, posted);
         return text(`已发到群「${posted.name}」（${posted.id}），没有叫醒谁，不用等回复。后面有人回你，主人下次跟你说话时会提醒你。`);

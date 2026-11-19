@@ -262,6 +262,8 @@ test("Codex works in its folder with nobody to approve commands: online only bet
   for (const args of [first, later]) {
     assert.ok(args.includes('mcp_servers.achat.tools.send_message.approval_mode="approve"'));
     assert.ok(args.includes('mcp_servers.achat.tools.check_thread.approval_mode="approve"'));
+    assert.ok(args.includes('mcp_servers.achat.tools.send_group_message.approval_mode="approve"'));
+    assert.ok(args.includes('mcp_servers.achat.tools.check_group.approval_mode="approve"'));
     assert.ok(!args.some((a) => a.includes("send_request")));
   }
   assert.deepEqual(later.slice(0, 2), ["exec", "resume"]);

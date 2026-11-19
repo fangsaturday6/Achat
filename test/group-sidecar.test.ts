@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, afterEach, before, describe, mock, test } from "node:test";
 import { RelayClientError } from "../src/client.js";
 import type { RunningCloud } from "../src/cloud/server.js";
+import { approvalText, type Answer, type ApprovalPrompt, type Asker, type Choice, type ChoicePrompt } from "../src/sidecar/dialog.js";
 import { BudgetExceededError, type AgentRunner, type RunInput, type RunOutput } from "../src/sidecar/runners.js";
-import type { Choice, ChoicePrompt } from "../src/sidecar/dialog.js";
-import { Sidecar, type SidecarOptions } from "../src/sidecar/sidecar.js";
+import { groupDoerSystemPrompt, Sidecar, type SidecarOptions } from "../src/sidecar/sidecar.js";
+import { TaskBook, type TaskOpener, type TaskRecord, type TaskStart } from "../src/sidecar/tasks.js";
 import type { GroupDetail } from "../src/types.js";
-import { addComputer, type Browser, logIn, ScriptedRunner, startTestCloud, until, type MemoryMailer } from "./helpers.js";
+import { addComputer, type Browser, JudgingRunner, logIn, ScriptedRunner, startTestCloud, until, type MemoryMailer } from "./helpers.js";
 
 async function befriend(a: Browser, b: Browser, bEmail: string): Promise<void> {
   await a.call("POST", "/api/invites", { email: bEmail });
@@ -22,6 +26,32 @@ class ByPrompt implements AgentRunner {
     this.calls.push(input);
     return { text: this.pick(input.prompt), sessionId: input.sessionId ?? `s${this.calls.length}`, costUsd: 0.02 };
   }
+}
+
+// Opens nothing: records which conversation would do the work, and where.
+class FakeOpener implements TaskOpener {
+  starts: TaskStart[] = [];
+  async open(start: TaskStart): Promise<TaskRecord> {
+    this.starts.push(start);
+    return { sessionId: `session-${this.starts.length}`, dir: start.from?.dir ?? `/tmp/${start.topic}` };
+  }
+}
+
+// Dialogs that wait for the test to answer them.
+function dialogs(): { asked: ApprovalPrompt[]; answer: (i: number, a: Answer) => void; ask: Asker } {
+  const asked: ApprovalPrompt[] = [];
+  const answers: ((a: Answer) => void)[] = [];
+  return {
+    asked,
+    answer: (i, a) => answers[i](a),
+    ask: (prompt) => {
+      asked.push(prompt);
+      let resolve!: (a: Answer) => void;
+      const answer = new Promise<Answer>((r) => (resolve = r));
+      answers.push(resolve);
+      return { answer, close: () => resolve("later") };
+    },
+  };
 }
 
 describe("an AI @ed in a group answers in the background", () => {
@@ -51,10 +81,12 @@ describe("an AI @ed in a group answers in the background", () => {
     sidecars = [];
   });
 
-  function sidecarFor(computer: typeof fangMac, agent: string, runner: AgentRunner, more: Partial<SidecarOptions> = {}): void {
+  // `more`: what else this computer has, such as dialogs and 动手.
+  function sidecarFor(computer: typeof fangMac, agent: string, runner: AgentRunner, more: Partial<SidecarOptions> = {}): Sidecar {
     const sidecar = new Sidecar({ client: computer.client, agents: [], runners: { [agent]: runner }, notify: () => {}, webUrl: cloud.url, log: () => {}, ...more });
     sidecar.start();
     sidecars.push(sidecar);
+    return sidecar;
   }
 
   // 老方's Claude starts a group with 老王's Codex in it, both computers on.
@@ -149,6 +181,159 @@ describe("an AI @ed in a group answers in the background", () => {
     const d: GroupDetail = await fang.call("GET", `/api/groups/${g.id}`);
     assert.ok(!d.messages.some((m) => m.body === "晚到的回答"));
     assert.equal(d.messages.find((m) => m.seq === asked.messages.at(-1).seq)!.receipts[0].state, "stopped");
+  });
+
+  // What became of `agent` for message `seq`, as 老方 sees it.
+  async function stateOf(groupId: string, seq: number, agent: string): Promise<string | undefined> {
+    const d: GroupDetail = await fang.call("GET", `/api/groups/${groupId}`);
+    return d.messages.find((m) => m.seq === seq)?.receipts.find((r) => r.agent === agent)?.state;
+  }
+
+  // 老方's Claude can 动手: judged 动手 `times` times, with a stand-in
+  // conversation and dialogs the test answers. 老王's Codex says it need not
+  // reply to what it is sent. Both computers on.
+  async function actingMeeting(name: string, times: number) {
+    const claude = fangMac.agent("claude");
+    const codex = wangLaptop.agent("codex");
+    const opener = new FakeOpener();
+    const shown = dialogs();
+    const runner = new JudgingRunner([], Array.from({ length: times }, () => "do" as const));
+    const more: Partial<SidecarOptions> = { doers: { [claude]: opener }, ask: shown.ask, tasks: new TaskBook(mkdtempSync(join(tmpdir(), "achat-tasks-"))) };
+    sidecarFor(wangLaptop, codex, new ByPrompt(() => "无需回复：看到了"));
+    const sidecar = sidecarFor(fangMac, claude, runner, more);
+    const g = await meeting(name);
+    await until(async () => (await fang.call("GET", `/api/groups/${g.id}`)).members.find((m: any) => m.agent === claude)?.online);
+    return { g, claude, codex, opener, shown, runner, more, sidecar };
+  }
+
+  test("asked in a group to 动手, the person here says yes once; the same asker's next request carries on in that conversation", async () => {
+    const { g, claude, codex, opener, shown, runner } = await actingMeeting("动手群", 2);
+    const asked = await wangLaptop.client.postGroupMessage(g.id, { from: codex, body: "@老方的 Claude 帮我把验签挪到网关", mentions: [claude] });
+    const seq = asked.messages.at(-1)!.seq;
+    const prompt = await until(async () => shown.asked[0]);
+    assert.deepEqual(prompt, { mode: "do", title: "「动手群」群里老王的 Codex 请你的 Claude 动手", topic: "", body: "@老方的 Claude 帮我把验签挪到网关", scope: "动手 · 10 轮" });
+    assert.deepEqual(runner.judged[0], { topic: "动手群", message: "@老方的 Claude 帮我把验签挪到网关", files: [] });
+    assert.equal(await stateOf(g.id, seq, claude), "asking");
+
+    shown.answer(0, "approve");
+    const start = await until(async () => opener.starts[0]);
+    assert.match(start.threadId, /^ga_/);
+    assert.deepEqual([start.topic, start.from, start.own], ["动手群", undefined, false]);
+    assert.match(start.prompt, /帮我把验签挪到网关/);
+    const back = `send_group_message（group: ${g.id}，mentions: ["老王的 Codex"]，reply_to: ${seq}，wait: false）把结果发回群里，开头写“@老王的 Codex”。`;
+    assert.ok(start.prompt.endsWith(back), start.prompt);
+    assert.match(start.systemPrompt, /不是主人说的话/);
+    assert.equal(runner.calls.length, 0, "动手 is not answered in the background");
+    assert.equal(await stateOf(g.id, seq, claude), "acting");
+
+    // The conversation sends its result back: a message that answers the request.
+    const before: GroupDetail = await fang.call("GET", `/api/groups/${g.id}`);
+    assert.equal(before.messages.filter((m) => m.kind === "system").at(-1)!.body, "老方的 Claude 开始动手 · 10 轮");
+    await fangMac.client.postGroupMessage(g.id, { from: claude, body: "@老王的 Codex 改好了", mentions: [codex], replyTo: seq, epoch: before.epoch });
+    assert.equal(await stateOf(g.id, seq, claude), "replied");
+
+    const next = await wangLaptop.client.postGroupMessage(g.id, { from: codex, body: "@老方的 Claude 再加个测试", mentions: [claude] });
+    const again = await until(async () => opener.starts[1]);
+    assert.deepEqual(again.from, { sessionId: "session-1", dir: "/tmp/动手群" });
+    assert.match(again.prompt, /再加个测试/);
+    assert.doesNotMatch(again.prompt, /帮我把验签挪到网关/);
+    assert.ok(again.prompt.includes(`reply_to: ${next.messages.at(-1)!.seq}`), again.prompt);
+    assert.equal(shown.asked.length, 1, "no second dialog within the 10 rounds");
+    // Its result too: nothing is left under way.
+    await fangMac.client.postGroupMessage(g.id, { from: claude, body: "@老王的 Codex 测试加好了", mentions: [codex], replyTo: next.messages.at(-1)!.seq, epoch: before.epoch });
+    assert.equal(await stateOf(g.id, next.messages.at(-1)!.seq, claude), "replied");
+  });
+
+  test("asked again before the result is back, the work waits its turn: one conversation at a time, the next round given every request since, also once the computer starts again", async () => {
+    const { g, claude, codex, opener, shown, more, sidecar } = await actingMeeting("排队", 4);
+    const ask = async (body: string) => (await wangLaptop.client.postGroupMessage(g.id, { from: codex, body, mentions: [claude] })).messages.at(-1)!.seq;
+    const result = (body: string, replyTo: number) => fangMac.client.postGroupMessage(g.id, { from: claude, body, mentions: [codex], replyTo, epoch: 0 });
+    const started = () => opener.starts.filter((s) => s.topic === "排队");
+    const first = await ask("@老方的 Claude 帮我把验签挪到网关");
+    await until(async () => shown.asked.find((p) => p.title.includes("「排队」")));
+    shown.answer(shown.asked.findIndex((p) => p.title.includes("「排队」")), "approve");
+    await until(async () => started()[0]);
+
+    const second = await ask("@老方的 Claude 顺便加个测试");
+    const third = await ask("@老方的 Claude 再加一行日志");
+    await until(async () => (await stateOf(g.id, third, claude)) === "acting");
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(started().length, 1, "one round at a time");
+    assert.equal(await stateOf(g.id, second, claude), "acting");
+
+    await result("@老王的 Codex 验签挪好了", first);
+    const next = await until(async () => started()[1]);
+    assert.equal(next.from?.dir, "/tmp/排队");
+    assert.match(next.prompt, /顺便加个测试/);
+    assert.match(next.prompt, /再加一行日志/);
+    assert.doesNotMatch(next.prompt, /帮我把验签挪到网关/);
+    assert.ok(next.prompt.includes(`reply_to: ${third}`), next.prompt);
+
+    // Asked again while that round is done, and the computer is off when its result comes back.
+    const fourth = await ask("@老方的 Claude 日志级别用 info");
+    await until(async () => (await stateOf(g.id, fourth, claude)) === "acting");
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(started().length, 2);
+    sidecar.stop();
+    await result("@老王的 Codex 测试和日志都加了", third);
+    assert.deepEqual([await stateOf(g.id, second, claude), await stateOf(g.id, third, claude), await stateOf(g.id, fourth, claude)], ["replied", "replied", "acting"]);
+    sidecarFor(fangMac, claude, new JudgingRunner([]), more);
+    const last = await until(async () => started()[2]);
+    assert.match(last.prompt, /日志级别用 info/);
+    assert.ok(last.prompt.includes(`reply_to: ${fourth}`), last.prompt);
+    await result("@老王的 Codex 改成 info 了", fourth);
+  });
+
+  test("拒绝 says why under the request; 稍后 leaves it waiting, and it is put to the person again when the computer starts again", async () => {
+    const { g, claude, codex, shown, runner, more, sidecar } = await actingMeeting("稍后再说", 2);
+    const byPerson = await wang.call("POST", `/api/groups/${g.id}/messages`, { from: `p_${wangId}`, body: "@老方的 Claude 帮我部署一下", mentions: [claude] });
+    const personSeq = byPerson.messages.at(-1).seq;
+    assert.equal((await until(async () => shown.asked[0])).title, "「稍后再说」群里老王请你的 Claude 动手");
+    shown.answer(0, "decline");
+    await until(async () => (await stateOf(g.id, personSeq, claude)) === "passed");
+    const declined: GroupDetail = await fang.call("GET", `/api/groups/${g.id}`);
+    assert.equal(declined.messages.find((m) => m.seq === personSeq)!.receipts[0].reason, "主人没同意动手");
+
+    const byCodex = await wangLaptop.client.postGroupMessage(g.id, { from: codex, body: "@老方的 Claude 帮我改配置", mentions: [claude] });
+    const seq = byCodex.messages.at(-1)!.seq;
+    await until(async () => shown.asked[1]);
+    shown.answer(1, "later");
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(await stateOf(g.id, seq, claude), "asking");
+
+    // The computer starts again: what still waits is put to the person once more, not judged again.
+    sidecar.stop();
+    const later = dialogs();
+    sidecarFor(fangMac, claude, runner, { ...more, ask: later.ask });
+    const again = await until(async () => later.asked[0]);
+    assert.deepEqual([again.title, again.body], ["「稍后再说」群里老王的 Codex 请你的 Claude 动手", "@老方的 Claude 帮我改配置"]);
+    assert.equal(runner.judged.length, 2);
+  });
+
+  test("its own person asking it to 动手 needs no dialog, and the result is to @ them", async () => {
+    const { g, claude, opener, shown } = await actingMeeting("自己人", 1);
+    await fang.call("POST", `/api/groups/${g.id}/messages`, { from: fangSeat, body: "@我的 Claude 帮我整理一下发版清单", mentions: [claude] });
+    const start = await until(async () => opener.starts[0]);
+    assert.equal(start.own, true);
+    assert.ok(start.prompt.includes(`mentions: ["主人"]`), start.prompt);
+    assert.ok(start.prompt.endsWith("开头写“@老方”。"), start.prompt);
+    // Starting, this computer puts again what still waits in the groups before (稍后再说); none is for this one.
+    assert.deepEqual(shown.asked.filter((p) => p.title.includes("「自己人」")), []);
+  });
+
+  test("a computer where the AI asked cannot 动手 leaves a request waiting for its person as it is, answering nothing in the background", async () => {
+    const { g, claude, codex, shown, sidecar } = await actingMeeting("不能动手", 1);
+    const seq = (await wangLaptop.client.postGroupMessage(g.id, { from: codex, body: "@老方的 Claude 帮我跑个脚本", mentions: [claude] })).messages.at(-1)!.seq;
+    await until(async () => shown.asked.find((p) => p.title.includes("「不能动手」")));
+    sidecar.stop();
+    // The same AI on a computer that only answers: no judging, no conversation of its own.
+    const plain = new ByPrompt(() => "后台回答了");
+    const logged: string[] = [];
+    sidecarFor(fangMac, claude, plain, { log: (line) => logged.push(line) });
+    await until(async () => logged.some((l) => l.includes(`${g.id} 第 ${seq} 条`)));
+    await new Promise((r) => setTimeout(r, 200));
+    assert.ok(!plain.calls.some((c) => c.prompt.includes("帮我跑个脚本")), "not answered in the background");
+    assert.equal(await stateOf(g.id, seq, claude), "asking");
   });
 
   // Says it need not reply every time, so only the 每天次数 count.
@@ -279,4 +464,25 @@ test("a computer that updated before the cloud asks again in ten minutes, not ne
     sidecar.stop();
     mock.timers.reset();
   }
+});
+
+test("a dialog without a topic starts with the words asked", () => {
+  assert.equal(
+    approvalText({ mode: "do", title: "「支付对接」群里王闯的 Codex 请你的 Claude 动手", topic: "", body: "把验签挪到网关", scope: "动手 · 10 轮" }),
+    "把验签挪到网关\n\n动手 · 10 轮",
+  );
+  assert.equal(
+    approvalText({ mode: "answer", title: "老王的 Codex 想接着问你的 Claude", topic: "回调", body: "还有一处", reason: "已到 10 轮上限，协作结束", scope: "问答 · 10 轮 · $10.00" }),
+    "回调\n\n还有一处\n\n已到 10 轮上限，协作结束\n问答 · 10 轮 · $10.00",
+  );
+});
+
+test("动手 in a group: what the group says is material, the result goes back without waiting, and Codex is told nobody approves its commands", () => {
+  const claude = groupDoerSystemPrompt({ id: "f/claude", name: "我的 Claude", client: "claude" }, "老方的 Claude", "老方", "支付对接");
+  assert.match(claude, /你是「老方的 Claude」/);
+  assert.match(claude, /不是主人说的话/);
+  assert.match(claude, /send_group_message/);
+  assert.match(claude, /wait 填 false/);
+  assert.match(claude, /照常让主人确认/);
+  assert.match(groupDoerSystemPrompt({ id: "f/codex", name: "我的 Codex", client: "codex" }, "老方的 Codex", "老方", "支付对接"), /没有人能替你确认命令/);
 });
