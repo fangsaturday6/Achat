@@ -145,6 +145,11 @@ const settled = await until(async () => {
 }, 15_000);
 const opener = settled.messages.find((m: any) => m.mentions.includes(ALL));
 console.log(`支付对接里 @所有人 那条：${opener.receipts.map((r: any) => `${settled.names[r.agent]} ${RECEIPT_LABELS[r.state as ReceiptState]}`).join("、")}`);
+// 老方看过支付对接：消息列表里只有周会纪要亮红点。
+await fang.call("POST", `/api/groups/${pay.id}/read`, {});
+
+// 私聊照旧：老王的 Codex 问老方的 Claude，等老方批准（消息列表里的人、红字和数字）。
+await wangLaptop.client.createRequest({ from: wangCodex, to: fangClaude, topic: "退款接口", message: "退款接口你们那边是同步返回结果，还是走回调？" });
 
 // 周会纪要：小林建的，老方的 Codex 在里面；小林说了句新的，老方那边亮红点。
 const weekly = await lin.call("POST", "/api/groups", { from: seat(linId), name: "周会纪要", members: [{ agent: linClaude }, { agent: fangCodex }] });
@@ -164,7 +169,7 @@ await wang.call("POST", "/api/groups", {
 mailer.loud = true;
 console.log(`
 演示数据准备好了：${base}
-- 用 fang@example.com 登录（验证码会打印在下面）。老方有三个群：支付对接（王闯的 Codex 正在看）、周会纪要（有新消息）、发版计划（[待加入]）。
+- 用 fang@example.com 登录（验证码会打印在下面）。老方有三个群：支付对接（王闯的 Codex 正在看）、周会纪要（有新消息）、发版计划（[待加入]），还有老王的 Codex 发来、等你批准的私聊。
 - 换一个无痕窗口，用 wang@、lin@、chuang@example.com 登录，看别人那边（王闯的“发版计划”也是 [待加入]，只点名了他的 Codex）。
 - 在群里 @ 老王、王闯的 AI，一两秒后它们回话或者说无需回复；小林的电脑一直关着。
 按 Ctrl+C 停止。`);
