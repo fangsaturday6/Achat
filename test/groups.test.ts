@@ -1133,6 +1133,39 @@ describe("groups", () => {
     assert.deepEqual([anew.run, anew.act.status, anew.act.id === act.id], [false, "asking", false]);
   });
 
+  test("the cloud's sweep ends 动手 left a day, and a round not back in a day, for a computer that stays connected and never asks for its work again", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    groups.acceptInvite(web("lin"), g.id, inviteTo(g, "lin"), { agents: ["lin/claude"] });
+    const ask = (from: string, body: string) => groups.postMessage(computer(from.split("/")[0]), g.id, { from, body, mentions: ["fang/claude"] }).messages.at(-1)!.seq;
+    const request = (seq: number) => groups.requestAct(computer("fang"), g.id, { doer: "fang/claude", seq });
+    const receipt = (seq: number) => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts.find((r) => r.agent === "fang/claude")!;
+    const heard: string[] = [];
+    groups.onEvent((e) => heard.push(e.type));
+    // 老王's waits for a yes (稍后); 小林's was approved and its round never came back.
+    const left = ask("wang/codex", "@老方的 Claude 动手改一下");
+    const waiting = request(left).act;
+    const lost = ask("lin/claude", "@老方的 Claude 动手查一下");
+    const underWay = request(lost).act;
+    groups.approveAct(computer("fang"), g.id, underWay.id);
+    now = new Date(now.getTime() + 23 * 60 * 60 * 1000);
+    groups.sweep();
+    assert.deepEqual([receipt(left).state, receipt(lost).state], ["asking", "acting"], "not a day yet");
+    now = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+    heard.length = 0;
+    groups.sweep();
+    assert.deepEqual([receipt(left), receipt(lost)], [
+      { agent: "fang/claude", state: "passed", reason: "主人一天没处理" },
+      { agent: "fang/claude", state: "failed", reason: "一天没发回结果" },
+    ]);
+    // 小林's act keeps the rounds it has left: asked again, it goes on.
+    assert.deepEqual([groups.store.act(waiting.id)!.status, groups.store.act(underWay.id)!.status], ["stopped", "active"]);
+    assert.ok(heard.includes("group.updated"), "its computer hears of it and closes the dialog");
+    heard.length = 0;
+    groups.sweep();
+    assert.deepEqual(heard, [], "nothing more to end");
+  });
+
   test("a round of 动手 that could not start ends its act as a result would, once nothing of it is left to do", () => {
     const g = start();
     groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });

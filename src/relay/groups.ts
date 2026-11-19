@@ -958,6 +958,19 @@ export class GroupService {
     return expired;
   }
 
+  // A computer that stays connected does not look at its work again (work),
+  // so what its person left a day and a round not back in a day end here
+  // too, on the cloud's timer.
+  sweep(): void {
+    const now = this.stamp();
+    const since = this.now().getTime() - this.limits.catchUpMs;
+    for (const { groupId, agent } of this.store.actsWaiting()) {
+      if (this.store.group(groupId)?.status !== "open") continue;
+      const expired = this.transaction(() => [this.expireActing(groupId, agent, since, now), this.expireAsking(groupId, agent, since, now)].some(Boolean));
+      if (expired) this.emit("group.updated", groupId);
+    }
+  }
+
   // What the caller's AIs (`agents`, on its computer) have to answer now. The
   // latest @ missed while the computer was off is taken up first, within a
   // day; one left for 每天次数 waits until its person raises them (setQuota)

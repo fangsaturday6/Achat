@@ -641,6 +641,17 @@ export class GroupStore {
     return r ? toAct(r) : null;
   }
 
+  // Each AI with 动手 waiting for its person or under way, and the group:
+  // what the cloud's sweep looks at, as a computer that starts does.
+  actsWaiting(): { groupId: string; agent: string }[] {
+    return this.db
+      .prepare(
+        `SELECT group_id AS groupId, agent FROM group_receipts WHERE state IN ('asking', 'acting')
+         UNION SELECT group_id AS groupId, doer AS agent FROM group_acts WHERE status IN ('asking', 'active')`,
+      )
+      .all() as { groupId: string; agent: string }[];
+  }
+
   // Whether `doer` does 动手 for someone now, in any group.
   doing(doer: string): boolean {
     return this.db.prepare("SELECT 1 FROM group_acts WHERE doer = ? AND status = 'active' LIMIT 1").get(doer) !== undefined;

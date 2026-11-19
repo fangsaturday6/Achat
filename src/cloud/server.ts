@@ -1142,6 +1142,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
 
   async function sweep(): Promise<void> {
     service.sweep();
+    groups.sweep();
     await emailReplies();
   }
   const sweeping = setInterval(() => void sweep().catch((err) => console.error("[achat cloud] 定时检查出错", err)), SWEEP_EVERY_MS);
