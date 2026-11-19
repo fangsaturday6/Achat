@@ -429,13 +429,13 @@ export class Store {
     return messages;
   }
 
-  file(id: string): (Attachment & { threadId: string; data: Uint8Array }) | null {
-    const row = this.db.prepare("SELECT id, thread_id, name, type, size, data FROM files WHERE id = ?").get(id) as
-      | (Attachment & { thread_id: string; data: Uint8Array })
+  file(id: string): (Attachment & { threadId: string; messageId: number; data: Uint8Array }) | null {
+    const row = this.db.prepare("SELECT id, thread_id, message_id, name, type, size, data FROM files WHERE id = ?").get(id) as
+      | (Attachment & { thread_id: string; message_id: number; data: Uint8Array })
       | undefined;
     if (!row) return null;
-    const { thread_id, ...f } = row;
-    return { ...f, threadId: thread_id };
+    const { thread_id, message_id, ...f } = row;
+    return { ...f, threadId: thread_id, messageId: message_id };
   }
 
   readSeq(reader: string, threadId: string): number {

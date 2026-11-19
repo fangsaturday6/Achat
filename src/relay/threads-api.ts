@@ -147,8 +147,9 @@ export async function threadsApi(
   // the page; anything else is downloaded, so it cannot run as a page there.
   if (method === "GET" && parts[0] === "files" && parts.length === 2) {
     const file = service.file(parts[1]);
-    // A group's files are kept under the group: for its members.
-    const allowed = !!file && (file.threadId.startsWith("g_") ? !!groups?.readable(viewer.reader, file.threadId) : readable(viewer, service.getThread(file.threadId)));
+    // A group's files are kept under the group: for its members, and the
+    // opening message's for someone invited.
+    const allowed = !!file && (file.threadId.startsWith("g_") ? !!groups?.readable(viewer.reader, file.threadId, file.messageId) : readable(viewer, service.getThread(file.threadId)));
     if (!file || !allowed) throw new RelayError(404, "找不到这个文件");
     const shown = SHOWN_TYPES.has(file.type);
     res.writeHead(200, {

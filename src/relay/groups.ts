@@ -656,10 +656,15 @@ export class GroupService {
 
   // --- reading
 
+  // An AI or a person's seat, named from `viewer`'s side.
+  private nameFor(id: string, viewer: string): string {
+    return this.dir.agent(id, viewer)?.name ?? this.dir.name(id, viewer);
+  }
+
   private names(messages: GroupMessage[], members: MemberRow[], viewer: string): Record<string, string> {
     const ids = new Set<string>(members.map((m) => m.agent));
     for (const m of messages) if (m.sender) ids.add(m.sender);
-    return Object.fromEntries([...ids].map((id) => [id, this.dir.agent(id, viewer)?.name ?? this.dir.name(id, viewer)]));
+    return Object.fromEntries([...ids].map((id) => [id, this.nameFor(id, viewer)]));
   }
 
   private inviteView(i: InviteRow, viewer: string): GroupInvite {
@@ -728,14 +733,26 @@ export class GroupService {
   }
 
   private summary(caller: Caller, g: Group, invite: InviteRow | null): GroupSummary {
+    const viewer = caller.account;
+    const last = invite ? null : (this.store.messages(g.id, 0, 1)[0] ?? null);
     return {
       ...g,
       role: invite ? "invited" : "member",
       memberCount: this.store.members(g.id).length,
-      lastMessage: invite ? null : (this.store.messages(g.id, 0, 1)[0] ?? null),
+      lastMessage: last,
+      lastSender: last?.sender ? this.nameFor(last.sender, viewer) : null,
+      faces: this.faces(g.id, viewer),
       unread: invite ? true : this.unread(caller, g.id),
-      myInvite: invite ? this.inviteView(invite, caller.account) : null,
+      myInvite: invite ? this.inviteView(invite, viewer) : null,
     };
+  }
+
+  // The 四宫格: one AI per person first, in the order they joined, then the
+  // rest, four at most.
+  private faces(groupId: string, viewer: string): string[] {
+    const rows = this.store.members(groupId);
+    const first = rows.filter((m, i) => rows.findIndex((x) => x.owner === m.owner) === i);
+    return [...first, ...rows.filter((m) => !first.includes(m))].slice(0, 4).map((m) => this.nameFor(m.agent, viewer));
   }
 
   // Someone else's words since the person last opened it.
@@ -751,9 +768,16 @@ export class GroupService {
     if (last) this.store.markRead(caller.account, groupId, last);
   }
 
-  // Whether an account may read a group's messages and files.
-  readable(account: string, groupId: string): boolean {
-    return !!this.store.group(groupId) && this.store.members(groupId).some((m) => m.owner === account);
+  // Whether an account may read a group's files: a member all of them; someone
+  // invited, while the invite is open, those of the opening message, which
+  // the invite card shows.
+  readable(account: string, groupId: string, messageId?: number): boolean {
+    const group = this.store.group(groupId);
+    if (!group) return false;
+    if (this.store.members(groupId).some((m) => m.owner === account)) return true;
+    if (messageId === undefined || !group.openerSeq) return false;
+    const invited = this.store.invitesFor(account, this.stamp()).some((i) => i.groupId === groupId);
+    return invited && this.store.message(groupId, group.openerSeq)?.id === messageId;
   }
 
   // Resolves at the group's next change, or after the timeout (at most a minute).

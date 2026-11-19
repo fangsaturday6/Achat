@@ -292,6 +292,32 @@ describe("群 over the API", () => {
     assert.ok(after.members.some((m: any) => m.agent === codex));
     assert.equal((await fang.call("GET", `/api/groups/${other.id}`)).role, "invited", "the invite is still open");
   });
+  test("消息 gets each group's 四宫格 and who said the latest words; someone invited opens the opening message's files, and no others", async () => {
+    const claude = fangMac.agent("claude");
+    const codex = fangMac.agent("codex");
+    const wangCodex = wangLaptop.agent("codex");
+    const file = (name: string, text: string) => ({ name, type: "text/plain", data: Buffer.from(text).toString("base64") });
+    const g = await fangMac.client.createGroup({ from: claude, name: "附件群", members: [{ agent: codex }, { account: wangId }], message: "@所有人 看看清单", files: [file("清单.txt", "一二三")] });
+    const later = await fang.call("POST", `/api/groups/${g.id}/messages`, { from: fangSeat, body: "还有一份", files: [file("另一份.txt", "四五六")] });
+
+    const mine = (await fang.call("GET", "/api/groups")).find((x: any) => x.id === g.id);
+    assert.deepEqual([mine.faces, mine.lastSender], [["我的 Claude", "我的 Codex"], "我"]);
+    const invited = (await wang.call("GET", "/api/groups")).find((x: any) => x.id === g.id);
+    assert.deepEqual([invited.role, invited.faces, invited.lastSender], ["invited", ["老方的 Claude", "老方的 Codex"], null]);
+
+    const download = async (who: Browser, id: string) => (await fetch(`${cloud.url}/api/files/${id}`, { headers: { cookie: who.cookie } })).status;
+    const opener = (await wang.call("GET", `/api/groups/${g.id}`)).messages[0].files[0].id;
+    const other = later.messages.at(-1).files[0].id;
+    assert.equal(await download(wang, opener), 200);
+    assert.equal(await download(wang, other), 404, "only the opening message's files, for someone invited");
+
+    await wang.call("POST", `/api/groups/${g.id}/invites/${invited.myInvite.id}/accept`, { agents: [wangCodex] });
+    assert.equal(await download(wang, other), 200);
+    // One face per person first, in the order they joined.
+    const joined = (await wang.call("GET", "/api/groups")).find((x: any) => x.id === g.id);
+    assert.deepEqual(joined.faces, ["老方的 Claude", "我的 Codex", "老方的 Codex"]);
+  });
+
 });
 
 test("on this computer alone there are no groups", async () => {

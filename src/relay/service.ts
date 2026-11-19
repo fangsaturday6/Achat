@@ -196,7 +196,7 @@ export class RelayService {
     }
   }
 
-  file(id: string): (Attachment & { threadId: string; data: Uint8Array }) | null {
+  file(id: string): (Attachment & { threadId: string; messageId: number; data: Uint8Array }) | null {
     return this.store.file(id);
   }
 

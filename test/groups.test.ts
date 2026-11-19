@@ -307,6 +307,17 @@ describe("groups", () => {
     assert.throws(() => groups.setQuota(web("fang"), g.id, { agent: "fang/codex", perDay: 5 }), /解散/);
   });
 
+  test("消息 lists the group with the latest words first, at their time", () => {
+    const a = groups.createGroup(computer("fang"), { from: "fang/claude", name: "甲", members: [] });
+    now = new Date(now.getTime() + 60_000);
+    groups.createGroup(computer("fang"), { from: "fang/claude", name: "乙", members: [] });
+    now = new Date(now.getTime() + 60_000);
+    groups.postMessage(web("fang"), a.id, { from: "p_fang", body: "甲群有新话" });
+    const list = groups.list(web("fang"), ["fang/claude", "fang/codex"]);
+    assert.deepEqual(list.map((g) => g.name), ["甲", "乙"]);
+    assert.equal(list[0].updatedAt, now.toISOString());
+  });
+
   test("waiting ends at the group's next change", async () => {
     const g = start();
     const waiting = groups.waitFor(g.id, 5000);

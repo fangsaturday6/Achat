@@ -379,6 +379,8 @@ export class GroupStore {
         now,
       );
     this.store.addFiles(groupId, Number(result.lastInsertRowid), m.files ?? []);
+    // A group's time in 消息 is that of its latest words.
+    this.db.prepare("UPDATE chat_groups SET updated_at = ? WHERE id = ?").run(now, groupId);
     return this.message(groupId, seq)!;
   }
 

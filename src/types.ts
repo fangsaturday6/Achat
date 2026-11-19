@@ -291,6 +291,7 @@ export interface Group {
   // The opening message (@所有人), which wakes AIs as they join within a day.
   openerSeq: number | null;
   createdAt: string;
+  // The latest change, or the latest words said in it: 消息 sorts by this.
   updatedAt: string;
 }
 
@@ -309,6 +310,12 @@ export interface GroupSummary extends Group {
   role: "member" | "invited";
   memberCount: number;
   lastMessage: GroupMessage | null;
+  // Who wrote lastMessage, named from the caller's side ("老王的 Codex", "我");
+  // null for Achat's own notes and for someone invited.
+  lastSender: string | null;
+  // The 四宫格 in 消息: up to four members named from the caller's side, one
+  // per person first, in the order they joined.
+  faces: string[];
   unread: boolean;
   myInvite: GroupInvite | null;
 }
