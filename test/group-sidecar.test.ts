@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, describe, mock, test } from "node:test";
-import { RelayClientError } from "../src/client.js";
+import { RelayClientError, type RelayClient } from "../src/client.js";
 import type { RunningCloud } from "../src/cloud/server.js";
 import { approvalText, type Answer, type ApprovalPrompt, type Asker, type Choice, type ChoicePrompt } from "../src/sidecar/dialog.js";
 import { BudgetExceededError, type AgentRunner, type RunInput, type RunOutput } from "../src/sidecar/runners.js";
@@ -450,6 +450,61 @@ describe("an AI @ed in a group answers in the background", () => {
     assert.equal(await stateOf(g.id, sixth, claude), "asking");
     shown.answer(shown.asked.indexOf(prompt), "decline");
     await until(async () => (await stateOf(g.id, sixth, claude)) === "passed");
+  });
+
+  // 老方's computer, with its calls to the service changed by `change` first,
+  // such as to hold one back.
+  function changed(change: (c: RelayClient) => void): RelayClient {
+    return { patient: (p: Parameters<RelayClient["patient"]>[0]) => {
+      const c = fangMac.client.patient(p);
+      change(c);
+      return c;
+    } } as unknown as RelayClient;
+  }
+
+  test("a newer request that comes while the dialog for the act is got ready is the one it shows", async () => {
+    const { g, claude, codex, more, sidecar } = await actingMeeting("换新", 0);
+    sidecar.stop();
+    const shown = dialogs((title) => title.includes("「换新」"));
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    // What the dialog is made from comes late, as on a slow network.
+    const client = changed((c) => {
+      const get = c.groupWorkFor.bind(c);
+      c.groupWorkFor = async (id, agent, fresh, seq) => {
+        if (id === g.id && seq !== undefined) await held;
+        return get(id, agent, fresh, seq);
+      };
+    });
+    sidecarFor(fangMac, claude, new JudgingRunner([], ["do", "do"]), { ...more, ask: shown.ask, client });
+    const ask = async (body: string) => (await wangLaptop.client.postGroupMessage(g.id, { from: codex, body, mentions: [claude] })).messages.at(-1)!.seq;
+    const first = await ask("@老方的 Claude 帮我挪验签");
+    await until(async () => (await stateOf(g.id, first, claude)) === "asking");
+    const second = await ask("@老方的 Claude 顺便把日志也挪了");
+    await until(async () => (await stateOf(g.id, second, claude)) === "asking");
+    release();
+    const prompt = await until(async () => shown.asked.find((p) => p.body === "@老方的 Claude 顺便把日志也挪了"));
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(shown.asked.length, 1, "one dialog, with the newer request");
+    shown.answer(shown.asked.indexOf(prompt), "decline");
+    await until(async () => (await stateOf(g.id, first, claude)) === "passed");
+  });
+
+  test("what the dialogs to 动手 shown here remember goes once each act no longer waits for a yes", async () => {
+    const { g, claude, codex, shown, sidecar } = await actingMeeting("记性", 2);
+    const remembered = () => (sidecar as unknown as { actShown: Map<string, number> }).actShown.size;
+    const dialog = () => until(async () => shown.asked.findLast((p) => p.title.includes("「记性」")));
+    await wangLaptop.client.postGroupMessage(g.id, { from: codex, body: "@老方的 Claude 第一件", mentions: [claude] });
+    shown.answer(shown.asked.indexOf(await dialog()), "approve");
+    await until(async () => remembered() === 0);
+    // 老王 himself asks: 稍后 keeps it until 叫停 ends it.
+    await wang.call("POST", `/api/groups/${g.id}/messages`, { from: `p_${wangId}`, body: "@老方的 Claude 帮我部署", mentions: [claude] });
+    await until(async () => shown.asked.find((p) => p.title === "「记性」群里老王请你的 Claude 动手"));
+    shown.answer(shown.asked.findIndex((p) => p.title === "「记性」群里老王请你的 Claude 动手"), "later");
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(remembered(), 1);
+    await fang.call("POST", `/api/groups/${g.id}/stop`, {});
+    await until(async () => remembered() === 0);
   });
 
   test("a round waiting its turn is let go once 叫停 ends its act", async () => {

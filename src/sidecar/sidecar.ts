@@ -378,8 +378,9 @@ export class Sidecar {
   private lowWakes = new Map<string, { groupId: string; agent: string; choosing: Choosing }>();
   // The asker's words being judged 问答 or 动手, once each.
   private judging = new Map<string, Promise<ThreadDetail>>();
-  // Requests to 动手 in a group to put to the person here, by act: its group,
-  // the AI asked and its latest request; and the request shown last.
+  // Requests to 动手 in a group put to the person here, by act, while it
+  // waits for a yes: its group, the AI asked and its latest request; and the
+  // request shown last. Both go once it no longer waits here (forgetAct).
   private askActs = new Map<string, { groupId: string; agent: string; seq: number }>();
   private actShown = new Map<string, number>();
   // 动手 here that waits its turn, by asker and AI (actKey), with its newest
@@ -931,9 +932,15 @@ export class Sidecar {
       // Its person has no AI left there: the group is gone from their view.
       if (!(err instanceof RelayClientError && err.status === 404)) return this.log(`${a.groupId} 的动手弹框：${(err as Error).message}`);
     }
-    this.askActs.delete(id);
-    this.queue = this.queue.filter((q) => q !== id);
+    this.forgetAct(id);
     if (this.showing?.id === id) this.showing.asking?.close();
+  }
+
+  // An act no longer waits for a yes here: answered, or ended elsewhere.
+  private forgetAct(id: string): void {
+    this.askActs.delete(id);
+    this.actShown.delete(id);
+    this.queue = this.queue.filter((q) => q !== id);
   }
 
   // The dialog for a request to 动手 in a group, when its turn comes: as it
@@ -942,29 +949,28 @@ export class Sidecar {
   private async showAct(id: string): Promise<void> {
     const a = this.askActs.get(id);
     if (!a) return;
-    const work = await this.relay.groupWorkFor(a.groupId, a.agent, false, a.seq);
+    let work = await this.relay.groupWorkFor(a.groupId, a.agent, false, a.seq);
+    // A newer request of it came meanwhile: the dialog is for that one.
+    if (work?.act?.id === id && work.act.askSeq > work.wake.seq) work = await this.relay.groupWorkFor(a.groupId, a.agent, false, work.act.askSeq);
     const act = work?.act;
-    if (!work || act?.id !== id || act.status !== "asking") {
-      this.askActs.delete(id);
-      return;
-    }
-    if (this.actShown.get(id) === act.askSeq) return;
-    this.actShown.set(id, act.askSeq);
+    if (!work || act?.id !== id || act.status !== "asking") return this.forgetAct(id);
+    const seq = work.wake.seq;
+    if (this.actShown.get(id) === seq) return;
+    this.actShown.set(id, seq);
     const me = (await this.agent(a.agent)) ?? { id: a.agent, name: a.agent, client: "claude" as const };
     const title = groupActTitle(work.group.name, (await this.askerOf(work, act.asker)).name, me.name.replace(/^我的/, "你的"));
     const body = withFileNames(work.wake);
     const asking = this.opts.ask?.({ mode: "do", title, topic: "", body, scope: `${MODE_LABELS.do} · ${act.maxRounds} 轮` }) ?? null;
     if (!asking) {
-      this.askActs.delete(id);
       this.opts.notify(title, body, `${this.opts.webUrl}/#/g/${a.groupId}`);
       return;
     }
     this.showing!.asking = asking;
     try {
       const answer = await asking.answer;
-      // Done with this request: only a newer one, already waiting its turn
-      // if it came meanwhile, or a start brings the act back.
-      if (this.askActs.get(id)?.seq === a.seq) this.askActs.delete(id);
+      // Answered, it no longer waits here. 稍后 leaves it remembered until it
+      // ends elsewhere (dropActIfDone), or a newer request of it comes.
+      if (answer !== "later") this.forgetAct(id);
       if (answer === "approve") {
         const approved = await this.relay.approveGroupAct(a.groupId, id);
         void this.nextRound(a.groupId, a.agent, approved, me).catch((err: Error) => this.log(`${a.groupId} 动手没有开始：${err.message}`));
@@ -976,7 +982,7 @@ export class Sidecar {
       // Handled meanwhile, such as 叫停: the line under the request says so already.
       this.log(`${a.groupId} 的动手弹框：${raw}`);
       if (err instanceof RelayClientError) return;
-      await this.relay.failGroup(a.groupId, { agent: a.agent, seq: act.askSeq, reason: failureLine(raw) }).catch(() => {});
+      await this.relay.failGroup(a.groupId, { agent: a.agent, seq, reason: failureLine(raw) }).catch(() => {});
     }
   }
 
