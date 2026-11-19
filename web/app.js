@@ -11,11 +11,15 @@ import {
   isAnswering,
   mentionAt,
   pickerOptions,
+  QUOTA,
   quotaLine,
+  quotaOf,
   RECEIPT_LABELS,
   receiptLine,
   segments,
+  settingsTiles,
   tagsOf,
+  tileActions,
   timeBreaks,
 } from "./groups.js";
 const token = window.ACHAT_TOKEN;
@@ -1210,8 +1214,8 @@ function withAts(body, mentions, names) {
 }
 
 // A group: its messages, each @ in blue, under each who did not reply, and
-// the box to write in.
-function renderGroup(g) {
+// the box to write in; 群设置 slides over on the right (#/g/<id>/settings).
+function renderGroup(g, r) {
   const main = document.getElementById("main");
   // A redraw of the same group keeps the place the person was reading,
   // unless they were at the bottom, where the newest stays in view.
@@ -1222,9 +1226,24 @@ function renderGroup(g) {
   const kept = state.composer?.groupId === g.id ? state.composer.box : null;
   const focused = !!kept && document.activeElement === kept;
   const caret = kept ? [kept.selectionStart, kept.selectionEnd] : null;
+  const more = h(
+    "a",
+    {
+      class: `icon-btn group-more${r.settings ? " on" : ""}`,
+      id: "group-settings-btn",
+      href: `#/g/${encodeURIComponent(g.id)}${r.settings ? "" : "/settings"}`,
+      "aria-label": r.settings ? "关上群设置" : "群设置",
+      "aria-expanded": String(r.settings),
+    },
+    icon("more", 20),
+  );
   const foot = groupFoot(g);
-  const body = showMain(`${g.name}（${g.members.length}）`, groupLog(g), { foot, back: "#/", drop: state.composer?.take });
+  const body = showMain(`${g.name}（${g.members.length}）`, groupLog(g, !r.settings), { right: more, foot, back: "#/", drop: state.composer?.take });
   main.dataset.group = g.id;
+  if (r.settings) {
+    body.classList.add("beside-drawer");
+    main.append(groupSettings(g));
+  }
   body.scrollTop = stick ? body.scrollHeight : keep;
   for (const img of body.querySelectorAll("img")) img.addEventListener("load", () => stick && (body.scrollTop = body.scrollHeight), { once: true });
   if (focused) {
@@ -1437,6 +1456,150 @@ function groupAction(g) {
   if (g.status === "stopped") return [h("button", { type: "button", class: "btn", id: "group-continue", onclick: () => act(() => api("POST", `${path}/continue`, {})) }, "继续")];
   if (isAnswering(g)) return [h("button", { type: "button", class: "btn danger", id: "group-stop", onclick: () => act(() => api("POST", `${path}/stop`, {})) }, "叫停")];
   return [];
+}
+
+// 群设置: who is in the group and who is invited, its name, how many times a
+// day each of the person's AIs may be woken here, and leaving or ending it.
+function groupSettings(g) {
+  const me = state.me.account.id;
+  const open = g.status !== "dissolved";
+  const owner = g.owner === me;
+  const path = `/api/groups/${encodeURIComponent(g.id)}`;
+  const mine = g.members.filter((m) => m.quota !== undefined);
+  const grid = h("div", { class: "member-grid" }, ...settingsTiles(g).map((t) => memberTile(g, t)));
+  const quotas = open && mine.length ? h("section", { class: "my-ais", "aria-labelledby": "my-ais-title" }, h("h2", { id: "my-ais-title", class: "muted" }, "我的 AI"), ...mine.map((m) => quotaRow(g, m))) : null;
+  const leave = mine.length ? h("button", { type: "button", class: "btn danger", id: "group-leave", onclick: () => leaveGroup(g, mine) }, "退出群") : null;
+  const dissolve =
+    owner && open
+      ? h(
+          "button",
+          {
+            type: "button",
+            class: "btn danger",
+            id: "group-dissolve",
+            onclick: () => {
+              if (confirm("解散后群里只能看不能发，AI 也不会再被叫醒。")) void act(() => api("POST", `${path}/dissolve`, {}));
+            },
+          },
+          "解散群",
+        )
+      : null;
+  return h(
+    "aside",
+    { class: "group-settings", id: "group-settings", "aria-label": "群设置" },
+    grid,
+    groupNameRow(g, owner && open),
+    quotas,
+    state.error ? h("p", { class: "error", role: "alert" }, state.error) : null,
+    h("span", { class: "spacer" }),
+    h("div", { class: "settings-actions" }, leave, dissolve),
+  );
+}
+
+// One member in 群设置: its face and name, 等加入 while invited; a click
+// offers what the person may do with it.
+function memberTile(g, t) {
+  const label = [
+    h("span", { class: `member-face${t.waiting ? " waiting" : ""}` }, avatar(t.name, 44)),
+    h("span", { class: "member-name" }, t.name),
+    t.waiting ? h("span", { class: "muted" }, "等加入") : null,
+  ];
+  const data = t.waiting ? { "data-invite": t.id } : { "data-agent": t.id };
+  const cell = h("div", { class: "member-cell" });
+  const actions = tileActions(t, g, state.me.account.id);
+  if (!actions.length) {
+    cell.append(h("div", { class: "member", ...data }, ...label));
+    return cell;
+  }
+  const path = `/api/groups/${encodeURIComponent(g.id)}`;
+  const leave = () => {
+    if (confirm(cjk(t.name, "退出后不会再被叫醒。"))) void act(() => api("POST", `${path}/leave`, { agent: t.id }));
+  };
+  const remove = () => {
+    if (confirm(cjk("移出后", t.name, "不会再被叫醒。"))) void act(() => api("POST", `${path}/remove`, { agent: t.id }));
+  };
+  const button = h("button", { type: "button", class: "member", ...data, "aria-haspopup": "menu", "aria-expanded": "false" }, ...label);
+  button.addEventListener("click", () =>
+    closeOpenMenu
+      ? closeOpenMenu()
+      : openMenu(button, cell, actions.map((a) => (a === "leave" ? ["退出群聊", leave, { danger: true }] : ["移出群聊", remove, { danger: true }]))),
+  );
+  cell.append(button);
+  return cell;
+}
+
+// 群名: 群主 clicks it to change it right there; Return saves, Esc puts it back.
+function groupNameRow(g, editable) {
+  const value = h("span", { class: "muted name-value" }, g.name, editable ? icon("right", 12, 2) : null);
+  if (!editable) return h("div", { class: "settings-row", id: "group-name" }, h("span", {}, "群名"), value);
+  const row = h("button", { type: "button", class: "settings-row", id: "group-name" }, h("span", {}, "群名"), value);
+  row.addEventListener("click", () => {
+    const input = h("input", { class: "input", id: "group-name-input", value: g.name, maxlength: "30", "aria-label": "群名", "data-hold": "" });
+    const editing = h("div", { class: "settings-row editing" }, input);
+    // Taking the box away blurs it, which would come back here mid-swap.
+    const putBack = () => {
+      if (!editing.isConnected) return;
+      input.removeEventListener("blur", putBack);
+      editing.replaceWith(row);
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) {
+        e.preventDefault();
+        void act(() => api("POST", `/api/groups/${encodeURIComponent(g.id)}/rename`, { name: input.value }));
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        putBack();
+      }
+    });
+    input.addEventListener("blur", putBack);
+    row.replaceWith(editing);
+    input.focus();
+    input.select();
+  });
+  return row;
+}
+
+// One of the person's AIs in 群设置: 每天几次 (Return, or leaving the box,
+// saves it), a bar of today so far, and the count.
+function quotaRow(g, m) {
+  const input = h("input", { class: "quota-box", id: `group-quota-${m.agent}`, type: "text", inputmode: "numeric", value: String(m.quota), "aria-label": `${m.name}每天最多被叫醒几次`, "data-hold": "" });
+  input.addEventListener("change", () => {
+    const perDay = quotaOf(input.value);
+    if (perDay === null) {
+      state.error = `每天次数需要在 1 到 ${QUOTA.max} 之间`;
+      input.value = String(m.quota);
+      return void refresh();
+    }
+    if (perDay !== m.quota) void act(() => api("POST", `/api/groups/${encodeURIComponent(g.id)}/quota`, { agent: m.agent, perDay }));
+  });
+  input.addEventListener("keydown", (e) => e.key === "Enter" && !e.isComposing && input.blur());
+  const used = Math.min(100, Math.round((m.usedToday / m.quota) * 100));
+  return h(
+    "div",
+    { class: "quota-row", "data-agent": m.agent },
+    h(
+      "div",
+      { class: "with-avatar" },
+      clientAvatar(state.agents.get(m.agent)?.client, 28),
+      h("span", { class: "grow" }, m.name),
+      h("label", { class: "muted quota-label", for: input.id }, "每天", input, "次"),
+    ),
+    h(
+      "div",
+      { class: `progress${m.usedToday >= m.quota ? " full" : ""}`, role: "progressbar", "aria-label": cjk(m.name, `今天用了 ${m.usedToday} 次`), "aria-valuemin": "0", "aria-valuemax": String(m.quota), "aria-valuenow": String(m.usedToday) },
+      h("span", { style: `width:${used}%` }),
+    ),
+    h("span", { class: "muted" }, `今天用了 ${m.usedToday} 次`),
+  );
+}
+
+// 退出群: each of the person's AIs here leaves; the group is gone from 消息.
+function leaveGroup(g, mine) {
+  if (!confirm("退出后你的 AI 不会再被叫醒，你也看不到这个群了。")) return;
+  void act(async () => {
+    for (const m of mine) await api("POST", `/api/groups/${encodeURIComponent(g.id)}/leave`, { agent: m.agent });
+    location.hash = "#/";
+  });
 }
 
 // --- 通讯录
@@ -1948,7 +2111,7 @@ async function refresh() {
   if (r.view === "posts") renderPosts(r);
   else if (r.view === "contacts") renderContact(r.id);
   else if (r.view === "me") renderMe(r.id);
-  else if (r.group) state.group ? renderGroup(state.group) : showEmpty();
+  else if (r.group) state.group ? renderGroup(state.group, r) : showEmpty();
   else if (state.detail) renderThread(state.detail);
   else if (r.compose) renderCompose(r.compose);
   else if (cloud && !checklistDone()) renderChecklist();

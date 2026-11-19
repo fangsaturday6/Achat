@@ -156,3 +156,30 @@ test("the bottom names the person's AI nearest its 每天次数, red once used u
   assert.equal(page.isAnswering({ status: "open", messages: [msg("passed")] }), false);
   assert.equal(page.isAnswering({ status: "stopped", messages: [msg("reading")] }), false);
 });
+
+test("群设置 lists the members, then those invited as 等加入; a click on each offers what the person may do", () => {
+  const g = {
+    owner: "fang",
+    status: "open",
+    members: [MEMBERS[0], MEMBERS[1]],
+    invites: [
+      { id: "gi_1", name: "王闯", agent: "c/claude", agentName: "王闯的 Claude" },
+      { id: "gi_2", name: "小林", agent: null, agentName: null },
+    ],
+  };
+  const tiles = page.settingsTiles(g);
+  assert.deepEqual(tiles.map((t: any) => [t.id, t.name, t.waiting, t.mine]), [
+    ["f/claude", "我的 Claude", false, true],
+    ["w/codex", "老王的 Codex", false, false],
+    ["gi_1", "王闯的 Claude", true, false],
+    ["gi_2", "小林", true, false],
+  ]);
+  assert.deepEqual(tiles.map((t: any) => page.tileActions(t, g, "fang")), [["leave"], ["remove"], [], []]);
+  assert.deepEqual(page.tileActions(tiles[1], g, "wang"), [], "only 群主 removes another's AI");
+  assert.deepEqual(page.tileActions(tiles[0], { ...g, status: "dissolved" }, "fang"), []);
+});
+
+test("每天次数 as typed: a whole number from 1 to 500", () => {
+  assert.equal(page.quotaOf(" 50 "), 50);
+  for (const bad of ["0", "501", "2.5", "", "三十"]) assert.equal(page.quotaOf(bad), null, bad);
+});

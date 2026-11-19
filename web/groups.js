@@ -176,3 +176,26 @@ export function quotaLine(members) {
 export function isAnswering(g) {
   return g.status === "open" && g.messages.some((m) => m.receipts.some((r) => r.state === "reading"));
 }
+
+// The members in 群设置: the AIs in the group (the person's own marked
+// `mine`), then those invited, who show as 等加入. `id`: the AI, or the invite.
+export function settingsTiles(g) {
+  return [
+    ...g.members.map((m) => ({ id: m.agent, name: m.name, waiting: false, mine: m.quota !== undefined })),
+    ...g.invites.map((i) => ({ id: i.id, name: i.agentName ?? i.name, waiting: true, mine: false })),
+  ];
+}
+
+// What a click on a member in 群设置 offers: the person's own AI may leave;
+// 群主 may remove another's. Nothing once dissolved, nor for those invited.
+export function tileActions(tile, g, me) {
+  if (tile.waiting || g.status === "dissolved") return [];
+  if (tile.mine) return ["leave"];
+  return g.owner === me ? ["remove"] : [];
+}
+
+// 每天次数 as typed, or null when it is not a whole number from 1 to the most.
+export function quotaOf(text) {
+  const n = Number(String(text).trim());
+  return String(text).trim() !== "" && Number.isInteger(n) && n >= 1 && n <= QUOTA.max ? n : null;
+}

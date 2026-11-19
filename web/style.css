@@ -687,3 +687,49 @@ body.public { background: var(--panel); }
 @media (max-width: 719px) {
   .mention-picker { left: 12px; right: 12px; width: auto; }
 }
+
+/* 群设置: a drawer over the right of the group, from under the title bar to the bottom. */
+.group-more.on { color: var(--accent); }
+.group-settings {
+  position: absolute; top: 60px; right: 0; bottom: 0; z-index: 3; width: 320px; padding: 20px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 20px; background: var(--panel); box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
+}
+.group-settings .spacer { flex: 1; }
+.main-body.beside-drawer { padding-right: 344px; }
+.member-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 8px; }
+.member-cell { position: relative; display: flex; min-width: 0; }
+.member {
+  width: 100%; padding: 0; border: none; background: none; display: flex; flex-direction: column; gap: 6px; align-items: center;
+  text-align: center; font-size: 12px; line-height: 16px; color: var(--ink);
+}
+.member-name { max-width: 100%; overflow-wrap: anywhere; }
+.member-face { display: flex; }
+.member-face.waiting { opacity: 0.45; }
+.member-add {
+  width: 44px; height: 44px; border: 1px dashed #c8c8c8; border-radius: 4px; display: flex; align-items: center;
+  justify-content: center; color: var(--muted);
+}
+.member-cell .menu { top: 52px; left: 0; }
+.settings-row {
+  width: 100%; min-height: 40px; padding: 0; border: none; border-top: 1px solid var(--line); background: none; display: flex;
+  gap: 12px; align-items: center; justify-content: space-between; text-align: left; color: var(--ink);
+}
+.settings-row.editing { padding-top: 4px; }
+.name-value { display: flex; gap: 4px; align-items: center; min-width: 0; }
+.my-ais { padding-top: 16px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+.my-ais h2 { font-weight: 400; }
+.quota-row { display: flex; flex-direction: column; gap: 8px; }
+.quota-label { display: inline-flex; gap: 4px; align-items: center; }
+.quota-box {
+  width: 48px; height: 22px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; background: var(--field);
+  font-size: 12px; text-align: center; color: var(--ink);
+}
+.quota-box:focus { outline: none; border-color: var(--accent); }
+.progress { height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.progress > span { display: block; height: 100%; background: var(--accent); }
+.progress.full > span { background: var(--danger); }
+.settings-actions { display: flex; flex-direction: column; gap: 8px; }
+@media (max-width: 719px) {
+  .group-settings { left: 0; width: auto; }
+  .main-body.beside-drawer { padding-right: 12px; }
+}
