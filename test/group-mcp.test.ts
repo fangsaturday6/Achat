@@ -303,7 +303,8 @@ test("an AI asking another person's AI to 动手 hears that it waits for that pe
 
     const asker = await mcp(wangLaptop.client, wangCodex);
     const waiting = textOf(await asker.callTool({ name: "send_group_message", arguments: { group: "网关", message: "@老方的 Claude 请你在网关加验签", mentions: ["老方的 Claude"] } }));
-    assert.match(waiting, /老方的 Claude 等主人同意动手/);
+    // 老方's yes, named from 老王's side: not 老王, whom "主人" would mean to his Codex.
+    assert.match(waiting, /老方的 Claude 等老方同意动手/);
     assert.match(waiting, /动手的结果会发回群里并 @ 你/);
 
     answers[0]("approve");
@@ -318,6 +319,49 @@ test("an AI asking another person's AI to 动手 hears that it waits for that pe
 
     const underWay = textOf(await asker.callTool({ name: "send_group_message", arguments: { group: "网关", message: "@老方的 Claude 再加一行日志", mentions: ["老方的 Claude"] } }));
     assert.match(underWay, /老方的 Claude 正在动手，做完会发回群里/);
+  } finally {
+    sidecar.stop();
+    await cloud.close();
+  }
+});
+
+test("waiting on its own person, the AI asking hears its other AI waits for 你的主人", async () => {
+  const { cloud, mailer } = await startTestCloud();
+  const fang = await logIn(cloud, mailer, "fang@example.com", "老方");
+  const wang = await logIn(cloud, mailer, "wang@example.com", "老王");
+  await befriend(fang, wang, "wang@example.com");
+  const fangMac = await addComputer(cloud, fang, "MacBook", ["claude"]);
+  const wangLaptop = await addComputer(cloud, wang, "ThinkPad", ["codex", "claude"]);
+  const fangClaude = fangMac.agent("claude");
+  const [wangCodex, wangClaude] = [wangLaptop.agent("codex"), wangLaptop.agent("claude")];
+  const wangId = (await wang.call("GET", "/api/me")).account.id;
+  // 老王's Claude can 动手; 老王 leaves its dialogs on screen.
+  const sidecar = new Sidecar({
+    client: wangLaptop.client,
+    agents: [],
+    runners: { [wangClaude]: new JudgingRunner([], ["do", "do"]) },
+    doers: { [wangClaude]: new FakeOpener() },
+    tasks: new TaskBook(mkdtempSync(join(tmpdir(), "achat-tasks-"))),
+    ask: () => ({ answer: new Promise<Answer>(() => {}), close: () => {} }),
+    notify: () => {},
+    webUrl: cloud.url,
+    log: () => {},
+  });
+  sidecar.start();
+  try {
+    const g = await fangMac.client.createGroup({ from: fangClaude, name: "自家", members: [{ account: wangId }] });
+    const invite = (await wang.call("GET", "/api/groups")).find((s: any) => s.id === g.id).myInvite;
+    await wang.call("POST", `/api/groups/${g.id}/invites/${invite.id}/accept`, { agents: [wangCodex, wangClaude] });
+    await until(async () => (await fang.call("GET", `/api/groups/${g.id}`)).members.find((m: any) => m.agent === wangClaude)?.online);
+    // 老王's Codex, answering 老方 in the background, asks his Claude: that waits for 老王.
+    const asked = (await fangMac.client.postGroupMessage(g.id, { from: fangClaude, body: "@老王的 Codex 让你的 Claude 动手", mentions: [wangCodex] })).messages.at(-1)!;
+    const echoed = (await wangLaptop.client.postGroupMessage(g.id, { from: wangCodex, body: "@老王的 Claude 请你动手", mentions: [wangClaude], replyTo: asked.seq, epoch: 0, sessionId: "s1" })).messages.at(-1)!;
+    const stateOf = async (seq: number) => (await wangLaptop.client.group(g.id)).messages.find((m) => m.seq === seq)?.receipts.find((r) => r.agent === wangClaude)?.state;
+    await until(async () => (await stateOf(echoed.seq)) === "asking");
+    // Then from the front: the same asker's request waits with it.
+    const asker = await mcp(wangLaptop.client, wangCodex);
+    const waiting = textOf(await asker.callTool({ name: "send_group_message", arguments: { group: g.id, message: "@我的 Claude 再动手改一处", mentions: ["我的 Claude"] } }));
+    assert.match(waiting, /我的 Claude 等你的主人同意动手/);
   } finally {
     sidecar.stop();
     await cloud.close();

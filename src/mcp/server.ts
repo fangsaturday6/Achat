@@ -27,7 +27,7 @@ import {
   type GroupSummary,
   type GroupTarget,
   type Message,
-  type ReceiptState,
+  type Receipt,
   type ThreadDetail,
 } from "../types.js";
 
@@ -757,8 +757,17 @@ export function createMcpServer(opts: McpOptions): McpServer {
     (d: GroupDetail): boolean =>
       !(d.messages.find((m) => m.seq === seq)?.receipts.some((r) => r.state === "reading") ?? false);
 
-  // What the AI asking is told of 动手, instead of the line under the message.
-  const WAITING_ON: Partial<Record<ReceiptState, string>> = { asking: "等主人同意动手", acting: "正在动手，做完会发回群里" };
+  // What the AI asking is told of 动手, instead of the line under the message:
+  // whose yes it waits for, named from its side ("等老方同意动手"; its own
+  // person is "你的主人", since "主人" alone is the reader's), or that it is
+  // under way.
+  function actLine(d: GroupDetail, self: string, r: Receipt): string | null {
+    if (r.state === "acting") return "正在动手，做完会发回群里";
+    if (r.state !== "asking") return null;
+    const owner = (agent: string) => d.members.find((m) => m.agent === agent)?.owner;
+    const mine = owner(r.agent) !== undefined && owner(r.agent) === owner(self);
+    return `等${mine ? "你的主人" : ownerOf(d.names[r.agent] ?? r.agent)}同意动手`;
+  }
 
   // What became of the AIs `seq` woke: replies in full, the rest a line each.
   async function groupOutcome(c: McpConnection, d: GroupDetail, seq: number): Promise<string[]> {
@@ -768,7 +777,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     const lines: string[] = [];
     for (const r of msg.receipts) {
       if (r.state !== "replied") {
-        lines.push(`${cjk(name(r.agent), WAITING_ON[r.state] ?? RECEIPT_LABELS[r.state])}${r.reason ? `：${r.reason}` : ""}`, "");
+        lines.push(`${cjk(name(r.agent), actLine(d, c.agentId, r) ?? RECEIPT_LABELS[r.state])}${r.reason ? `：${r.reason}` : ""}`, "");
         continue;
       }
       const reply = d.messages.find((m) => m.seq > seq && m.sender === r.agent && m.replyTo !== null && m.replyTo >= seq);
