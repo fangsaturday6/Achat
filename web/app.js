@@ -19,8 +19,10 @@ import {
   segments,
   settingsTiles,
   tagsOf,
+  targetsOf,
   tileActions,
   timeBreaks,
+  togglePick,
 } from "./groups.js";
 const token = window.ACHAT_TOKEN;
 const cloud = !token;
@@ -293,7 +295,7 @@ function openMenu(button, container, items, { bar = false } = {}) {
       if (opts.control) return h("label", { class: "menu-item" }, label, opts.control);
       const item = h(
         "button",
-        { type: "button", class: `menu-item${opts.danger ? " danger" : ""}`, role: "menuitem", disabled: opts.disabled },
+        { type: "button", class: `menu-item${opts.danger ? " danger" : ""}`, role: "menuitem", disabled: opts.disabled, id: opts.id },
         opts.icon ? icon(opts.icon, 16, 1.7) : null,
         label,
       );
@@ -529,6 +531,7 @@ function route() {
   if (hash.startsWith("#/contacts")) return { view: "contacts", id: id("#/contacts/") };
   if (hash.startsWith("#/me")) return { view: "me", id: id("#/me/") };
   if (hash.startsWith("#/start")) return { view: "start", id: hash.split("/")[2] ?? "" };
+  if (hash === "#/new-group") return { view: "messages", id: null, newGroup: true };
   if (hash.startsWith("#/g/")) {
     const [group, part] = hash.slice(4).split("/");
     return { view: "messages", id: null, group: decodeURIComponent(group), settings: part === "settings" };
@@ -593,18 +596,28 @@ async function logout() {
   location.href = "/";
 }
 
-function listHead(placeholder) {
+function listHead(placeholder, view) {
   const input = h("input", { type: "search", placeholder: "搜索", "aria-label": placeholder, value: state.query });
   input.addEventListener("input", () => {
     state.query = input.value.trim();
     renderListBody(route());
   });
-  return h(
-    "div",
-    { class: "list-head" },
-    h("label", { class: "search" }, icon("search", 14, 2), input),
-    cloud ? h("button", { type: "button", class: "plus", "aria-label": "添加朋友", onclick: openAddDialog }, icon("plus", 16, 1.8)) : null,
+  const plus = !cloud ? null : view === "messages" ? plusMenu() : h("button", { type: "button", class: "plus", "aria-label": "添加朋友", onclick: openAddDialog }, icon("plus", 16, 1.8));
+  return h("div", { class: "list-head" }, h("label", { class: "search" }, icon("search", 14, 2), input), plus);
+}
+
+// 消息's ＋, as in WeChat: 发起群聊 or 添加朋友. 通讯录's ＋ adds a friend at once.
+function plusMenu() {
+  const button = h("button", { type: "button", class: "plus", id: "list-plus", "aria-label": "发起群聊、添加朋友", "aria-haspopup": "menu", "aria-expanded": "false" }, icon("plus", 16, 1.8));
+  button.addEventListener("click", () =>
+    closeOpenMenu
+      ? closeOpenMenu()
+      : openMenu(button, button.parentElement, [
+          ["发起群聊", () => void openGroupPicker(), { icon: "people", id: "menu-new-group" }],
+          ["添加朋友", openAddDialog, { icon: "addPerson", id: "menu-add-friend" }],
+        ]),
   );
+  return button;
 }
 
 function item(href, current, pic, name, { sub, time, right, id } = {}) {
@@ -631,7 +644,7 @@ function renderList(r) {
   const head =
     r.view === "me" && cloud
       ? h("div", { class: "list-head profile-head" }, avatar(myName(), 40), h("span", { class: "item-text" }, h("span", { class: "item-name" }, myName()), h("span", { class: "item-sub" }, state.me.account.email)))
-      : listHead({ messages: "搜索消息", contacts: "搜索朋友", me: "搜索" }[r.view]);
+      : listHead({ messages: "搜索消息", contacts: "搜索朋友", me: "搜索" }[r.view], r.view);
   list.setAttribute("aria-label", { messages: "消息", contacts: "通讯录", me: "我" }[r.view]);
   list.replaceChildren(head, h("div", { class: "list-body", id: "list-body" }));
   renderListBody(r);
@@ -1466,7 +1479,19 @@ function groupSettings(g) {
   const owner = g.owner === me;
   const path = `/api/groups/${encodeURIComponent(g.id)}`;
   const mine = g.members.filter((m) => m.quota !== undefined);
-  const grid = h("div", { class: "member-grid" }, ...settingsTiles(g).map((t) => memberTile(g, t)));
+  const invite = open
+    ? h(
+        "div",
+        { class: "member-cell" },
+        h(
+          "button",
+          { type: "button", class: "member", id: "group-invite", onclick: () => void openGroupPicker({ group: g }) },
+          h("span", { class: "member-add", "aria-hidden": "true" }, icon("plus", 18, 1.8)),
+          h("span", { class: "muted" }, "邀请"),
+        ),
+      )
+    : null;
+  const grid = h("div", { class: "member-grid" }, ...settingsTiles(g).map((t) => memberTile(g, t)), invite);
   const quotas = open && mine.length ? h("section", { class: "my-ais", "aria-labelledby": "my-ais-title" }, h("h2", { id: "my-ais-title", class: "muted" }, "我的 AI"), ...mine.map((m) => quotaRow(g, m))) : null;
   const leave = mine.length ? h("button", { type: "button", class: "btn danger", id: "group-leave", onclick: () => leaveGroup(g, mine) }, "退出群") : null;
   const dissolve =
@@ -1600,6 +1625,166 @@ function leaveGroup(g, mine) {
     for (const m of mine) await api("POST", `/api/groups/${encodeURIComponent(g.id)}/leave`, { agent: m.agent });
     location.hash = "#/";
   });
+}
+
+// 发起群聊, and 邀请 in 群设置: the person's own AIs and friends on the left
+// (a friend opens to show their AIs, to invite just one), what is picked on
+// the right. A friend picked as a person chooses their AIs ("他来选 AI").
+// The one dialog wider than 380px (docs/ui.md).
+async function openGroupPicker({ group } = {}) {
+  await loadPeople();
+  const me = state.me.account.id;
+  const inGroup = new Set((group?.members ?? []).map((m) => m.agent));
+  const mine = [...state.agents.values()].filter((a) => a.owner === me && a.client !== "person" && !inGroup.has(a.id));
+  const friends = state.contacts.map((c) => ({ ...c, agents: c.agents.filter((a) => !inGroup.has(a.id)) }));
+  const aiOf = (a, owner) => ({ agent: a.id, owner, name: a.name, client: a.client, speaksOnly: a.canReceive === false });
+  // A new group starts with the person's first AI that can answer: a group needs one of theirs.
+  const first = group ? null : mine.find((a) => a.canReceive !== false);
+  let picked = first ? [aiOf(first, me)] : [];
+  let query = "";
+  const opened = new Set();
+  const has = (item) => picked.some((p) => (p.agent ?? p.person) === (item.agent ?? item.person));
+  const face = (p) => (!p.person && p.owner === me ? clientAvatar(p.client, 28) : avatar(p.name, 28));
+  const list = h("div", { class: "picker-list" });
+  const chosen = h("div", { class: "picker-picked" });
+  const count = h("span", { class: "muted picker-count" });
+  const error = h("p", { class: "error", role: "alert" });
+  const search = h("input", { type: "search", id: "group-picker-search", placeholder: "搜索", "aria-label": "搜索朋友和 AI" });
+  const done = h("button", { type: "button", class: "btn primary", id: "group-picker-done" }, "完成");
+  const cancel = h("button", { type: "button", class: "btn", id: "group-picker-cancel" }, "取消");
+  const closeButton = h("button", { type: "button", class: "icon-btn", "aria-label": "关闭" }, icon("close", 18, 1.8));
+  const fits = (...texts) => !query || texts.some((t) => t.toLowerCase().includes(query.toLowerCase()));
+  const choice = (item, indent = false) => {
+    const box = h("input", { type: "checkbox", id: item.person ? `pick-person-${item.person}` : `pick-${item.agent}`, checked: has(item) });
+    box.addEventListener("change", () => {
+      picked = togglePick(picked, item);
+      paint();
+    });
+    return h("label", { class: `pick${indent ? " indent" : ""}` }, box, face(item), h("span", { class: "grow" }, item.name), item.speaksOnly ? h("span", { class: "muted" }, "只能发言") : null);
+  };
+  function paint() {
+    const own = mine.filter((a) => fits(a.name)).map((a) => choice(aiOf(a, me)));
+    const people = friends
+      .filter((f) => fits(f.name, ...f.agents.map((a) => a.name)))
+      .flatMap((f) => {
+        const open = opened.has(f.id) || (!!query && f.agents.some((a) => fits(a.name)));
+        const arrow = f.agents.length
+          ? h("button", { type: "button", class: "icon-btn", "aria-label": `${open ? "收起" : "展开"}${f.name}的 AI`, "aria-expanded": String(open) }, icon(open ? "down" : "right", 12, 2))
+          : null;
+        arrow?.addEventListener("click", () => {
+          if (open) opened.delete(f.id);
+          else opened.add(f.id);
+          paint();
+        });
+        return [h("div", { class: "pick-row" }, choice({ person: f.id, name: f.name }), arrow), ...(open ? f.agents.map((a) => choice(aiOf(a, f.id), true)) : [])];
+      });
+    list.replaceChildren(
+      own.length ? h("span", { class: "muted picker-head" }, "我的 AI") : null,
+      ...own,
+      people.length ? h("span", { class: "muted picker-head" }, "朋友") : null,
+      ...people,
+    );
+    const label = `已选 ${picked.length} 个`;
+    count.textContent = label;
+    chosen.replaceChildren(
+      h("span", { class: "muted picker-head" }, label),
+      ...picked.map((p) => {
+        const x = h("button", { type: "button", class: "icon-btn", "aria-label": `去掉${p.name}` }, icon("close", 12, 2));
+        x.addEventListener("click", () => {
+          picked = togglePick(picked, p);
+          paint();
+        });
+        return h("div", { class: "pick-row", "data-agent": p.agent ?? null, "data-person": p.person ?? null }, face(p), h("span", { class: "grow" }, p.name), p.person ? h("span", { class: "muted" }, "他来选 AI") : null, x);
+      }),
+    );
+    done.disabled = !picked.length;
+  }
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener("keydown", onKey);
+  };
+  const onKey = (event) => event.key === "Escape" && close();
+  const overlay = h(
+    "div",
+    { class: "overlay" },
+    h(
+      "div",
+      { class: "dialog wide", role: "dialog", "aria-modal": "true", "aria-labelledby": "group-picker-title", id: "group-picker" },
+      h("div", { class: "dialog-head" }, h("h2", { id: "group-picker-title" }, group ? "邀请" : "发起群聊"), closeButton),
+      h("div", { class: "picker-cols" }, h("div", { class: "picker-left" }, h("label", { class: "search" }, icon("search", 14, 2), search), list), chosen),
+      error,
+      h("div", { class: "dialog-actions" }, count, cancel, done),
+    ),
+  );
+  search.addEventListener("input", () => {
+    query = search.value.trim();
+    paint();
+  });
+  done.addEventListener(
+    "click",
+    busy(done, async () => {
+      error.textContent = "";
+      if (!group) {
+        if (!picked.some((p) => p.owner === me)) {
+          error.textContent = "群里至少要有你自己的一个 AI";
+          return;
+        }
+        // The group is made with its first words: see renderNewGroup.
+        state.newGroup = { targets: targetsOf(picked), members: picked.filter((p) => p.agent), title: picked.map((p) => p.name).join("、") };
+        close();
+        if (location.hash === "#/new-group") await refresh();
+        else location.hash = "#/new-group";
+        return;
+      }
+      try {
+        await api("POST", `/api/groups/${encodeURIComponent(group.id)}/invites`, { from: mySeat(), members: targetsOf(picked) });
+        close();
+        toast("已邀请");
+        await refresh();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }),
+  );
+  cancel.addEventListener("click", close);
+  closeButton.addEventListener("click", close);
+  overlay.addEventListener("click", (event) => event.target === overlay && close());
+  document.addEventListener("keydown", onKey);
+  paint();
+  document.body.append(overlay);
+  search.focus();
+}
+
+// A new group before its first words: they are its opening message
+// (@所有人) and give it its name; only then is it made.
+function renderNewGroup() {
+  const draft = state.newGroup;
+  const seat = mySeat();
+  if (!draft || !seat) return showEmpty();
+  // The same box while the page redraws, so what is half written stays.
+  const first = !draft.writer;
+  draft.writer ??= writeBox({
+    label: "发到新群聊",
+    send: async (text, files) => {
+      const { body } = composeMessage(text, draft.members, myName());
+      const g = await api("POST", "/api/groups", { from: seat, members: draft.targets, message: body, files });
+      state.newGroup = null;
+      location.hash = `#/g/${encodeURIComponent(g.id)}`;
+    },
+  });
+  const { foot, box, take } = draft.writer;
+  const focused = first || document.activeElement === box;
+  if (first) {
+    box.id = "group-input";
+    foot.querySelector(".btn.primary").id = "group-send";
+    box.value = "@所有人 ";
+  }
+  const [from, to] = [box.selectionStart, box.selectionEnd];
+  showMain(draft.title, h("div"), { foot, back: "#/", drop: take });
+  if (!focused) return;
+  box.focus();
+  if (first) box.setSelectionRange(box.value.length, box.value.length);
+  else box.setSelectionRange(from, to);
 }
 
 // --- 通讯录
@@ -2105,13 +2290,14 @@ async function refresh() {
   }
   const app = document.getElementById("app");
   app.dataset.view = r.view;
-  app.dataset.pane = r.id || r.compose || r.group || (r.view === "messages" && state.detail) ? "main" : "list";
+  app.dataset.pane = r.id || r.compose || r.group || r.newGroup || (r.view === "messages" && state.detail) ? "main" : "list";
   renderRail(r.view);
   if (r.view !== "posts") renderList(r);
   if (r.view === "posts") renderPosts(r);
   else if (r.view === "contacts") renderContact(r.id);
   else if (r.view === "me") renderMe(r.id);
   else if (r.group) state.group ? renderGroup(state.group, r) : showEmpty();
+  else if (r.newGroup) renderNewGroup();
   else if (state.detail) renderThread(state.detail);
   else if (r.compose) renderCompose(r.compose);
   else if (cloud && !checklistDone()) renderChecklist();

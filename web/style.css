@@ -733,3 +733,33 @@ body.public { background: var(--panel); }
   .group-settings { left: 0; width: auto; }
   .main-body.beside-drawer { padding-right: 12px; }
 }
+
+/* 消息's ＋ menu. */
+.list-head { position: relative; }
+.list-head .menu { top: 50px; right: 12px; }
+.list-head .menu-item { justify-content: flex-start; }
+
+/* 发起群聊 and 邀请: the one dialog wider than 380px (docs/ui.md), in two columns. */
+.dialog.wide { width: 560px; padding: 0; gap: 0; }
+.dialog.wide .dialog-head { height: 52px; padding: 0 12px 0 20px; }
+.picker-cols { height: 400px; display: flex; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.picker-left { flex: 1 1 0; min-width: 0; padding: 12px 0; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+.picker-left > .search { flex: 0 0 26px; margin: 0 16px 8px; }
+.picker-list, .picker-picked { flex: 1 1 0; min-width: 0; overflow-y: auto; }
+.picker-picked { padding: 12px 0; }
+.picker-head { display: block; padding: 8px 16px 4px; }
+.pick, .pick-row { height: 40px; padding: 0 8px 0 16px; display: flex; gap: 10px; align-items: center; }
+.pick-row > .pick { flex: 1; min-width: 0; height: 100%; padding: 0; }
+.pick.indent { padding-left: 42px; }
+.pick input[type="checkbox"] { width: 16px; height: 16px; margin: 0; flex-shrink: 0; accent-color: var(--accent); }
+.pick .grow, .pick-row .grow { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.dialog.wide > .error { padding: 8px 20px 0; }
+.dialog-actions { height: 64px; padding: 0 20px; display: flex; gap: 10px; align-items: center; justify-content: flex-end; }
+.picker-count { display: none; margin-right: auto; }
+@media (max-width: 719px) {
+  .dialog.wide { width: 100%; }
+  .picker-cols { height: min(60vh, 400px); }
+  .picker-left { border-right: none; }
+  .picker-picked { display: none; }
+  .picker-count { display: inline; }
+}

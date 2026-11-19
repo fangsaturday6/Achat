@@ -183,3 +183,17 @@ test("每天次数 as typed: a whole number from 1 to 500", () => {
   assert.equal(page.quotaOf(" 50 "), 50);
   for (const bad of ["0", "501", "2.5", "", "三十"]) assert.equal(page.quotaOf(bad), null, bad);
 });
+
+test("发起群聊: a friend, or some of their AIs, never both; what 完成 sends", () => {
+  const wang = { person: "wang", name: "老王" };
+  const wangCodex = { agent: "w/codex", owner: "wang", name: "老王的 Codex" };
+  const mine = { agent: "f/claude", owner: "fang", name: "我的 Claude" };
+  let picked = page.togglePick([], mine);
+  picked = page.togglePick(picked, wangCodex);
+  picked = page.togglePick(picked, wang);
+  assert.deepEqual(picked.map((p: any) => p.name), ["我的 Claude", "老王"], "picking 老王 drops his AI picked alone");
+  picked = page.togglePick(picked, wangCodex);
+  assert.deepEqual(picked.map((p: any) => p.name), ["我的 Claude", "老王的 Codex"], "and the other way round");
+  assert.deepEqual(page.targetsOf(page.togglePick(picked, wangCodex)), [{ agent: "f/claude" }]);
+  assert.deepEqual(page.targetsOf([mine, wang]), [{ agent: "f/claude" }, { account: "wang" }]);
+});

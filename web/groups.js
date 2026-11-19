@@ -199,3 +199,18 @@ export function quotaOf(text) {
   const n = Number(String(text).trim());
   return String(text).trim() !== "" && Number.isInteger(n) && n >= 1 && n <= QUOTA.max ? n : null;
 }
+
+// What is picked in 发起群聊 and 邀请: people ({person, name}), who choose
+// their AIs, and AIs ({agent, owner, name}). Picking a person drops their
+// AIs picked one by one, and the other way round; picking again unpicks.
+export function togglePick(picked, item) {
+  const key = (p) => p.agent ?? `person:${p.person}`;
+  if (picked.some((p) => key(p) === key(item))) return picked.filter((p) => key(p) !== key(item));
+  const clash = item.person ? (p) => p.owner === item.person : (p) => p.person === item.owner;
+  return [...picked.filter((p) => !clash(p)), item];
+}
+
+// What 完成 sends, as /api/groups takes members: {"agent"} or {"account"}.
+export function targetsOf(picked) {
+  return picked.map((p) => (p.person ? { account: p.person } : { agent: p.agent }));
+}
