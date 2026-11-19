@@ -122,7 +122,8 @@ export class GroupService {
     for (const low of this.low.splice(0)) this.tell("group.quotaLow", low.groupId, [low.agent]);
   }
 
-  // An event for `members` alone, such as the one AI near its 每天次数.
+  // An event for `members` alone, such as the one AI near its 每天次数 or the
+  // person their AI @ed.
   private tell(type: GroupEvent["type"], groupId: string, members: string[], extra: { seq?: number; wake?: string[] } = {}): void {
     const event: GroupEvent = { type, groupId, members, ...(extra.seq !== undefined ? { seq: extra.seq } : {}), ...(extra.wake?.length ? { wake: extra.wake } : {}) };
     this.events.emit("event", event);
@@ -206,13 +207,24 @@ export class GroupService {
   // days. A person has one invite card: one that lets them pick covers any of
   // their AIs, and asking them to pick while an AI of theirs is asked for by
   // name waits on that one. Another AI by name is its own invite, on the
-  // same card until they are in (see card), a tile in 群设置 after.
-  private offer(groupId: string, t: { account: string; agent: string | null }, by: string, now: string): void {
+  // same card until they are in (see card), a tile in 群设置 after. True
+  // for a new invite, false for one made new again.
+  private offer(groupId: string, t: { account: string; agent: string | null }, by: string, now: string): boolean {
     const expiresAt = new Date(this.now().getTime() + this.limits.inviteTtlMs).toISOString();
     const theirs = this.store.openInvites(groupId, now).filter((i) => i.account === t.account);
     const open = theirs.find((i) => i.agent === null || i.agent === t.agent) ?? (t.agent === null ? theirs[0] : undefined);
-    if (open) return this.store.renewInvite(open.id, expiresAt);
+    if (open) {
+      this.store.renewInvite(open.id, expiresAt);
+      return false;
+    }
     this.store.addInvite({ id: `gi_${randomBytes(6).toString("hex")}`, groupId, account: t.account, agent: t.agent, invitedBy: by, expiresAt }, now);
+    return true;
+  }
+
+  // Each person not yet in with a new invite hears of it alone, on the page,
+  // their computer and by email, once however many of their AIs it asks for.
+  private tellInvited(groupId: string, accounts: string[]): void {
+    for (const account of new Set(accounts)) this.tell("group.invited", groupId, [this.dir.seat(account)]);
   }
 
   // What becomes of an AI a message calls on: not woken while 叫停, nor one
@@ -379,10 +391,11 @@ export class GroupService {
     if (join.length > this.limits.maxMembers) throw new RelayError(409, `群里最多 ${this.limits.maxMembers} 个 AI`);
     const now = this.stamp();
     const id = `g_${randomBytes(5).toString("hex")}`;
+    const asked: string[] = [];
     const opened = this.store.transaction(() => {
       this.store.createGroup({ id, name, owner: caller.account }, now);
       for (const agent of join) this.store.addMember({ groupId: id, agent, owner: caller.account, quota: this.limits.quota, joinedSeq: 0 }, now);
-      for (const t of invite) this.offer(id, t, from.id, now);
+      for (const t of invite) if (this.offer(id, t, from.id, now)) asked.push(t.account);
       if (!text && !files.length) return null;
       // The opening message calls on everyone, those who join later too.
       const opener = this.store.addMessage(id, { sender: from.id, kind: "message", body: text, mentions: [ALL], byPerson: from.client === "person", files }, now);
@@ -391,6 +404,7 @@ export class GroupService {
     });
     this.emit("group.updated", id);
     if (opened) this.emit("group.message", id, opened);
+    this.tellInvited(id, asked);
     return this.detail(caller, id);
   }
 
@@ -408,11 +422,14 @@ export class GroupService {
     if (!newcomers.length && !fresh.length) throw new RelayError(409, "他们已经在群里了");
     if (members.length + newcomers.length > this.limits.maxMembers) throw new RelayError(409, `群里最多 ${this.limits.maxMembers} 个 AI`);
     const now = this.stamp();
+    // Someone already in is not told: their AI asked for waits on a tile in 群设置.
+    const asked: string[] = [];
     const wake = this.store.transaction(() => {
-      for (const t of fresh) this.offer(groupId, t, from.id, now);
+      for (const t of fresh) if (this.offer(groupId, t, from.id, now) && !members.some((m) => m.owner === t.account)) asked.push(t.account);
       return this.admit(group, newcomers, caller.account, this.limits.quota, now);
     });
     this.emit("group.updated", groupId, { wake });
+    this.tellInvited(groupId, asked);
     return this.detail(caller, groupId);
   }
 
@@ -512,6 +529,8 @@ export class GroupService {
       return { seq: msg.seq, wake: this.wake(this.store.group(groupId)!, msg, from.id) };
     });
     this.emit("group.message", groupId, posted);
+    // An AI calling its own person (@老方): they alone are told, on the page and their computer.
+    for (const seat of mentions.filter((m) => this.dir.agent(m)?.client === "person")) this.tell("group.mention", groupId, [seat], { seq: posted.seq });
     return this.detail(caller, groupId);
   }
 

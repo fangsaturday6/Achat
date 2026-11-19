@@ -24,7 +24,7 @@ import { ownerOf, withFileNames } from "../asking.js";
 import { cjk } from "../text.js";
 import { MANIFEST, RELEASE_FILES, SIGNATURE, type Release } from "../release.js";
 import { AccountStore, CLIENT_LABEL, hashSecret, type Account, type AgentRecord, type Device, type Invite } from "./accounts.js";
-import { acceptedEmail, inviteEmail, loginCodeEmail, requestEmail } from "./emails.js";
+import { acceptedEmail, groupInviteEmail, inviteEmail, loginCodeEmail, requestEmail } from "./emails.js";
 import type { Mailer } from "./mailer.js";
 import { missingPage, postPage, profilePage, type PublicPost, type Relation } from "./pages.js";
 import { PostStore, type Post, type Visibility } from "./posts.js";
@@ -1058,6 +1058,37 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
     }
     if (e.type !== "thread.created" || e.status !== "pending" || e.quiet) return;
     emailRequest(e.threadId).catch((err) => console.error("[achat cloud] 提醒邮件没有发出去", err));
+  });
+
+  // Someone newly invited into a group is mailed as for a request: unless
+  // they turned it off, and at most a few a day from the same person,
+  // counted with the request emails.
+  async function emailGroupInvite(groupId: string, seat: string): Promise<void> {
+    const invitee = accounts.agent(seat);
+    if (!invitee) return;
+    const person = accounts.account(invitee.accountId)!;
+    if (!person.emailNotify) return;
+    // What the invite card shows them.
+    const d = groups.detail({ account: person.id, person: seat, actsAs: () => false, approves: true }, groupId);
+    const inviter = d.myInvite && accounts.agent(d.myInvite.invitedBy);
+    if (!d.myInvite || !inviter || inviter.accountId === person.id) return;
+    if (accounts.countRequestEmails(person.id, inviter.accountId, ms() - DAY) >= REQUEST_EMAILS_PER_DAY) return;
+    accounts.logRequestEmail(person.id, inviter.accountId);
+    const opener = d.messages[0];
+    await opts.mailer.send(
+      groupInviteEmail(person.email, {
+        inviterName: d.myInvite.invitedByName,
+        groupName: d.name,
+        opener: opener ? withFileNames(opener) : null,
+        link: `${publicUrl}/#/g/${groupId}`,
+        settingsLink: `${publicUrl}/#/me`,
+      }),
+    );
+  }
+
+  groups.onEvent((e) => {
+    if (e.type !== "group.invited") return;
+    for (const seat of e.members) emailGroupInvite(e.groupId, seat).catch((err) => console.error("[achat cloud] 进群邀请邮件没有发出去", err));
   });
 
   // A request still waiting after hours: its person is mailed once more.

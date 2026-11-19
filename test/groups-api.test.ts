@@ -351,6 +351,29 @@ describe("群 over the API", () => {
     }
   });
 
+  test("a new invite, and an AI calling its person, reach that person's streams alone", async () => {
+    const claude = fangMac.agent("claude");
+    const wangCodex = wangLaptop.agent("codex");
+    const onFang = await watch(fang);
+    const onWang = await watch(wang);
+    try {
+      const g = await fangMac.client.createGroup({ from: claude, name: "叫主人", members: [{ account: wangId }] });
+      const invited = await until(async () => onWang.events.find((e) => e.groupId === g.id && e.type === "group.invited"));
+      assert.deepEqual(invited, { type: "group.invited", groupId: g.id, members: [`p_${wangId}`] });
+      const invite = (await wang.call("GET", "/api/groups")).find((x: any) => x.id === g.id).myInvite;
+      await wang.call("POST", `/api/groups/${g.id}/invites/${invite.id}/accept`, { agents: [wangCodex] });
+      const said = (await fangMac.client.postGroupMessage(g.id, { from: claude, body: "@老方 商户号用哪家公司的执照，你来定", mentions: [fangSeat] })).messages.at(-1)!;
+      const mention = await until(async () => onFang.events.find((e) => e.groupId === g.id && e.type === "group.mention"));
+      assert.deepEqual(mention, { type: "group.mention", groupId: g.id, members: [fangSeat], seq: said.seq });
+      await quiet();
+      assert.ok(!onFang.events.some((e) => e.groupId === g.id && e.type === "group.invited"), "老方 hears nothing of 老王's invite");
+      assert.ok(!onWang.events.some((e) => e.groupId === g.id && e.type === "group.mention"), "老王 hears nothing of 老方 being called");
+    } finally {
+      onFang.stop();
+      onWang.stop();
+    }
+  });
+
   test("when the last AI leaves, the invite's opening files can no longer be opened", async () => {
     const claude = fangMac.agent("claude");
     const file = (name: string, text: string) => ({ name, type: "text/plain", data: Buffer.from(text).toString("base64") });
@@ -362,6 +385,52 @@ describe("群 over the API", () => {
     assert.equal((await wang.call("GET", "/api/groups")).some((x: any) => x.id === g.id), false);
   });
 
+});
+
+test("someone newly invited into a group is emailed as for a request: the opening words, a link to the group, a way to turn it off; three a day from one person", async () => {
+  const { cloud, mailer } = await startTestCloud();
+  try {
+    const fang = await logIn(cloud, mailer, "fang@example.com", "老方");
+    const wang = await logIn(cloud, mailer, "wang@example.com", "老王");
+    await befriend(fang, wang, "wang@example.com");
+    const fangMac = await addComputer(cloud, fang, "MacBook", ["claude"]);
+    const claude = fangMac.agent("claude");
+    const wangId = (await wang.call("GET", "/api/me")).account.id;
+    const mails = () => mailer.sent.filter((m) => m.to === "wang@example.com" && m.subject.includes("群聊"));
+    const quiet = () => new Promise((r) => setTimeout(r, 100));
+    const make = (name: string, message?: string) => fangMac.client.createGroup({ from: claude, name, members: [{ account: wangId }], message });
+
+    const g = await make("发版计划", "@所有人 周五发版，先看看清单");
+    const mail = await until(async () => mails()[0]);
+    assert.equal(mail.subject, "老方的 Claude 邀请你加入群聊「发版计划」");
+    assert.equal(
+      mail.text,
+      ["老方的 Claude 邀请你加入群聊「发版计划」", "", "@所有人 周五发版，先看看清单", "", `去看看：https://achat.test/#/g/${g.id}`, "", "关闭邮件提醒：https://achat.test/#/me"].join("\n"),
+    );
+    assert.ok(mail.html!.includes(`href="https://achat.test/#/g/${g.id}"`));
+    assert.ok(mail.html!.includes(`href="https://achat.test/#/me"`));
+
+    // The same invite made new again mails nothing; nor does one to someone who turned emails off.
+    await fangMac.client.inviteToGroup(g.id, { from: claude, members: [{ account: wangId }] });
+    await wang.call("POST", "/api/me", { emailNotify: false });
+    await make("关了提醒");
+    await quiet();
+    assert.equal(mails().length, 1);
+    await wang.call("POST", "/api/me", { emailNotify: true });
+
+    // 老方 himself inviting is named as himself, and without opening words none are written.
+    const fangSeat = `p_${(await fang.call("GET", "/api/me")).account.id}`;
+    const second = await fang.call("POST", "/api/groups", { from: fangSeat, name: "第二个", members: [{ agent: claude }, { account: wangId }] });
+    // Long opening words are cut as in a request's email; the fourth that day from 老方 is not mailed.
+    await make("第三个", "长".repeat(301));
+    await make("第四个");
+    await quiet();
+    assert.deepEqual(mails().map((m) => m.subject), ["老方的 Claude 邀请你加入群聊「发版计划」", "老方邀请你加入群聊「第二个」", "老方的 Claude 邀请你加入群聊「第三个」"]);
+    assert.equal(mails()[1].text, ["老方邀请你加入群聊「第二个」", "", `去看看：https://achat.test/#/g/${second.id}`, "", "关闭邮件提醒：https://achat.test/#/me"].join("\n"));
+    assert.equal(mails()[2].text.split("\n")[2], "长".repeat(300) + "……");
+  } finally {
+    await cloud.close();
+  }
 });
 
 test("on this computer alone there are no groups", async () => {

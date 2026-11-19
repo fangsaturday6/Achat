@@ -61,6 +61,20 @@ function cell(html: string, top = 20): string {
   return `<tr><td style="padding:${top}px 32px 0;">${html}</td></tr>`;
 }
 
+// The grey box with what was said, as on the page.
+function quote(html: string): string {
+  return cell(`<div style="background:#f2f2f2;border-radius:8px;padding:14px 16px;">\n${html}\n</div>`);
+}
+
+function optOut(settingsLink: string): string {
+  return `<tr><td align="center" style="padding:16px 32px 0;font-size:12px;line-height:17px;"><a href="${escape(settingsLink)}" style="color:#6b6b6b;">关闭邮件提醒</a></td></tr>`;
+}
+
+// What was said, cut to what an email shows.
+function excerpt(text: string): string {
+  return text.length > 300 ? text.slice(0, 300) + "……" : text;
+}
+
 export function loginCodeEmail(to: string, code: string, site: string): Email {
   const host = new URL(site).host;
   const text = [`你的 Achat 登录验证码：${code}`, "", "10 分钟内有效，不要告诉任何人。", "", `Achat · ${host}`].join("\n");
@@ -89,22 +103,45 @@ export interface RequestNotice {
 // Tells a person that someone's AI is asking one of theirs, with a button to
 // the request; the approval itself happens on the page.
 export function requestEmail(to: string, n: RequestNotice): Email {
-  const question = n.question.length > 300 ? n.question.slice(0, 300) + "……" : n.question;
+  const question = excerpt(n.question);
   const title = n.title ?? cjk(n.fromName, "想问", n.toName);
   const text = [`${title}：${n.topic}`, "", question, "", `查看：${n.link}`, "", `关闭邮件提醒：${n.settingsLink}`].join("\n");
   const html = layout(title, `${n.topic}：${question.slice(0, 60)}`, [
     cell(avatar(n.fromName)),
     heading(title),
-    cell(
-      `<div style="background:#f2f2f2;border-radius:8px;padding:14px 16px;">
-<div style="font-size:14px;line-height:22px;font-weight:500;color:#191919;">${escape(n.topic)}</div>
-<div style="padding-top:4px;font-size:14px;line-height:22px;color:#191919;white-space:pre-wrap;">${escape(question)}</div>
-</div>`,
+    quote(
+      `<div style="font-size:14px;line-height:22px;font-weight:500;color:#191919;">${escape(n.topic)}</div>
+<div style="padding-top:4px;font-size:14px;line-height:22px;color:#191919;white-space:pre-wrap;">${escape(question)}</div>`,
     ),
     cell(button(n.link, "查看")),
-    `<tr><td align="center" style="padding:16px 32px 0;font-size:12px;line-height:17px;"><a href="${escape(n.settingsLink)}" style="color:#6b6b6b;">关闭邮件提醒</a></td></tr>`,
+    optOut(n.settingsLink),
   ]);
   return { to, subject: `${title}：${n.topic}`, text, html };
+}
+
+export interface GroupInviteNotice {
+  inviterName: string; // 老王, or 老王的 Codex
+  groupName: string;
+  // The opening message, as the invite card shows it; null when there is none.
+  opener: string | null;
+  link: string;
+  settingsLink: string;
+}
+
+// Tells a person they are invited into a group, with what it is to discuss
+// and a button to the invite card; joining happens on the page.
+export function groupInviteEmail(to: string, n: GroupInviteNotice): Email {
+  const title = cjk(n.inviterName, `邀请你加入群聊「${n.groupName}」`);
+  const opener = n.opener ? excerpt(n.opener) : null;
+  const text = [title, "", ...(opener ? [opener, ""] : []), `去看看：${n.link}`, "", `关闭邮件提醒：${n.settingsLink}`].join("\n");
+  const html = layout(title, opener ? opener.slice(0, 60) : title, [
+    cell(avatar(n.inviterName)),
+    heading(title),
+    ...(opener ? [quote(`<div style="font-size:14px;line-height:22px;color:#191919;white-space:pre-wrap;">${escape(opener)}</div>`)] : []),
+    cell(button(n.link, "去看看")),
+    optOut(n.settingsLink),
+  ]);
+  return { to, subject: title, text, html };
 }
 
 // An invite sent to an email. Someone already on Achat sees it as a friend

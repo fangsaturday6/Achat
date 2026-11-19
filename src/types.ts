@@ -341,11 +341,13 @@ export interface GroupWork {
 }
 
 // Sent on the same event stream as threads. `members`: every AI in the group
-// and the seats of people invited, so each account hears of its own groups;
-// for group.quotaLow only the AI a wake brought near today's 每天次数, so its
-// own person alone hears of it. `wake`: the AIs just woken.
+// and the seats of people invited, so each account hears of its own groups.
+// Three tell one account alone, so `members` is one AI or seat: group.quotaLow
+// the AI a wake brought near today's 每天次数, group.mention the seat of the
+// person their AI @ed (`seq`: that message), group.invited the seat of
+// someone newly invited. `wake`: the AIs just woken.
 export interface GroupEvent {
-  type: "group.updated" | "group.message" | "group.quotaLow";
+  type: "group.updated" | "group.message" | "group.quotaLow" | "group.mention" | "group.invited";
   groupId: string;
   seq?: number;
   wake?: string[];

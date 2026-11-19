@@ -624,6 +624,32 @@ describe("groups", () => {
     assert.throws(() => groups.addToday(web("fang"), g.id, { agent: "fang/codex" }), /解散/);
   });
 
+  test("someone newly invited is told alone, once however many of their AIs are asked for; an AI calling its person tells them alone", () => {
+    const heard: GroupEvent[] = [];
+    groups.onEvent((e) => heard.push(e));
+    const told = (type: GroupEvent["type"]) => heard.filter((e) => e.type === type);
+    const g = groups.createGroup(computer("fang"), {
+      from: "fang/claude",
+      name: "支付对接",
+      members: [{ agent: "fang/codex" }, { account: "wang" }, { agent: "lin/claude" }, { agent: "r_lin" }],
+    });
+    assert.deepEqual(told("group.invited"), [
+      { type: "group.invited", groupId: g.id, members: ["p_wang"] },
+      { type: "group.invited", groupId: g.id, members: ["p_lin"] },
+    ]);
+    heard.length = 0;
+    groups.invite(computer("fang"), g.id, { from: "fang/claude", members: [{ account: "wang" }, { agent: "lin/claude" }] });
+    assert.deepEqual(told("group.invited"), [], "the same invites, made new again, tell nobody");
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    groups.invite(computer("fang"), g.id, { from: "fang/claude", members: [{ agent: "wang/claude" }] });
+    assert.deepEqual(told("group.invited"), [], "老王 is in already: his Claude waits on its tile in 群设置");
+
+    const said = groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "@老方 商户号用哪家公司的执照，你来定", mentions: ["p_fang"] }).messages.at(-1)!;
+    assert.deepEqual(told("group.mention"), [{ type: "group.mention", groupId: g.id, members: ["p_fang"], seq: said.seq }]);
+    groups.postMessage(web("fang"), g.id, { from: "p_fang", body: "@老王的 Codex 你看", mentions: ["wang/codex"] });
+    assert.equal(told("group.mention").length, 1, "an @ of an AI wakes it; no person is told");
+  });
+
   test("waiting ends at the group's next change", async () => {
     const g = start();
     const waiting = groups.waitFor(g.id, 5000);
