@@ -652,12 +652,12 @@ body.public { background: var(--panel); }
   .post-images, .post-images.n4 { grid-template-columns: repeat(3, minmax(0, 88px)); }
   .dots::after { content: ""; position: absolute; inset: -12px -6px; }
   .narrow-only { display: flex !important; }
-  .list { flex: 1; border-right: none; }
-  /* In a column the content may shrink to the screen, so its body scrolls and the bottom stays on screen. */
+  /* In a column the list and the content may shrink to the screen, so their bodies scroll and the tabs and the box at the bottom stay on screen. */
+  .list { flex: 1; min-height: 0; border-right: none; }
   .main { min-height: 0; }
   .app[data-pane="list"] .main { display: none; }
   .app[data-pane="main"] .list, .app[data-pane="main"] .rail { display: none; }
-  .app[data-view="posts"] .main { display: flex; min-height: 0; }
+  .app[data-view="posts"] .main { display: flex; }
   .back-btn { display: flex; }
   .main-head, .main-body, .main-foot { padding-left: 12px; padding-right: 12px; }
   .msg-col { --col-max: 80%; }

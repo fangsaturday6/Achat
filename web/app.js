@@ -4,6 +4,7 @@
 import { cjk, messageText, SHOWN_TYPES } from "./text.js";
 import {
   ALL,
+  applyPick,
   composeMessage,
   GROUP_STATUS_LABELS,
   groupPreview,
@@ -18,6 +19,7 @@ import {
   RECEIPT_LABELS,
   receiptLine,
   segments,
+  sentByMe,
   settingsTiles,
   tagsOf,
   targetsOf,
@@ -831,7 +833,13 @@ function showMain(title, body, { right, foot, back, center, onContent, flush, ba
   const backLink = back ? h("a", { class: `back-btn icon-btn${backAlways ? " always" : ""}`, href: back, "aria-label": "返回" }, icon("left", 20, 1.8)) : null;
   const head = title === null ? null : h("header", { class: "main-head" }, backLink, h("h1", {}, title), right ?? null);
   const bodyEl = h("div", { class: `main-body${center ? " center" : ""}${onContent ? " on-content" : ""}${flush ? " flush" : ""}` }, body);
-  main.replaceChildren(...[head, bodyEl, foot].filter(Boolean));
+  // A box kept across redraws (a group's) stays on the page while the rest is
+  // swapped: taken off, even for a moment, it would lose its focus and break
+  // off what an input method is composing.
+  if (foot && foot.parentNode === main) {
+    for (const n of [...main.childNodes]) if (n !== foot) n.remove();
+    foot.before(...[head, bodyEl].filter(Boolean));
+  } else main.replaceChildren(...[head, bodyEl, foot].filter(Boolean));
   return bodyEl;
 }
 
@@ -1085,20 +1093,29 @@ function writeBox({ label, status, extra, send }) {
     e.preventDefault();
     take(files.map((f) => (f.type.startsWith("image/") && /^image\.\w+$/.test(f.name) ? new File([f], f.name.replace(/^image/, "截图"), { type: f.type }) : f)));
   });
+  // As in WeChat, what is sent leaves the box at once, so the next message can
+  // be written while this one goes; if it does not go, it comes back, ahead of
+  // anything written meanwhile. 发送 waits until then.
   const go = async () => {
     const text = box.value.trim();
     if ((!text && !picked.length) || button.disabled) return;
     button.disabled = true;
     error.hidden = true;
+    const typed = box.value;
+    const files = picked.splice(0);
+    box.value = "";
+    paint();
     try {
-      await send(text, await Promise.all(picked.map(fileData)));
-      // A box that stays on screen, as a group's does, starts empty again.
-      box.value = "";
-      picked.splice(0);
-      paint();
-      button.disabled = false;
+      await send(text, await Promise.all(files.map(fileData)));
     } catch (err) {
+      const back = box.value ? `${typed.trimEnd()}\n` : typed;
+      const [from, to] = [box.selectionStart, box.selectionEnd];
+      box.value = back + box.value;
+      box.setSelectionRange(from + back.length, to + back.length);
+      picked.unshift(...files);
+      paint();
       showError(err.message);
+    } finally {
       button.disabled = false;
     }
   };
@@ -1119,7 +1136,7 @@ function writeBox({ label, status, extra, send }) {
     error,
     h("div", { class: "write-row" }, status, h("div", { class: "buttons" }, ...(extra ?? []), button)),
   );
-  return { foot, box, take };
+  return { foot, box, button, take };
 }
 
 function renderThread(t) {
@@ -1233,14 +1250,12 @@ function renderGroup(g, r) {
   if (g.role === "invited") return renderInvite(g);
   const main = document.getElementById("main");
   // A redraw of the same group keeps the place the person was reading,
-  // unless they were at the bottom, where the newest stays in view.
+  // unless they were at the bottom, where the newest stays in view, or have
+  // just sent something, which they see as in WeChat.
   const old = main.dataset.group === g.id ? main.querySelector(".main-body") : null;
-  const stick = !old || old.scrollHeight - old.scrollTop - old.clientHeight < 80;
+  const sent = state.composer?.groupId === g.id && state.composer.sent;
+  const stick = !old || sent || old.scrollHeight - old.scrollTop - old.clientHeight < 80;
   const keep = old?.scrollTop ?? 0;
-  // The same box stays across redraws, and so do its focus and caret.
-  const kept = state.composer?.groupId === g.id ? state.composer.box : null;
-  const focused = !!kept && document.activeElement === kept;
-  const caret = kept ? [kept.selectionStart, kept.selectionEnd] : null;
   const more = h(
     "a",
     {
@@ -1252,19 +1267,18 @@ function renderGroup(g, r) {
     },
     icon("more", 20),
   );
+  // The box is the same one across redraws and never leaves the page, so
+  // what is half written, the caret and the focus all stay (see showMain).
   const foot = groupFoot(g);
   const body = showMain(`${g.name}（${g.members.length}）`, groupLog(g, !r.settings), { right: more, foot, back: "#/", drop: state.composer?.take });
   main.dataset.group = g.id;
+  if (state.composer) state.composer.sent = false;
   if (r.settings) {
     body.classList.add("beside-drawer");
     main.append(groupSettings(g));
   }
   body.scrollTop = stick ? body.scrollHeight : keep;
   for (const img of body.querySelectorAll("img")) img.addEventListener("load", () => stick && (body.scrollTop = body.scrollHeight), { once: true });
-  if (focused) {
-    kept.focus();
-    kept.setSelectionRange(...caret);
-  }
 }
 
 // The messages of a group, a time before the first and after each pause.
@@ -1288,7 +1302,7 @@ function groupMessage(g, m) {
   const said = words && m.redactions > 0 ? h("div", { class: "bubble-wrap" }, words, h("span", { class: "muted" }, `已过滤 ${m.redactions} 处`)) : words;
   return h(
     "div",
-    { class: `msg${name.startsWith("我") ? " right" : ""}`, "data-seq": String(m.seq) },
+    { class: `msg${sentByMe(m.sender, g, state.me.account.id, state.agents) ? " right" : ""}`, "data-seq": String(m.seq) },
     avatar(name, 34),
     h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, name), said, ...m.files.map(fileTile), receiptsUnder(m, g.names)),
   );
@@ -1345,26 +1359,29 @@ function groupComposer(first) {
   let g = first;
   const status = h("span", { class: "muted usage" });
   const action = h("span", { class: "group-action" });
-  const { foot, box, take } = writeBox({
+  const { foot, box, button, take } = writeBox({
     label: `发到${first.name}`,
     status,
     extra: [action],
     send: async (text, files) => {
       const { body, mentions } = composeMessage(text, g.members, myName());
       await api("POST", `/api/groups/${encodeURIComponent(g.id)}/messages`, { from: mySeat(), body, mentions, files });
+      composer.sent = true;
       await refresh();
     },
   });
   box.id = "group-input";
+  button.id = "group-send";
   foot.classList.add("group-foot");
-  foot.querySelector(".btn.primary").id = "group-send";
   const picker = mentionPicker(box, () => g);
   foot.append(picker.el);
-  return {
+  const composer = {
     groupId: first.id,
     foot,
     box,
     take,
+    // Just sent: the next redraw goes to the bottom (renderGroup).
+    sent: false,
     update(next) {
       g = next;
       box.setAttribute("aria-label", `发到${g.name}`);
@@ -1373,32 +1390,39 @@ function groupComposer(first) {
       picker.refresh();
     },
   };
+  return composer;
 }
 
 // The list under "@", typed in the box: 所有人 and the AIs in the group.
-// ↑↓ move, Return or Tab picks, Esc closes; a pick writes "@名字 ".
+// ↑↓ move, Return or Tab picks, Esc closes; a pick writes "@名字 ". The list
+// follows the caret when it moves without typing (a click, ←→, Home, End),
+// and with nothing there to pick, Return and Tab do what they always do.
 function mentionPicker(box, groupOf) {
   const el = h("div", { class: "menu mention-picker", role: "listbox", id: "mention-picker", "aria-label": "选择要 @ 的 AI", hidden: true });
-  let at = null;
   let options = [];
-  let active = 0;
+  // The AI lit, by id, so a redraw that reorders the list keeps it; null when
+  // none shown can be picked.
+  let active = null;
   const close = () => {
-    at = null;
+    options = [];
     el.hidden = true;
     box.removeAttribute("aria-activedescendant");
   };
   const pick = (o) => {
-    if (!at || !o || o.disabled) return;
-    box.setRangeText(`@${o.name} `, at.start, box.selectionStart, "end");
+    const next = applyPick(box.value, box.selectionStart, o.name);
     close();
+    if (!next) return;
+    box.value = next.value;
+    box.setSelectionRange(next.caret, next.caret);
     box.focus();
   };
   const paint = () => {
     el.replaceChildren(
       ...options.map((o, i) => {
+        const on = o.id === active;
         const row = h(
           "div",
-          { class: `mention-option${i === active ? " on" : ""}`, role: "option", id: `mention-${i}`, "data-agent": o.id, "aria-selected": String(i === active), "aria-disabled": o.disabled ? "true" : null },
+          { class: `mention-option${on ? " on" : ""}`, role: "option", id: `mention-${i}`, "data-agent": o.id, "aria-selected": String(on), "aria-disabled": o.disabled ? "true" : null },
           o.id === ALL ? groupAvatar(facesOf(groupOf()), 28) : avatar(o.name, 28),
           h("span", { class: "grow" }, o.name),
           o.note ? h("span", { class: "muted" }, o.note) : null,
@@ -1406,55 +1430,64 @@ function mentionPicker(box, groupOf) {
         // mousedown, so the box keeps its focus and caret.
         row.addEventListener("mousedown", (e) => {
           e.preventDefault();
-          pick(o);
+          if (!o.disabled) pick(o);
         });
         return row;
       }),
     );
-    box.setAttribute("aria-activedescendant", `mention-${active}`);
+    const lit = options.findIndex((o) => o.id === active);
+    if (lit >= 0) box.setAttribute("aria-activedescendant", `mention-${lit}`);
+    else box.removeAttribute("aria-activedescendant");
   };
+  // What fits the @ just before the caret, as it is now.
   const refresh = () => {
-    at = mentionAt(box.value, box.selectionStart);
+    const at = mentionAt(box.value, box.selectionStart);
     options = at ? pickerOptions(groupOf().members, at.query) : [];
     if (!options.length) return close();
-    active = Math.min(active, options.length - 1);
+    if (!options.some((o) => o.id === active && !o.disabled)) active = options.find((o) => !o.disabled)?.id ?? null;
     el.hidden = false;
     paint();
   };
   box.addEventListener("input", () => {
-    active = 0;
+    active = null;
     refresh();
   });
+  const follow = () => !el.hidden && refresh();
+  box.addEventListener("click", follow);
+  box.addEventListener("keyup", (e) => ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(e.key) && follow());
   // Ahead of writeBox's own Return, which would send.
   box.addEventListener(
     "keydown",
     (e) => {
       if (el.hidden || e.isComposing) return;
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (e.key === "Escape") {
         e.preventDefault();
-        const step = e.key === "ArrowDown" ? 1 : -1;
-        for (let i = 1; i <= options.length; i++) {
-          const next = (active + step * i + options.length) % options.length;
-          if (!options[next].disabled) {
-            active = next;
-            break;
-          }
-        }
-        paint();
-      } else if (e.key === "Enter" || e.key === "Tab") {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        pick(options[active]);
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        close();
+        return close();
       }
+      if (!["ArrowDown", "ArrowUp", "Enter", "Tab"].includes(e.key)) return;
+      refresh();
+      const lit = options.findIndex((o) => o.id === active);
+      if (lit < 0) return close();
+      e.preventDefault();
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.stopImmediatePropagation();
+        return pick(options[lit]);
+      }
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      for (let i = 1; i < options.length; i++) {
+        const next = options[(lit + step * i + options.length) % options.length];
+        if (!next.disabled) {
+          active = next.id;
+          break;
+        }
+      }
+      paint();
     },
     { capture: true },
   );
-  // A redraw takes the box off the page for a moment; it closes only when the focus really left.
-  box.addEventListener("blur", () => setTimeout(() => document.activeElement !== box && close(), 100));
-  return { el, refresh: () => !el.hidden && refresh() };
+  // Closes when the focus leaves the box; the window losing the focus keeps it.
+  box.addEventListener("blur", () => document.activeElement !== box && close());
+  return { el, refresh: follow };
 }
 
 // Left of the buttons: 已叫停, or the person's AI nearest its 每天次数, which opens 群设置.
@@ -1465,11 +1498,17 @@ function groupStatus(g) {
   return [h("a", { class: `quota-link${q.full ? " full" : ""}`, id: "group-quota-link", href: `#/g/${encodeURIComponent(g.id)}/settings` }, q.text)];
 }
 
-// 叫停 while some AI is reading; 继续 once stopped.
+// 叫停 while some AI is reading; 继续 once stopped. Each is pressed once
+// until the relay answers.
 function groupAction(g) {
   const path = `/api/groups/${encodeURIComponent(g.id)}`;
-  if (g.status === "stopped") return [h("button", { type: "button", class: "btn", id: "group-continue", onclick: () => act(() => api("POST", `${path}/continue`, {})) }, "继续")];
-  if (isAnswering(g)) return [h("button", { type: "button", class: "btn danger", id: "group-stop", onclick: () => act(() => api("POST", `${path}/stop`, {})) }, "叫停")];
+  const button = (id, cls, label, to) => {
+    const b = h("button", { type: "button", class: cls, id }, label);
+    b.addEventListener("click", busy(b, () => act(() => api("POST", `${path}/${to}`, {}))));
+    return b;
+  };
+  if (g.status === "stopped") return [button("group-continue", "btn", "继续", "continue")];
+  if (isAnswering(g)) return [button("group-stop", "btn danger", "叫停", "stop")];
   return [];
 }
 
@@ -1846,19 +1885,17 @@ function renderNewGroup() {
       location.hash = `#/g/${encodeURIComponent(g.id)}`;
     },
   });
-  const { foot, box, take } = draft.writer;
-  const focused = first || document.activeElement === box;
+  const { foot, box, button, take } = draft.writer;
   if (first) {
     box.id = "group-input";
-    foot.querySelector(".btn.primary").id = "group-send";
+    button.id = "group-send";
     box.value = "@所有人 ";
   }
-  const [from, to] = [box.selectionStart, box.selectionEnd];
+  // Redrawn, the box stays on the page with its focus and caret (see showMain).
   showMain(draft.title, h("div"), { foot, back: "#/", drop: take });
-  if (!focused) return;
+  if (!first) return;
   box.focus();
-  if (first) box.setSelectionRange(box.value.length, box.value.length);
-  else box.setSelectionRange(from, to);
+  box.setSelectionRange(box.value.length, box.value.length);
 }
 
 // --- 通讯录
@@ -2324,6 +2361,8 @@ async function loadPeople() {
 }
 
 async function refresh() {
+  // This draws whatever an event held back; closing a menu below must not ask for it again.
+  heldRedraw = false;
   const r = route();
   if (r.view === "start") return renderStart(r.id);
   if (r.view === "posts" && !cloud) {
@@ -2396,7 +2435,8 @@ function startApp() {
     void refresh();
   });
   // Someone may have asked to be friends while the page sat in the background.
-  window.addEventListener("focus", () => route().view !== "start" && void refresh());
+  // Drawn as an event is, so it waits for an open panel or a changed field too.
+  window.addEventListener("focus", () => route().view !== "start" && redrawFromEvent());
   const events = new EventSource(cloud ? "/api/events" : `/api/events?token=${encodeURIComponent(token)}`);
   let pending = null;
   events.onmessage = () => {
@@ -2411,12 +2451,20 @@ function startApp() {
 }
 
 // An event redraws the page, but not under a menu or panel that is open, nor
-// while a field marked data-hold has the focus: the redraw would throw them
-// away. It comes once they close.
+// while the person is changing a field marked data-hold: the redraw would
+// throw them away. It comes once they close it or leave the field. A field
+// they only clicked into, changing nothing, holds nothing back.
 let heldRedraw = false;
 
+// A field keeps what it first showed as its defaultValue: h() sets value as
+// the attribute.
+function changing() {
+  const field = document.activeElement;
+  return !!field?.closest("[data-hold]") && field.value !== field.defaultValue;
+}
+
 function redrawFromEvent() {
-  if (closeOpenMenu || document.activeElement?.closest("[data-hold]")) {
+  if (closeOpenMenu || changing()) {
     heldRedraw = true;
     return;
   }

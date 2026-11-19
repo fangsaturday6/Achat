@@ -4,8 +4,9 @@
 // same as src/types.ts and src/relay/groups.ts.
 import { cjk, messageText } from "./text.js";
 
-// "@所有人" in a message's mentions (ALL in src/types.ts).
+// "@所有人" in a message's mentions (ALL in src/types.ts), and as it is written.
 export const ALL = "all";
+const EVERYONE = "所有人";
 
 // What became of an AI a message called on (RECEIPT_LABELS in src/types.ts).
 export const RECEIPT_LABELS = {
@@ -124,16 +125,21 @@ export function receiptLine(receipts, names) {
 // computer is off, and last, grayed out, those that cannot answer yet.
 // `query`: what was typed after the @.
 export function pickerOptions(members, query = "") {
-  const q = query.toLowerCase();
-  const fits = (name) => !q || name.toLowerCase().includes(q);
   const rank = (m) => (!m.canReceive ? 3 : !m.online ? 2 : m.quota !== undefined ? 1 : 0);
   const ais = members
     .map((m, i) => ({ m, i }))
-    .filter(({ m }) => fits(m.name))
+    .filter(({ m }) => fits(m.name, query))
     .sort((a, b) => rank(a.m) - rank(b.m) || a.i - b.i)
     .map(({ m }) => ({ id: m.agent, name: m.name, note: !m.canReceive ? "还不能接收" : !m.online ? "不在线" : null, disabled: !m.canReceive }));
-  const everyone = fits("所有人") || "all".startsWith(q) ? [{ id: ALL, name: "所有人", note: null, disabled: false }] : [];
+  const everyone = fits(EVERYONE, query) ? [{ id: ALL, name: EVERYONE, note: null, disabled: false }] : [];
   return [...everyone, ...ais];
+}
+
+// Whether the list under "@" shows `name` for what was typed after the @;
+// 所有人 also for "all".
+function fits(name, query) {
+  const q = query.toLowerCase();
+  return !q || name.toLowerCase().includes(q) || (name === EVERYONE && "all".startsWith(q));
 }
 
 // The @ being typed just before the caret, and what follows it; null when
@@ -146,30 +152,67 @@ export function mentionAt(text, caret) {
   return /\n|\s$/.test(query) || query.length > 30 ? null : { start: at, query };
 }
 
+// The box once `name` is picked from the list under "@": the @ being typed
+// before the caret becomes "@名字 ", the caret after it. Worked out from where
+// the caret is now, which a click or an arrow key may have moved since the
+// list opened; null when no @ there is one `name` fits.
+export function applyPick(value, caret, name) {
+  const at = mentionAt(value, caret);
+  if (!at || !fits(name, at.query)) return null;
+  const tag = `@${name} `;
+  return { value: value.slice(0, at.start) + tag + value.slice(caret), caret: at.start + tag.length };
+}
+
 // What the person wrote, as it goes into the group: the AIs it @s (所有人
 // first, then in the order written), and each "@我的 Claude" written from
-// nobody's side ("@老方的 Claude"), as the AIs write. Longer names first, so
-// "@老王的 Codex（iMac）" is not also taken for "@老王的 Codex".
+// nobody's side ("@老方的 Claude"), as the AIs write. Each AI is found by
+// either name, in one pass, longer names first, so "@老王的 Codex（iMac）"
+// is not also taken for "@老王的 Codex".
 export function composeMessage(text, members, myName) {
-  let marked = text.trim();
-  for (const m of [...members].sort((a, b) => b.name.length - a.name.length)) {
-    marked = marked.replaceAll(`@${m.name}`, `@\u0000${m.agent}\u0000`);
+  const byName = new Map();
+  for (const m of members) byName.set(m.name, m);
+  for (const m of members) {
+    const plain = plainName(m.name, myName);
+    if (!byName.has(plain)) byName.set(plain, m);
   }
-  const mentions = marked.includes("@所有人") ? [ALL] : [];
-  const body = marked.replace(/@\u0000([^\u0000]*)\u0000/g, (_, id) => {
-    if (!mentions.includes(id)) mentions.push(id);
-    return `@${plainName(members.find((m) => m.agent === id).name, myName)}`;
+  const names = [EVERYONE, ...byName.keys()].sort((a, b) => b.length - a.length);
+  const tag = new RegExp(`@(${names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})`, "g");
+  let all = false;
+  const ais = [];
+  const body = text.trim().replace(tag, (_, name) => {
+    if (name === EVERYONE) {
+      all = true;
+      return `@${EVERYONE}`;
+    }
+    const m = byName.get(name);
+    if (!ais.includes(m.agent)) ais.push(m.agent);
+    return `@${plainName(m.name, myName)}`;
   });
-  return { body, mentions };
+  return { body, mentions: all ? [ALL, ...ais] : ais };
 }
 
 // The person's AI nearest its 每天次数, for the bottom of the group: "我的
-// Claude 今天 12 / 30 次". `full` once it is used up. Null without one.
+// Claude 今天 12 / 30 次". Nearest is the fewest times left; of those, the
+// one with more of its share used. `full` once it is used up. Null without one.
 export function quotaLine(members) {
   const mine = members.filter((m) => m.quota !== undefined);
   if (!mine.length) return null;
-  const m = mine.reduce((a, b) => (b.usedToday / b.quota > a.usedToday / a.quota ? b : a));
+  const left = (m) => m.quota - m.usedToday;
+  const nearer = (a, b) => left(b) < left(a) || (left(b) === left(a) && b.usedToday / b.quota > a.usedToday / a.quota);
+  const m = mine.reduce((a, b) => (nearer(a, b) ? b : a));
   return { agent: m.agent, text: `${m.name} 今天 ${m.usedToday} / ${m.quota} 次`, full: m.usedToday >= m.quota };
+}
+
+// Whether a message in the group is the person's own, shown on the right:
+// from their seat, or from one of their AIs. An AI that left the group is
+// found in `agents` (the person's and their friends', from /api/agents), and
+// one gone from there too by its name from the person's side, "我的 Claude",
+// the one trace of it left.
+export function sentByMe(sender, g, me, agents) {
+  if (sender === `p_${me}`) return true;
+  const owner = g.members.find((m) => m.agent === sender)?.owner ?? agents.get(sender)?.owner;
+  if (owner !== undefined) return owner === me;
+  return (g.names[sender] ?? "").startsWith("我的");
 }
 
 // Some AI is reading a message right now: 叫停 shows.

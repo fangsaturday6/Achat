@@ -136,6 +136,39 @@ test("the @ being typed is found just before the caret", () => {
   assert.equal(page.mentionAt("@老王的 Codex ", 11), null, "a space after a name ends it");
 });
 
+test("a pick writes the name over the @ before the caret, wherever the caret went since the list opened", () => {
+  // "请 @老 看看", typed with the caret after 老 (4).
+  assert.deepEqual(page.applyPick("请 @老 看看", 4, "老王的 Codex"), { value: "请 @老王的 Codex  看看", caret: 13 });
+  assert.equal(page.applyPick("请 @老 看看", 1, "老王的 Codex"), null, "the caret moved in front of the @");
+  assert.equal(page.applyPick("请 @老 看看", 7, "老王的 Codex"), null, "the caret moved to the end: 看看 is not part of a name");
+  assert.deepEqual(page.applyPick("@al", 3, "所有人"), { value: "@所有人 ", caret: 5 }, "所有人 is also found by all");
+  assert.deepEqual(page.applyPick("看 @老王的 c", 8, "老王的 Codex"), { value: "看 @老王的 Codex ", caret: 13 });
+});
+
+test("whose a message in a group is: the person's seat and their AIs, those that left too", () => {
+  const g = {
+    members: [
+      { agent: "f/claude", name: "我的 Claude", owner: "fang" },
+      { agent: "x/claude", name: "我爱罗的 Claude", owner: "xia" },
+    ],
+    names: { p_fang: "我", "f/claude": "我的 Claude", "x/claude": "我爱罗的 Claude", p_xia: "我爱罗", "f/codex": "我的 Codex", "x/codex": "我爱罗的 Codex", gone: "我的豆包" },
+  };
+  // The person's AIs and their friends' (/api/agents): those that left the group are still here.
+  const agents = new Map([
+    ["f/codex", { owner: "fang" }],
+    ["x/codex", { owner: "xia" }],
+  ]);
+  const mine = (sender: string) => page.sentByMe(sender, g, "fang", agents);
+  assert.equal(mine("p_fang"), true, "the person's own seat");
+  assert.equal(mine("f/claude"), true, "their AI in the group");
+  assert.equal(mine("x/claude"), false, "a friend named 我爱罗: his AI");
+  assert.equal(mine("p_xia"), false, "and himself");
+  assert.equal(mine("f/codex"), true, "their AI that left the group");
+  assert.equal(mine("x/codex"), false, "a friend's AI that left");
+  // Gone from the group and from the person's AIs: its name is all that is left.
+  assert.equal(mine("gone"), true);
+});
+
 test("what the person writes goes in with its @s, each AI named from nobody's side", () => {
   assert.deepEqual(page.composeMessage(" @我的 Claude 和 @老王的 Codex 看看，@所有人 也说说 ", MEMBERS, "老方"), {
     body: "@老方的 Claude 和 @老王的 Codex 看看，@所有人 也说说",
@@ -143,7 +176,18 @@ test("what the person writes goes in with its @s, each AI named from nobody's si
   });
   const twins = [...MEMBERS, { agent: "w2/codex", name: "老王的 Codex（iMac）", canReceive: true, online: true }];
   assert.deepEqual(page.composeMessage("@老王的 Codex（iMac） 你呢", twins, "老方").mentions, ["w2/codex"]);
+  assert.deepEqual(page.composeMessage("@老王的 Codex 和 @老王的 Codex（iMac） 和 @老王的 Codex", twins, "老方"), {
+    body: "@老王的 Codex 和 @老王的 Codex（iMac） 和 @老王的 Codex",
+    mentions: ["w/codex", "w2/codex"],
+  });
   assert.deepEqual(page.composeMessage("没有点名", MEMBERS, "老方"), { body: "没有点名", mentions: [] });
+  // Typed from nobody's side, as the AIs write it.
+  assert.deepEqual(page.composeMessage("@老方的 Claude 你看", MEMBERS, "老方"), { body: "@老方的 Claude 你看", mentions: ["f/claude"] });
+  // Whatever the words hold, nothing in them is taken for an @.
+  assert.deepEqual(page.composeMessage("@\u0000nobody\u0000 和 \u0000 @老王的 Codex", MEMBERS, "老方"), {
+    body: "@\u0000nobody\u0000 和 \u0000 @老王的 Codex",
+    mentions: ["w/codex"],
+  });
 });
 
 test("the bottom names the person's AI nearest its 每天次数, red once used up; 叫停 shows while an AI reads", () => {
@@ -151,6 +195,13 @@ test("the bottom names the person's AI nearest its 每天次数, red once used u
   const two = [MEMBERS[0], { agent: "f/codex", name: "我的 Codex", canReceive: true, online: true, quota: 5, usedToday: 5 }];
   assert.deepEqual(page.quotaLine(two), { agent: "f/codex", text: "我的 Codex 今天 5 / 5 次", full: true });
   assert.equal(page.quotaLine(MEMBERS.slice(1)), null);
+  // Nearest is the fewest times left, not the most used by share.
+  const big = { agent: "f/claude", name: "我的 Claude", canReceive: true, online: true, quota: 500, usedToday: 400 };
+  const small = { agent: "f/codex", name: "我的 Codex", canReceive: true, online: true, quota: 5, usedToday: 0 };
+  assert.equal(page.quotaLine([big, small]).agent, "f/codex");
+  // As many left: the one with more of its share used.
+  assert.equal(page.quotaLine([{ ...big, quota: 20, usedToday: 10 }, { ...small, quota: 100, usedToday: 90 }]).agent, "f/codex");
+  assert.equal(page.quotaLine([{ ...small, quota: 100, usedToday: 90 }, { ...big, quota: 20, usedToday: 10 }]).agent, "f/codex");
   const msg = (state: string) => ({ receipts: [{ agent: "c/codex", state, reason: null }] });
   assert.equal(page.isAnswering({ status: "open", messages: [msg("passed"), msg("reading")] }), true);
   assert.equal(page.isAnswering({ status: "open", messages: [msg("passed")] }), false);
