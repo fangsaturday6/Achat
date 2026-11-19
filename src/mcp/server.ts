@@ -11,7 +11,7 @@ import { canDo, type AgentConfig } from "../config.js";
 import { cjk } from "../text.js";
 import { ownerOf, pendingMessage, requestReason, requestTitle, scopeLine, speaker, withFileNames } from "../asking.js";
 import { redact } from "../redact.js";
-import { markTaskSeen, TaskBook } from "../sidecar/tasks.js";
+import { markTaskSeen, TaskBook, taskFor, type TaskFor } from "../sidecar/tasks.js";
 import { EFFORT_LABELS, EFFORTS, resolveUse, useLine, type AgentModels, type Effort } from "../models.js";
 import {
   ALL,
@@ -55,6 +55,10 @@ export interface McpOptions {
   // Reads a picture on this computer for create_post. Without it create_post
   // takes no pictures (AIs that connect by address have no files here).
   readImage?: (path: string) => Promise<{ type: string; data: Buffer }>;
+  // The 动手 this conversation does, by its key in the TaskBook (TaskBook.at
+  // of the folder it runs in); null for any other session, such as the one
+  // its person talks to.
+  task?: () => string | null;
 }
 
 const IMAGE_TYPES: Record<string, string> = {
@@ -116,6 +120,11 @@ function modelsLine(models: AgentModels): string {
 
 export function createMcpServer(opts: McpOptions): McpServer {
   const waitMs = (opts.waitSeconds ?? 540) * 1000;
+  // What this conversation does 动手 for: a thread, or an asker in a group.
+  const doing = (): TaskFor | null => {
+    const key = opts.task?.();
+    return key ? taskFor(key) : null;
+  };
   const server = new McpServer(
     { name: "achat", version: "0.0.1" },
     {
@@ -387,6 +396,10 @@ export function createMcpServer(opts: McpOptions): McpServer {
     },
     guard(async ({ thread_id, message, files }: { thread_id: string; message: string; files?: string[] }, extra) => {
       const c = opts.connection();
+      // A 动手 conversation hands back to what it works for, and speaks nowhere else.
+      const doer = doing();
+      if (doer && "group" in doer) return text(`${await doingFor(c, doer)}，结果用 send_group_message（group: ${doer.group}）发回群里。`, true);
+      if (doer && doer.thread !== thread_id) return text(`你在替协作 ${doer.thread} 动手，只能在这条协作里交回结果（thread_id: ${doer.thread}）。`, true);
       const outgoing = files?.length ? readFiles(files) : undefined;
       // What the asked side sends out, a 动手 result above all, is filtered
       // like a background answer.
@@ -795,6 +808,12 @@ export function createMcpServer(opts: McpOptions): McpServer {
     return (await c.client.agents()).find((a) => a.client === "person" && a.name === "我")?.id ?? null;
   }
 
+  // "你在替群「网关」里的老王的 Codex 动手": the group and asker a 动手 conversation works for.
+  async function doingFor(c: McpConnection, task: { group: string; asker: string }): Promise<string> {
+    const d = await c.client.group(task.group).catch(() => null);
+    return cjk(`你在替群「${d?.name ?? task.group}」里的${d?.names[task.asker] ?? task.asker}`, "动手");
+  }
+
   // The AI has now been shown the group up to its latest message, so replies
   // in it are no news for its session (8n, as 8e for threads).
   async function groupSeen(c: McpConnection, d: GroupDetail): Promise<void> {
@@ -863,7 +882,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
       description:
         "在主人的 AI 所在的群里说话。不 @ 就不叫醒任何 AI；@ 某个 AI 叫醒它，@所有人叫醒群里所有能回答的 AI，要主人本人拿主意就 @主人。" +
         "@ 了 AI 会等它们回复、说“无需回复”或显示不在线，再把原文带回；没 @ 立刻返回。被 @ 的 AI 要动手时不等它做完，结果会发回群里并 @ 你。" +
-        "替别人动手、做完把结果发回群里时，照提示填 reply_to 和 wait: false。",
+        "替别人动手、做完把结果发回群里时，照提示填 reply_to 和 wait: false；在动手的对话里只能发到那个群，reply_to 不填就是正在做的那条。",
       inputSchema: {
         group: z.string().describe("群名或群 id"),
         message: z.string().describe("要说的话"),
@@ -876,11 +895,25 @@ export function createMcpServer(opts: McpOptions): McpServer {
     guard(async ({ group, message, mentions, files, reply_to, wait }: { group: string; message: string; mentions?: string[]; files?: string[]; reply_to?: number; wait?: boolean }, extra) => {
       const c = opts.connection();
       if (c.mode !== "cloud") return text(GROUPS_NEED_ACCOUNT, true);
+      // A 动手 conversation read what others asked: it only sends back its
+      // work, to the group it works for, as the result of a request under
+      // way, so its words never start another of its person's AIs as theirs.
+      const task = doing();
+      if (task && "thread" in task) return text(`你在替协作 ${task.thread} 动手，结果用 send_message（thread_id: ${task.thread}）交回，不能在群里说话。`, true);
       const g = await resolveGroup(c, group);
+      if (task && g.id !== task.group) return text(`${await doingFor(c, task)}，只能把结果发回这个群（group: ${task.group}）。`, true);
       const before = await c.client.group(g.id);
       if (!before.members.some((m) => m.agent === c.agentId)) {
         const me = (await c.client.agents()).find((a) => a.id === c.agentId)?.name ?? c.agentId;
         return text(`你不在「${g.name}」里，先用 invite_to_group 把自己拉进来（members 填「${me}」）`, true);
+      }
+      let replyTo = reply_to;
+      if (task) {
+        const underWay = before.messages.filter((m) => m.sender === task.asker && m.receipts.some((r) => r.agent === c.agentId && r.state === "acting")).map((m) => m.seq);
+        const latest = underWay.at(-1);
+        if (latest === undefined) return text("这次动手没有正在做的请求了，不用再发：对方要改会再 @ 你。", true);
+        if (replyTo === undefined) replyTo = latest;
+        else if (!underWay.includes(replyTo)) return text(`reply_to 要填这次动手正在做的请求：第 ${latest} 条。`, true);
       }
       const ids = mentionIds(before, mentions ?? [], c.agentId, await ownSeat(c));
       // Answers to what it said here before that it has not been shown: this
@@ -894,7 +927,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
         body: message,
         mentions: ids,
         files: files?.length ? readFiles(files) : undefined,
-        ...(reply_to !== undefined ? { replyTo: reply_to, epoch: before.epoch } : {}),
+        ...(replyTo !== undefined ? { replyTo, epoch: before.epoch } : {}),
       });
       const seq = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!.seq;
       // What it was shown is seen, unless it missed earlier answers or the call was given up.

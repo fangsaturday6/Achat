@@ -12,7 +12,7 @@ import type { Alerter, Asker, Asking, Chooser, Choosing } from "./dialog.js";
 import { LoginWait } from "./login-wait.js";
 import type { Notifier } from "./notify.js";
 import { BudgetExceededError, LoginExpiredError, SessionLostError, type AgentRunner, type RunOutput } from "./runners.js";
-import { TaskBook, type TaskOpener, type TaskRecord, type TaskStart } from "./tasks.js";
+import { actKey, TaskBook, type TaskOpener, type TaskRecord, type TaskStart } from "./tasks.js";
 
 const RELOGIN = {
   claude: "打开 Claude Code 发一句话就能恢复，等着的问题会自动接着回答。运行一次 achat claude-token 就不会再过期。",
@@ -224,12 +224,6 @@ export function groupSystemPrompt(me: AgentConfig, name: string, owner: string, 
 function askedToAct(work: GroupWork, agent: string): boolean {
   const state = work.wake.receipts.find((r) => r.agent === agent)?.state;
   return state === "asking" || state === "acting";
-}
-
-// One conversation does what one asker asks of one AI in a group, across
-// its acts, in one folder: what the TaskBook keeps it by.
-export function actKey(groupId: string, asker: string, doer: string): string {
-  return `${groupId}~${asker}~${doer}`;
 }
 
 // The AI's own name as the group's members list has it (nobody's side).
@@ -1363,7 +1357,7 @@ export class Sidecar {
   // what it was given (up to `given`), so one that never opened is taken up
   // again.
   private async openWork(key: string, opener: TaskOpener, given: number, start: TaskStart): Promise<TaskRecord> {
-    const rec = await opener.open(start);
+    const rec = await opener.open({ ...start, claim: (dir) => this.tasks.claim(key, dir) });
     this.tasks.set(key, rec);
     this.tasks.markSeen(key, given);
     this.log(`${start.threadId} 在新对话里动手：${rec.dir}`);

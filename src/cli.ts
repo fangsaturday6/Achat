@@ -86,6 +86,7 @@ async function main(): Promise<void> {
         process.exit(1);
       }
       const { createMcpServer, readLocalImage } = await import("./mcp/server.js");
+      const { TaskBook } = await import("./sidecar/tasks.js");
       const { startLink } = await import("./link.js");
       const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
       const server = createMcpServer({
@@ -95,6 +96,8 @@ async function main(): Promise<void> {
         },
         link: (url) => startLink(url),
         readImage: readLocalImage,
+        // A 动手 conversation runs in the folder it works in.
+        task: () => new TaskBook().at(process.cwd()),
       });
       await server.connect(new StdioServerTransport());
       return;

@@ -10,12 +10,13 @@ import { userPromptHook } from "../src/hook.js";
 import { createMcpServer } from "../src/mcp/server.js";
 import type { Answer } from "../src/sidecar/dialog.js";
 import { Sidecar } from "../src/sidecar/sidecar.js";
-import { TaskBook, type TaskOpener, type TaskRecord, type TaskStart } from "../src/sidecar/tasks.js";
+import { actKey, TaskBook, type TaskOpener, type TaskRecord, type TaskStart } from "../src/sidecar/tasks.js";
 import { addComputer, type Browser, JudgingRunner, logIn, ScriptedRunner, startTestCloud, until } from "./helpers.js";
 
-async function mcp(client: RelayClient, agentId: string): Promise<Client> {
+// `task`: the 动手 it does, as a 动手 conversation's MCP server finds in the TaskBook.
+async function mcp(client: RelayClient, agentId: string, task: string | null = null): Promise<Client> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  await createMcpServer({ connection: () => ({ client, agentId, webUrl: "https://achat.test", mode: "cloud" }), waitSeconds: 10 }).connect(serverSide);
+  await createMcpServer({ connection: () => ({ client, agentId, webUrl: "https://achat.test", mode: "cloud" }), waitSeconds: 10, task: () => task }).connect(serverSide);
   const c = new Client({ name: "test", version: "1" });
   await c.connect(clientSide);
   return c;
@@ -362,6 +363,72 @@ test("waiting on its own person, the AI asking hears its other AI waits for 你�
     const asker = await mcp(wangLaptop.client, wangCodex);
     const waiting = textOf(await asker.callTool({ name: "send_group_message", arguments: { group: g.id, message: "@我的 Claude 再动手改一处", mentions: ["我的 Claude"] } }));
     assert.match(waiting, /我的 Claude 等你的主人同意动手/);
+  } finally {
+    sidecar.stop();
+    await cloud.close();
+  }
+});
+
+test("a 动手 conversation speaks only in the group it works for, and only to send back a request under way, reply_to filled in for it", async () => {
+  const { cloud, mailer } = await startTestCloud();
+  const fang = await logIn(cloud, mailer, "fang@example.com", "老方");
+  const wang = await logIn(cloud, mailer, "wang@example.com", "老王");
+  await befriend(fang, wang, "wang@example.com");
+  const fangMac = await addComputer(cloud, fang, "MacBook", ["claude"]);
+  const wangLaptop = await addComputer(cloud, wang, "ThinkPad", ["codex"]);
+  const claude = fangMac.agent("claude");
+  const wangCodex = wangLaptop.agent("codex");
+  const fangId = (await fang.call("GET", "/api/me")).account.id;
+  const wangId = (await wang.call("GET", "/api/me")).account.id;
+  const opener = new FakeOpener();
+  const answers: ((a: Answer) => void)[] = [];
+  const sidecar = new Sidecar({
+    client: fangMac.client,
+    agents: [],
+    runners: { [claude]: new JudgingRunner([], ["do"]) },
+    doers: { [claude]: opener },
+    tasks: new TaskBook(mkdtempSync(join(tmpdir(), "achat-tasks-"))),
+    ask: () => {
+      let resolve!: (a: Answer) => void;
+      const answer = new Promise<Answer>((r) => (resolve = r));
+      answers.push(resolve);
+      return { answer, close: () => resolve("later") };
+    },
+    notify: () => {},
+    webUrl: cloud.url,
+    log: () => {},
+  });
+  sidecar.start();
+  try {
+    const g = await wangLaptop.client.createGroup({ from: wangCodex, name: "网关", members: [{ account: fangId }] });
+    const invite = (await fang.call("GET", "/api/groups")).find((s: any) => s.id === g.id).myInvite;
+    await fang.call("POST", `/api/groups/${g.id}/invites/${invite.id}/accept`, { agents: [claude] });
+    await fangMac.client.createGroup({ from: claude, name: "别的群", members: [{ account: wangId }] });
+    await until(async () => (await wang.call("GET", `/api/groups/${g.id}`)).members.find((m: any) => m.agent === claude)?.online);
+    const seq = (await wangLaptop.client.postGroupMessage(g.id, { from: wangCodex, body: "@老方的 Claude 请你在网关加验签", mentions: [claude] })).messages.at(-1)!.seq;
+    await until(async () => answers[0]);
+    answers[0]("approve");
+    await until(async () => opener.starts.length === 1);
+
+    const doer = await mcp(fangMac.client, claude, actKey(g.id, wangCodex, claude));
+    const send = (args: Record<string, unknown>) => doer.callTool({ name: "send_group_message", arguments: { message: "@老王的 Codex 加好了", mentions: ["老王的 Codex"], wait: false, ...args } });
+    const elsewhere = await send({ group: "别的群" });
+    assert.equal(elsewhere.isError, true);
+    assert.equal(textOf(elsewhere), `你在替群「网关」里的老王的 Codex 动手，只能把结果发回这个群（group: ${g.id}）。`);
+    const wrong = await send({ group: g.id, reply_to: 1 });
+    assert.equal(wrong.isError, true);
+    assert.equal(textOf(wrong), `reply_to 要填这次动手正在做的请求：第 ${seq} 条。`);
+    assert.equal(textOf(await send({ group: g.id })), `已发到群「网关」（${g.id}），不等回复。`);
+    const after = await wangLaptop.client.group(g.id);
+    assert.equal(after.messages.find((m) => m.seq === seq)!.receipts[0].state, "replied");
+    assert.equal(after.messages.at(-1)!.replyTo, seq);
+    const done = await send({ group: g.id });
+    assert.equal(done.isError, true);
+    assert.equal(textOf(done), "这次动手没有正在做的请求了，不用再发：对方要改会再 @ 你。");
+    // Nor does it speak in a thread: its work goes back to the group.
+    const thread = await doer.callTool({ name: "send_message", arguments: { thread_id: "t_1", message: "好了" } });
+    assert.equal(thread.isError, true);
+    assert.equal(textOf(thread), `你在替群「网关」里的老王的 Codex 动手，结果用 send_group_message（group: ${g.id}）发回群里。`);
   } finally {
     sidecar.stop();
     await cloud.close();

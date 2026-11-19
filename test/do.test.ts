@@ -11,7 +11,7 @@ import { createMcpServer } from "../src/mcp/server.js";
 import type { RunningRelay } from "../src/relay/server.js";
 import type { Answer, ApprovalPrompt } from "../src/sidecar/dialog.js";
 import { doerSystemPrompt, Sidecar } from "../src/sidecar/sidecar.js";
-import { backgroundId, claudeTaskArgs, codexSessionId, codexTaskArgs, CodexTaskOpener, TaskBook, taskDir, type TaskOpener, type TaskRecord, type TaskStart } from "../src/sidecar/tasks.js";
+import { actKey, backgroundId, claudeTaskArgs, codexSessionId, codexTaskArgs, CodexTaskOpener, TaskBook, taskDir, taskFor, type TaskOpener, type TaskRecord, type TaskStart } from "../src/sidecar/tasks.js";
 import { codexCommand } from "../src/which.js";
 import { CLAUDE, CODEX, JudgingRunner, ScriptedRunner, startTestRelay, until } from "./helpers.js";
 
@@ -247,6 +247,23 @@ test("what a conversation was handed only moves forward", () => {
   assert.equal(book.seen("t"), 5);
 });
 
+test("the folder a 动手 conversation works in says which 动手 it is, the latest claimed if a folder was used again", () => {
+  const book = new TaskBook(mkdtempSync(join(tmpdir(), "achat-book-")));
+  const root = mkdtempSync(join(tmpdir(), "achat-root-"));
+  const [a, b] = [join(root, "支付对接"), join(root, "画图")];
+  for (const dir of [a, b]) mkdirSync(dir);
+  assert.equal(book.at(a), null);
+  book.claim("t_1", a);
+  book.claim(actKey("g_1", "wang/codex", "fang/claude"), b);
+  assert.equal(book.at(a), "t_1");
+  assert.equal(book.at(join(b, ".")), "g_1~wang/codex~fang/claude");
+  assert.deepEqual(taskFor(book.at(b)!), { group: "g_1", asker: "wang/codex", doer: "fang/claude" });
+  assert.deepEqual(taskFor("t_1"), { thread: "t_1" });
+  assert.equal(book.at(root), null, "nor any other folder");
+  book.claim("t_2", a);
+  assert.equal(book.at(a), "t_2");
+});
+
 test("Codex works in its folder with nobody to approve commands: online only between one person's own AIs, and a later run resumes", () => {
   const first = codexTaskArgs({ threadId: "t1", topic: "画图", prompt: "画", systemPrompt: "规则" });
   assert.deepEqual(first.slice(0, 2), ["exec", "--skip-git-repo-check"]);
@@ -301,9 +318,11 @@ describe("a Codex conversation for 动手", () => {
     const scripts = mkdtempSync(join(tmpdir(), "achat-scripts-"));
     const root = mkdtempSync(join(tmpdir(), "achat-root-"));
     const opener = new CodexTaskOpener(fakeCodex("echo codex; echo 在画了"), scripts, root, false, 10_000);
-    const rec = await opener.open({ threadId: "t9", topic: "画小刘", prompt: "照设定图做 3D", systemPrompt: "规则" });
+    const claimed: string[] = [];
+    const rec = await opener.open({ threadId: "t9", topic: "画小刘", prompt: "照设定图做 3D", systemPrompt: "规则", claim: (dir) => claimed.push(dir) });
     assert.equal(rec.sessionId, "0199aaaa-bbbb-cccc");
     assert.equal(rec.dir, join(root, "画小刘"));
+    assert.deepEqual(claimed, [rec.dir], "its folder is told before it starts");
     await until(async () => {
       const logs = readdir(scripts).filter((f) => f.endsWith(".log"));
       return logs.length === 1 && /在画了/.test(readFileSync(join(scripts, logs[0]), "utf8"));

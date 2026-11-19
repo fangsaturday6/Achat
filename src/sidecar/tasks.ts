@@ -1,7 +1,7 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { achatHome } from "../config.js";
 import { isEffort, type Effort } from "../models.js";
@@ -65,6 +65,65 @@ export class TaskBook {
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     writeFileSync(this.file(threadId, "seen"), String(seq));
   }
+
+  // Which 动手 works in `dir`, written before its conversation starts.
+  // Achat's MCP server and hook in it run in that folder (Claude Code's
+  // background sessions and `codex exec` alike), so from their first call
+  // they know which 动手 they are in (at). Not an environment variable:
+  // `claude --bg` sessions all take the one of whoever started its daemon.
+  claim(key: string, dir: string): void {
+    mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    writeFileSync(this.file(key, "dir"), JSON.stringify({ key, dir }));
+  }
+
+  // The 动手 whose conversation works in `dir`: its key (a thread's id, or
+  // actKey), the latest claimed if a folder was used again; null for any
+  // other folder, such as the person's own sessions.
+  at(dir: string): string | null {
+    const here = realPath(dir);
+    let found: { key: string; at: number } | null = null;
+    let names: string[] = [];
+    try {
+      names = readdirSync(this.dir).filter((n) => n.endsWith(".dir"));
+    } catch {
+      return null;
+    }
+    for (const name of names) {
+      try {
+        const file = join(this.dir, name);
+        const c = JSON.parse(readFileSync(file, "utf8")) as { key?: unknown; dir?: unknown };
+        if (typeof c.key !== "string" || typeof c.dir !== "string" || realPath(c.dir) !== here) continue;
+        const at = statSync(file).mtimeMs;
+        if (!found || at >= found.at) found = { key: c.key, at };
+      } catch {
+        // Half written or gone: not this one.
+      }
+    }
+    return found?.key ?? null;
+  }
+}
+
+function realPath(dir: string): string {
+  try {
+    return realpathSync(dir);
+  } catch {
+    return resolve(dir);
+  }
+}
+
+// One conversation does what one asker asks of one AI in a group, across
+// its acts, in one folder: what the TaskBook keeps it by.
+export function actKey(groupId: string, asker: string, doer: string): string {
+  return `${groupId}~${asker}~${doer}`;
+}
+
+// What a 动手 conversation works for, from its TaskBook key: a thread, or
+// one asker's acts of one AI in a group (actKey; ids never have "~").
+export type TaskFor = { thread: string } | { group: string; asker: string; doer: string };
+
+export function taskFor(key: string): TaskFor {
+  const [group, asker, doer] = key.split("~");
+  return doer === undefined ? { thread: key } : { group, asker, doer };
 }
 
 // For Achat's MCP server inside the conversation.
@@ -97,6 +156,9 @@ export interface TaskStart {
   model?: string;
   label?: string;
   effort?: Effort;
+  // Told the folder it works in before the conversation starts, so what is
+  // in there knows which 动手 it is (TaskBook.claim).
+  claim?: (dir: string) => void;
 }
 
 // What a task's record keeps of what it works with.
@@ -168,6 +230,7 @@ export class ClaudeTaskOpener implements TaskOpener {
   async open(start: TaskStart): Promise<TaskRecord> {
     const dir = start.from?.dir ?? taskDir(start.topic, start.threadId, this.root);
     mkdirSync(dir, { recursive: true });
+    start.claim?.(dir);
     const claude = commandPath(this.command);
     const output = await capture(claude, claudeTaskArgs(start), dir);
     const id = backgroundId(output);
@@ -230,6 +293,7 @@ export class CodexTaskOpener implements TaskOpener {
   async open(start: TaskStart): Promise<TaskRecord> {
     const dir = start.from?.dir ?? taskDir(start.topic, start.threadId, this.root);
     mkdirSync(dir, { recursive: true });
+    start.claim?.(dir);
     mkdirSync(this.scripts, { recursive: true, mode: 0o700 });
     const name = `${safe(start.threadId)}-codex-${Date.now()}`;
     const log = join(this.scripts, `${name}.log`);
