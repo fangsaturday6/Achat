@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { FILES_BODY_LIMIT } from "../attachments.js";
 import type { AgentClient, AgentConfig, RemoteClient } from "../config.js";
 import { checkSignature, deviceIdFor, pairingCode, SIGNATURE_WINDOW_MS } from "../device.js";
-import { parseJson, readBody, send, serveStatic, str } from "../relay/http.js";
+import { keepConnections, parseJson, readBody, send, serveStatic, str } from "../relay/http.js";
 import { RelayError, RelayService, SWEEP_EVERY_MS, type RelaySettings } from "../relay/service.js";
 import { Store } from "../relay/store.js";
 import { takesFiles, threadsApi, type Viewer } from "../relay/threads-api.js";
@@ -1203,6 +1203,7 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
       if (!res.headersSent) send(res, 500, { error: "服务内部错误" });
     }
   });
+  keepConnections(server);
 
   try {
     await new Promise<void>((resolve, reject) => {

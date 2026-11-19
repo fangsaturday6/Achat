@@ -527,6 +527,43 @@ describe("groups", () => {
     }
   });
 
+  test("an @ left behind is not taken up once the AI was woken for a newer one: that answer covers it, so nothing is charged twice", () => {
+    const g = groups.createGroup(computer("fang"), { from: "fang/claude", name: "自己", members: [{ agent: "fang/codex" }] });
+    const ask = (body: string) => groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body, mentions: ["fang/codex"] }).messages.at(-1)!;
+    const used = () => groups.detail(web("fang"), g.id).members.find((m) => m.agent === "fang/codex")!.usedToday;
+
+    // Its computer was off for one @ and back for the next: reconnecting, however often, wakes it for neither again.
+    online.delete("fang/codex");
+    const missed = ask("电脑关着时问的");
+    online.add("fang/codex");
+    const asked = ask("现在问的");
+    for (let i = 0; i < 3; i++) assert.deepEqual(groups.work(computer("fang"), ["fang/codex"]), [{ groupId: g.id, agent: "fang/codex", seq: asked.seq }]);
+    assert.equal(used(), 1);
+    groups.postMessage(computer("fang"), g.id, { from: "fang/codex", body: "两条一起答了", replyTo: asked.seq, epoch: 0 });
+    const stateOf = (seq: number) => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts[0].state;
+    assert.deepEqual([stateOf(missed.seq), stateOf(asked.seq)], ["replied", "replied"]);
+
+    // 每天次数 kept one @ late at night in 北京; past midnight a newer one woke it; raising them then wakes nothing more.
+    now = new Date("2026-11-18T15:00:00Z");
+    groups.setQuota(web("fang"), g.id, { agent: "fang/codex", perDay: 2 });
+    ask("今天第二次");
+    assert.equal(ask("额度用完了").receipts[0].state, "quota");
+    now = new Date("2026-11-18T17:00:00Z");
+    const fresh = ask("过了零点问的");
+    assert.equal(fresh.receipts[0].state, "reading");
+    groups.setQuota(web("fang"), g.id, { agent: "fang/codex", perDay: 5 });
+    assert.equal(used(), 1);
+    assert.equal(groups.workFor(computer("fang"), g.id, "fang/codex")!.wake.seq, fresh.seq);
+  });
+
+  test("a group refuses the files a conversation refuses, in the same words", () => {
+    const g = start();
+    const ten = Array.from({ length: 10 }, (_, i) => ({ name: `${i}.txt`, data: new Uint8Array([1]) }));
+    const refused = (err: Error & { status?: number }) => err.status === 400 && err.message === "一次最多 9 个文件";
+    assert.throws(() => groups.postMessage(web("fang"), g.id, { from: "p_fang", body: "看看", files: ten }), refused);
+    assert.throws(() => groups.createGroup(web("fang"), { from: "p_fang", members: [{ agent: "fang/claude" }], message: "看看", files: ten }), refused);
+  });
+
   test("waiting ends at the group's next change", async () => {
     const g = start();
     const waiting = groups.waitFor(g.id, 5000);

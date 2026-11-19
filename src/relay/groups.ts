@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { cleanFiles, type NewFile } from "../attachments.js";
+import type { NewFile } from "../attachments.js";
 import type { AgentConfig } from "../config.js";
 import { beijingDay, nameFrom } from "../groups.js";
 import { isEffort, type Effort } from "../models.js";
@@ -19,7 +19,7 @@ import {
   type ReceiptState,
 } from "../types.js";
 import { GroupStore, type InviteRow, type MemberRow } from "./group-store.js";
-import { RelayError } from "./service.js";
+import { checkAttachments, RelayError } from "./service.js";
 import type { Store } from "./store.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -154,14 +154,6 @@ export class GroupService {
     const agent = this.dir.agent(from);
     if (!agent || (!caller.actsAs(from) && from !== caller.person)) throw new RelayError(403, "只能以自己的 AI 或本人的身份说话");
     return agent;
-  }
-
-  private checkFiles(files?: NewFile[]): NewFile[] {
-    try {
-      return cleanFiles(files);
-    } catch (err) {
-      throw new RelayError(400, (err as Error).message);
-    }
   }
 
   private checkQuota(perDay: number | undefined): number {
@@ -305,12 +297,16 @@ export class GroupService {
 
   // The newest @ an AI had to leave for `states` (its computer off, its 每天次数
   // used up), after what it already finished and within a day: woken for it
-  // now, if it can be. Returns the AIs woken.
+  // now, if it can be. Not when it was woken since for a newer one: answering
+  // that answers this too (settle), so it is neither woken nor charged twice.
+  // Returns the AIs woken.
   private takeUp(group: Group, agent: string, states: ReceiptState[], now: string): string[] {
     const done = this.store.doneSeq(group.id, agent);
     const since = this.now().getTime() - this.limits.catchUpMs;
     const latest = this.store.receiptsOf(group.id, agent, states).find((r) => r.seq > done && Date.parse(r.updatedAt) >= since);
-    return latest ? this.wakeAgents(group, latest.seq, [agent], now) : [];
+    const reading = this.store.receiptsOf(group.id, agent, ["reading"])[0];
+    if (!latest || (reading && reading.seq > latest.seq)) return [];
+    return this.wakeAgents(group, latest.seq, [agent], now);
   }
 
   // AIs join from where the group is now; a note says so, and an opening
@@ -360,7 +356,7 @@ export class GroupService {
     // "@所有人" with nothing to discuss is no opening message: it would wake every AI for nothing.
     const said = input.message?.trim() ?? "";
     const text = said.replaceAll("@所有人", "").trim() ? said : "";
-    const files = this.checkFiles(input.files);
+    const files = checkAttachments(input.files);
     if (text.length > 20000) throw new RelayError(400, "消息需要在 1 到 20000 个字之间");
     const name = input.name?.trim() || nameFrom(text) || "群聊";
     if (name.length > 30) throw new RelayError(400, "群名需要在 1 到 30 个字之间");
@@ -474,7 +470,7 @@ export class GroupService {
     if (person ? !this.mine(caller, groupId).length : !member || member.leftAt !== null) throw new RelayError(404, "找不到这个群");
     this.requireOpen(group);
     const body = input.body.trim();
-    const files = this.checkFiles(input.files);
+    const files = checkAttachments(input.files);
     if ((!body && !files.length) || body.length > 20000) throw new RelayError(400, "消息需要在 1 到 20000 个字之间");
     const answering = input.replyTo !== undefined;
     const mentions = this.checkMentions(groupId, from, input.mentions ?? [], answering && !person);

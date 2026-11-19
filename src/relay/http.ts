@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { extname, join, normalize } from "node:path";
 import { RelayError } from "./service.js";
 
@@ -10,6 +10,16 @@ const CONTENT_TYPES: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".png": "image/png",
 };
+
+// An idle connection stays open 30 seconds for the next request, not Node's
+// 5: fetch reuses one until shortly before the time the server names, so on
+// a busy machine a pause of a second or two had a request sent on a
+// connection the server was just closing ("fetch failed"). Node wants the
+// time to read a request's headers longer than this.
+export function keepConnections(server: Server): void {
+  server.keepAliveTimeout = 30_000;
+  server.headersTimeout = 31_000;
+}
 
 export function send(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers });

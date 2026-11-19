@@ -34,6 +34,16 @@ export class RelayError extends Error {
   }
 }
 
+// Files sent with a message, in a conversation or a group, cleaned up; what
+// is wrong with them (too many, too big) is the sender's to fix: a 400.
+export function checkAttachments(files: NewFile[] = []): NewFile[] {
+  try {
+    return cleanFiles(files);
+  } catch (err) {
+    throw new RelayError(400, (err as Error).message);
+  }
+}
+
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 // A request nobody handled: its person is reminded once, and after three
@@ -188,14 +198,6 @@ export class RelayService {
     return said === true || this.agents.get(agent)?.client === "person";
   }
 
-  private checkFiles(files: NewFile[] = []): NewFile[] {
-    try {
-      return cleanFiles(files);
-    } catch (err) {
-      throw new RelayError(400, (err as Error).message);
-    }
-  }
-
   file(id: string): (Attachment & { threadId: string; messageId: number; data: Uint8Array }) | null {
     return this.store.file(id);
   }
@@ -337,7 +339,7 @@ export class RelayService {
     if (mode === "do") this.requireDoer(input.to);
     const topic = input.topic.trim();
     const message = input.message.trim();
-    const files = this.checkFiles(input.files);
+    const files = checkAttachments(input.files);
     if (!topic || topic.length > 80) throw new RelayError(400, "话题需要在 1 到 80 个字之间");
     if ((!message && !files.length) || message.length > 8000) throw new RelayError(400, "消息需要在 1 到 8000 个字之间");
 
@@ -643,7 +645,7 @@ export class RelayService {
     // allowance is used up: a request of its own, which the person approves.
     const asks = !fromResponder && !toPerson && (upgrade || thread.status !== "active" || this.spent(thread));
     const body = input.body.trim();
-    const files = this.checkFiles(input.files);
+    const files = checkAttachments(input.files);
     if ((!body && !files.length) || body.length > 20000) throw new RelayError(400, "消息需要在 1 到 20000 个字之间");
 
     // A call tried again after its reply was lost must not post twice. Asking

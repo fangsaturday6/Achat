@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { cleanFiles } from "../src/attachments.js";
+import { checkAttachments } from "../src/relay/service.js";
 import { Store } from "../src/relay/store.js";
 
 test("a database from before keeps its files, and a group's files go in the same table", () => {
@@ -52,5 +53,9 @@ test("a database from before keeps its files, and a group's files go in the same
 
 test("files are checked the same way wherever they are sent", () => {
   assert.deepEqual(cleanFiles([{ name: "../../x/报错.png", type: "", data: new Uint8Array([1]) }]).map((f) => [f.name, f.type]), [["报错.png", "image/png"]]);
-  assert.throws(() => cleanFiles(Array.from({ length: 10 }, () => ({ name: "a.txt", type: "", data: new Uint8Array([1]) }))), /一次最多 9 个文件/);
+  const ten = Array.from({ length: 10 }, () => ({ name: "a.txt", type: "", data: new Uint8Array([1]) }));
+  assert.throws(() => cleanFiles(ten), /一次最多 9 个文件/);
+  // Conversations and groups take them through one check, which refuses them as a 400 in the same words.
+  assert.throws(() => checkAttachments(ten), (err: Error & { status?: number }) => err.status === 400 && err.message === "一次最多 9 个文件");
+  assert.deepEqual(checkAttachments().map((f) => f.name), []);
 });

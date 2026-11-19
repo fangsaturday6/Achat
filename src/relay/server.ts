@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { LOCAL_PERSON, type AchatConfig, type AgentConfig } from "../config.js";
 import { GROUPS_NEED_ACCOUNT } from "./groups.js";
-import { send, serveStatic } from "./http.js";
+import { keepConnections, send, serveStatic } from "./http.js";
 import { RelayError, RelayService, SWEEP_EVERY_MS } from "./service.js";
 import { Store } from "./store.js";
 import { threadsApi, type Viewer } from "./threads-api.js";
@@ -81,6 +81,7 @@ export async function startRelay(opts: RelayOptions): Promise<RunningRelay> {
       if (!res.headersSent) send(res, 500, { error: "服务内部错误" });
     }
   });
+  keepConnections(server);
 
   try {
     await new Promise<void>((resolve, reject) => {
