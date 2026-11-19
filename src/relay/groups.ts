@@ -407,14 +407,20 @@ export class GroupService {
     const now = this.stamp();
     let invited: string[] = [];
     this.transaction(() => {
+      const owner = this.store.member(group.id, agent)?.owner;
       this.store.leaveMember(group.id, agent, now);
       // What it was still reading, or asked to 动手 for, stays unanswered, and
       // the line under it says why; what was asked of it ends with it. What
       // it asked others to 动手 for ends too: nobody is left to do it for.
+      // So does what its person asked for themself once no AI of theirs is
+      // left: they are not in the group either.
       for (const r of this.store.receiptsOf(group.id, agent, ["reading", "asking", "acting"])) this.store.setReceipt(group.id, r.seq, agent, "failed", "不在群里了", r.epoch, now);
       this.store.endActs(group.id, "stopped", now, { doer: agent });
-      for (const r of this.store.requests(group.id, agent, ["asking", "acting"])) this.store.setReceipt(group.id, r.seq, r.agent, "passed", "对方不在群里了", r.epoch, now);
-      this.store.endActs(group.id, "stopped", now, { asker: agent });
+      const gone = owner && !this.store.members(group.id).some((m) => m.owner === owner) ? [agent, this.dir.seat(owner)] : [agent];
+      for (const asker of gone) {
+        for (const r of this.store.requests(group.id, asker, ["asking", "acting"])) this.store.setReceipt(group.id, r.seq, r.agent, "passed", "对方不在群里了", r.epoch, now);
+        this.store.endActs(group.id, "stopped", now, { asker });
+      }
       // A dissolved group is only read now: leaving it changes nothing in it.
       if (group.status === "dissolved") return;
       this.store.addMessage(group.id, { sender: null, kind: "system", body: note }, now);

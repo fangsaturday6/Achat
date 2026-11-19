@@ -1046,6 +1046,25 @@ describe("groups", () => {
     assert.deepEqual(groups.work(computer("fang"), ["fang/claude", "fang/codex"]), []);
   });
 
+  test("动手 a friend asked for in person ends once their last AI leaves: they are not in the group any more", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex", "wang/claude"] });
+    const ask = (doer: string) => groups.postMessage(web("wang"), g.id, { from: "p_wang", body: "动手改一下", mentions: [doer] }).messages.at(-1)!.seq;
+    const receipt = (seq: number, doer: string) => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts.find((r) => r.agent === doer)!;
+    const waiting = ask("fang/claude");
+    const a = groups.requestAct(computer("fang"), g.id, { doer: "fang/claude", seq: waiting });
+    const underWay = ask("fang/codex");
+    const b = groups.requestAct(computer("fang"), g.id, { doer: "fang/codex", seq: underWay });
+    groups.approveAct(computer("fang"), g.id, b.act.id);
+
+    groups.leave(web("wang"), g.id, "wang/codex");
+    assert.equal(groups.store.act(a.act.id)!.status, "asking", "his other AI is still there");
+    groups.leave(web("wang"), g.id, "wang/claude");
+    assert.deepEqual(receipt(waiting, "fang/claude"), { agent: "fang/claude", state: "passed", reason: "对方不在群里了" });
+    assert.deepEqual(receipt(underWay, "fang/codex"), { agent: "fang/codex", state: "passed", reason: "对方不在群里了" });
+    assert.deepEqual([groups.store.act(a.act.id)!.status, groups.store.act(b.act.id)!.status], ["stopped", "stopped"]);
+  });
+
   test("动手 its person left a day unanswered ends, so 稍后 is not put to them again every time the computer starts", () => {
     const g = start();
     groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
