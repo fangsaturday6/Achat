@@ -1130,6 +1130,34 @@ describe("groups", () => {
     assert.equal(groups.detail(web("fang"), g.id).messages.filter((m) => m.kind === "system").at(-1)!.body, "老方的 Claude 动手 10 轮用完了");
   });
 
+  test("what waits for a yes past an act still at work is listed beside an @ to read; once that act ends and nobody asks again, it ends a day later", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    const ask = (body: string) => groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body, mentions: ["fang/claude"] }).messages.at(-1)!.seq;
+    const request = (seq: number) => groups.requestAct(computer("fang"), g.id, { doer: "fang/claude", seq });
+    const receipt = (seq: number) => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts.find((r) => r.agent === "fang/claude")!;
+    const work = () => groups.work(computer("fang"), ["fang/claude"]).map((w) => w.seq);
+    const later = (hours: number) => (now = new Date(now.getTime() + hours * 60 * 60 * 1000));
+    const first = ask("@老方的 Claude 第 1 件");
+    groups.approveAct(computer("fang"), g.id, request(first).act.id);
+    let tenth = first;
+    for (let round = 2; round <= 10; round++) request((tenth = ask(`@老方的 Claude 第 ${round} 件`)));
+    const past = ask("@老方的 Claude 第 11 件");
+    assert.equal(request(past).act.status, "active");
+    const question = groups.postMessage(web("fang"), g.id, { from: "p_fang", body: "@我的 Claude 在吗", mentions: ["fang/claude"] }).messages.at(-1)!.seq;
+    // The computer starts again: it hears of each, the 11th too.
+    assert.deepEqual(work(), [question, past, tenth]);
+    later(20);
+    groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "@老王的 Codex 都好了", mentions: ["wang/codex"], replyTo: tenth, epoch: 0 });
+    assert.equal(receipt(past).state, "asking");
+    // Nobody asks for it again, such as its computer staying off: it waits a day from when the act ended.
+    later(5);
+    assert.deepEqual(work(), [past]);
+    later(20);
+    assert.deepEqual(work(), []);
+    assert.deepEqual(receipt(past), { agent: "fang/claude", state: "passed", reason: "主人一天没处理" });
+  });
+
   test("an answer's computer is given every @ it would settle, so one asked to 动手 among them goes to its person instead of being taken for answered", () => {
     const g = start();
     groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });

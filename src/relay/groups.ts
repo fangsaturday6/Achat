@@ -694,9 +694,11 @@ export class GroupService {
 
   // An act is over, with nothing of it left to do: its rounds used (the
   // group is told), or its person's own act now asked for by words that
-  // may not be theirs. What its asker asked past it waits for a yes.
+  // may not be theirs. What its asker asked past it waits for a yes, a day
+  // from now (expireAsking).
   private end(act: GroupAct, now: string): void {
     this.store.updateAct(act.id, { status: "done" }, now);
+    for (const r of this.askedBy(act.groupId, act.doer, act.asker, "asking")) this.store.setReceipt(act.groupId, r.seq, act.doer, "asking", null, r.epoch, now);
     if (act.roundsUsed >= act.maxRounds) {
       this.store.addMessage(act.groupId, { sender: null, kind: "system", body: cjk(this.nameFor(act.doer), `动手 ${act.maxRounds} 轮用完了`) }, now);
     }
@@ -881,15 +883,27 @@ export class GroupService {
     return this.detail(caller, groupId);
   }
 
-  // What waits on an AI in a group, the newest of the first kind there is
-  // among `states`: an @ to read; else a request to 动手 still waiting for
-  // its person, put to them again; else 动手 under way.
-  private waitingOn(groupId: string, agent: string, states: ReceiptState[] = ["reading", "asking", "acting"]): StoredReceipt | undefined {
-    for (const state of states) {
+  // What waits on an AI in a group, the newest of the first kind there is:
+  // an @ to read; else a request to 动手 still waiting for its person, put
+  // to them again; else 动手 under way.
+  private waitingOn(groupId: string, agent: string): StoredReceipt | undefined {
+    for (const state of ["reading", "asking", "acting"] as ReceiptState[]) {
       const r = this.store.receiptsOf(groupId, agent, [state])[0];
       if (r) return r;
     }
     return undefined;
+  }
+
+  // Each asker's newest request to 动手 still waiting for a yes: for its
+  // act's dialog, or for an act still at work before that (requestAct).
+  private askingOf(groupId: string, agent: string): StoredReceipt[] {
+    const seen = new Set<string | null | undefined>();
+    return this.store.receiptsOf(groupId, agent, ["asking"]).filter((r) => {
+      const asker = this.store.message(groupId, r.seq)?.sender;
+      if (seen.has(asker)) return false;
+      seen.add(asker);
+      return true;
+    });
   }
 
   // 动手 under way for each asker, whose next round the AI's computer may
@@ -913,7 +927,13 @@ export class GroupService {
       for (const r of this.askedBy(groupId, agent, act.asker, "asking")) this.store.setReceipt(groupId, r.seq, agent, "passed", "主人一天没处理", r.epoch, now);
       this.store.updateAct(act.id, { status: "stopped" }, now);
     }
-    return old.length > 0;
+    // A request with no act at all: it waited behind one that ended
+    // meanwhile (end), and nobody asked for it since.
+    const alone = this.store
+      .receiptsOf(groupId, agent, ["asking"])
+      .filter((r) => Date.parse(r.updatedAt) < since && !this.store.openAct(groupId, this.store.message(groupId, r.seq)?.sender ?? "", agent));
+    for (const r of alone) this.store.setReceipt(groupId, r.seq, agent, "passed", "主人一天没处理", r.epoch, now);
+    return old.length > 0 || alone.length > 0;
   }
 
   // 动手 under way whose round started over a day ago and never came back,
@@ -956,8 +976,9 @@ export class GroupService {
           wake: this.takeUp(group, agent, ["offline"], now),
         }));
         if (wake.length || expired) this.emit("group.updated", group.id, { wake });
-        const waiting = this.waitingOn(group.id, agent, ["reading", "asking"]);
-        for (const r of [...(waiting ? [waiting] : []), ...this.roundsOf(group.id, agent)]) out.push({ groupId: group.id, agent, seq: r.seq });
+        // The @ to read, what each asker waits for a yes on, and each act's next round.
+        const reading = this.store.receiptsOf(group.id, agent, ["reading"]).slice(0, 1);
+        for (const r of [...reading, ...this.askingOf(group.id, agent), ...this.roundsOf(group.id, agent)]) out.push({ groupId: group.id, agent, seq: r.seq });
       }
     }
     return out;
