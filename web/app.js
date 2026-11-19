@@ -2484,6 +2484,10 @@ async function refresh({ fromEvent = false } = {}) {
     heldRedraw = true;
     return;
   }
+  // A menu opened while this fetched is about to be drawn over: close it
+  // first, or it would hold back every event after (and an event it held
+  // runs again once this is drawn).
+  closeOpenMenu?.();
   const app = document.getElementById("app");
   app.dataset.view = r.view;
   app.dataset.pane = r.id || r.compose || r.group || r.newGroup || (r.view === "messages" && state.detail) ? "main" : "list";
