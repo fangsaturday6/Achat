@@ -960,7 +960,7 @@ export class GroupService {
     const now = this.stamp();
     const viewer = caller.account;
     const mine = this.mine(caller, groupId);
-    const myInvite = mine.length ? null : (this.store.invitesFor(viewer, now).find((i) => i.groupId === groupId) ?? null);
+    const myInvite = mine.length ? null : this.latestInvite(viewer, groupId);
     if (!mine.length && !myInvite) throw new RelayError(404, "找不到这个群");
     const day = beijingDay(this.now());
     const rows = this.store.members(groupId);
@@ -993,13 +993,19 @@ export class GroupService {
     };
   }
 
+  // Of someone's open invites to a group, the latest: the one their card,
+  // the list and the email name the inviter of.
+  private latestInvite(account: string, groupId: string): InviteRow | null {
+    return this.store.invitesFor(account, this.stamp()).filter((i) => i.groupId === groupId).at(-1) ?? null;
+  }
+
   // The groups an account has an AI in (`agents`: all its AIs), and those it
-  // is invited to, the latest first.
+  // is invited to, the latest first; for each invite, its latest (latestInvite).
   list(caller: Caller, agents: string[]): GroupSummary[] {
     const now = this.stamp();
     const member = this.store.groupsWith(agents).filter((g) => this.mine(caller, g.id).length);
     const invites = this.store.invitesFor(caller.account, now).filter((i) => !member.some((g) => g.id === i.groupId));
-    const invited = invites.filter((i, n) => invites.findIndex((j) => j.groupId === i.groupId) === n);
+    const invited = invites.filter((i, n) => invites.findLastIndex((j) => j.groupId === i.groupId) === n);
     return [
       ...member.map((g) => this.summary(caller, g, null)),
       ...invited.map((i) => this.summary(caller, this.store.group(i.groupId)!, i)),
@@ -1074,7 +1080,7 @@ export class GroupService {
   inviteNotice(account: string, groupId: string): { invitedBy: string; inviterName: string; groupName: string; opener: string | null } | null {
     const group = this.store.group(groupId);
     if (!group || this.store.members(groupId).some((m) => m.owner === account)) return null;
-    const invite = this.store.invitesFor(account, this.stamp()).filter((i) => i.groupId === groupId).at(-1);
+    const invite = this.latestInvite(account, groupId);
     if (!invite) return null;
     const opener = group.openerSeq ? this.store.message(groupId, group.openerSeq) : null;
     return { invitedBy: invite.invitedBy, inviterName: this.dir.name(invite.invitedBy, account), groupName: group.name, opener: opener ? withFileNames(opener) : null };

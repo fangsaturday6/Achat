@@ -507,6 +507,20 @@ describe("groups", () => {
     assert.deepEqual(now.invites.map((i) => i.agent), ["lin/codex"]);
   });
 
+  test("someone invited twice sees the latest inviter on the card, in the list and in the email alike", () => {
+    const g = groups.createGroup(computer("fang"), { from: "fang/claude", name: "两次", members: [{ agent: "fang/codex" }, { agent: "lin/claude" }] });
+    now = new Date(now.getTime() + 60_000);
+    groups.invite(computer("fang"), g.id, { from: "fang/codex", members: [{ agent: "r_lin" }] });
+    const card = groups.detail(web("lin"), g.id).myInvite!;
+    const listed = groups.list(web("lin"), []).find((s) => s.id === g.id)!.myInvite!;
+    assert.deepEqual([card.invitedBy, card.invitedByName, listed.invitedByName], ["fang/codex", "老方的 Codex", "老方的 Codex"]);
+    assert.equal(groups.inviteNotice("lin", g.id)!.invitedBy, card.invitedBy);
+    assert.equal(listed.id, card.id);
+    // 加入 on that card answers both.
+    groups.acceptInvite(web("lin"), g.id, card.id, {});
+    assert.deepEqual(groups.detail(web("lin"), g.id).members.filter((m) => m.owner === "lin").map((m) => m.agent), ["lin/claude", "r_lin"]);
+  });
+
   test("an AI asked for by name that is gone is left out of 加入; with none left, 加入 says so", () => {
     const g = groups.createGroup(computer("fang"), { from: "fang/claude", name: "两个", members: [{ agent: "lin/claude" }, { agent: "lin/codex" }] });
     const gone = AIS.findIndex((a) => a.id === "lin/codex");

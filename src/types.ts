@@ -329,6 +329,8 @@ export interface GroupDetail extends Group {
   role: "member" | "invited";
   members: GroupMember[];
   invites: GroupInvite[];
+  // Someone invited: the latest of their open invites, whose inviter the
+  // card, the computer's notification and the email all name.
   myInvite: GroupInvite | null;
   messages: GroupMessage[];
   // Every sender in `messages` and every member, named from the caller's side.
@@ -346,6 +348,7 @@ export interface GroupSummary extends Group {
   // per person first, in the order they joined.
   faces: string[];
   unread: boolean;
+  // As GroupDetail's: the latest open invite.
   myInvite: GroupInvite | null;
 }
 
