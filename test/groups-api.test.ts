@@ -526,6 +526,38 @@ test("someone newly invited into a group is emailed as for a request: the openin
   }
 });
 
+test("someone asked for another of a person's AIs in the same group mails them as the one who asked, counted against that one", async () => {
+  const { cloud, mailer } = await startTestCloud();
+  try {
+    const fang = await logIn(cloud, mailer, "fang@example.com", "老方");
+    const wang = await logIn(cloud, mailer, "wang@example.com", "老王");
+    const lin = await logIn(cloud, mailer, "lin@example.com", "小林");
+    await befriend(fang, wang, "wang@example.com");
+    await befriend(fang, lin, "lin@example.com");
+    await befriend(lin, wang, "wang@example.com");
+    const fangMac = await addComputer(cloud, fang, "MacBook", ["claude"]);
+    const linMac = await addComputer(cloud, lin, "iMac", ["claude"]);
+    const wangLaptop = await addComputer(cloud, wang, "ThinkPad", ["codex", "claude"]);
+    const [claude, linClaude] = [fangMac.agent("claude"), linMac.agent("claude")];
+    const [wangId, linId] = [(await wang.call("GET", "/api/me")).account.id, (await lin.call("GET", "/api/me")).account.id];
+    const mails = () => mailer.sent.filter((m) => m.to === "wang@example.com" && m.subject.includes("群聊"));
+
+    // 老方 invites 老王 three times today, the last time asking for his Codex by name.
+    await fangMac.client.createGroup({ from: claude, name: "一", members: [{ account: wangId }] });
+    await fangMac.client.createGroup({ from: claude, name: "二", members: [{ account: wangId }] });
+    const g = await fangMac.client.createGroup({ from: claude, name: "三", members: [{ agent: wangLaptop.agent("codex") }, { account: linId }] });
+    await until(async () => mails().length === 3);
+    // 小林 joins, and her Claude asks for 老王's Claude there too.
+    const card = (await lin.call("GET", "/api/groups")).find((s: any) => s.id === g.id).myInvite;
+    await lin.call("POST", `/api/groups/${g.id}/invites/${card.id}/accept`, { agents: [linClaude] });
+    await linMac.client.inviteToGroup(g.id, { from: linClaude, members: [{ agent: wangLaptop.agent("claude") }] });
+    const mail = await until(async () => mails()[3]);
+    assert.equal(mail.subject, "小林的 Claude 邀请你加入群聊「三」");
+  } finally {
+    await cloud.close();
+  }
+});
+
 test("on this computer alone there are no groups", async () => {
   const { relay, client } = await startTestRelay();
   try {

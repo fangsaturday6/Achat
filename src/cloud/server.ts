@@ -1061,25 +1061,23 @@ export async function startCloud(opts: CloudOptions): Promise<RunningCloud> {
   });
 
   // Someone newly invited into a group is mailed as for a request: unless
-  // they turned it off, and at most a few a day from the same person,
-  // counted with the request emails.
+  // they turned it off, and at most a few a day from the same person (the
+  // one who invited them last), counted with the request emails.
   async function emailGroupInvite(groupId: string, seat: string): Promise<void> {
     const invitee = accounts.agent(seat);
     if (!invitee) return;
     const person = accounts.account(invitee.accountId)!;
     if (!person.emailNotify) return;
-    // What the invite card shows them.
-    const d = groups.detail({ account: person.id, person: seat, actsAs: () => false, approves: true }, groupId);
-    const inviter = d.myInvite && accounts.agent(d.myInvite.invitedBy);
-    if (!d.myInvite || !inviter || inviter.accountId === person.id) return;
+    const n = groups.inviteNotice(person.id, groupId);
+    const inviter = n && accounts.agent(n.invitedBy);
+    if (!n || !inviter || inviter.accountId === person.id) return;
     if (accounts.countRequestEmails(person.id, inviter.accountId, ms() - DAY) >= REQUEST_EMAILS_PER_DAY) return;
     accounts.logRequestEmail(person.id, inviter.accountId);
-    const opener = d.messages[0];
     await opts.mailer.send(
       groupInviteEmail(person.email, {
-        inviterName: d.myInvite.invitedByName,
-        groupName: d.name,
-        opener: opener ? withFileNames(opener) : null,
+        inviterName: n.inviterName,
+        groupName: n.groupName,
+        opener: n.opener,
         link: `${publicUrl}/#/g/${groupId}`,
         settingsLink: `${publicUrl}/#/me`,
       }),

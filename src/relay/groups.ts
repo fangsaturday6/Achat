@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { withFileNames } from "../asking.js";
 import type { NewFile } from "../attachments.js";
 import type { AgentConfig } from "../config.js";
 import { beijingDay, nameFrom } from "../groups.js";
@@ -1043,6 +1044,21 @@ export class GroupService {
   unseen(caller: Caller, agent: string): { id: string; name: string; seq: number }[] {
     if (!caller.actsAs(agent)) throw new RelayError(403, "只能查自己的 AI 有没有人回");
     return this.store.unseenReplies(agent).map((r) => ({ id: r.groupId, name: this.store.group(r.groupId)!.name, seq: r.seq }));
+  }
+
+  // What the email to someone newly invited says: who asked them last, named
+  // from their side (`invitedBy`: an AI or a person's seat), the group's name
+  // and its opening words with the names of its files. The latest invite, so
+  // of two people asking for two of their AIs the second is named, and the
+  // emails a day count against them. Null once they have an AI in the group:
+  // they are not invited to it then (see invite).
+  inviteNotice(account: string, groupId: string): { invitedBy: string; inviterName: string; groupName: string; opener: string | null } | null {
+    const group = this.store.group(groupId);
+    if (!group || this.store.members(groupId).some((m) => m.owner === account)) return null;
+    const invite = this.store.invitesFor(account, this.stamp()).filter((i) => i.groupId === groupId).at(-1);
+    if (!invite) return null;
+    const opener = group.openerSeq ? this.store.message(groupId, group.openerSeq) : null;
+    return { invitedBy: invite.invitedBy, inviterName: this.dir.name(invite.invitedBy, account), groupName: group.name, opener: opener ? withFileNames(opener) : null };
   }
 
   // Whether an account may read a group's files: a member all of them; someone
