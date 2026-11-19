@@ -20,6 +20,7 @@ import {
   type GroupTarget,
   type GroupWork,
   type ReceiptState,
+  todayTotal,
 } from "../types.js";
 import { GroupStore, type InviteRow, type MemberRow, type StoredReceipt } from "./group-store.js";
 import { checkAttachments, RelayError } from "./service.js";
@@ -255,7 +256,8 @@ export class GroupService {
     if (group.status !== "open") return "stopped";
     const agent = this.dir.agent(member.agent);
     if (!agent || agent.canReceive === false) return "cannot";
-    if (this.store.used(group.id, member.agent, day) >= member.quota + this.store.extra(group.id, member.agent, day)) return "quota";
+    const { used, extra } = this.store.usage(group.id, member.agent, day);
+    if (used >= todayTotal({ quota: member.quota, extraToday: extra })) return "quota";
     if (!this.dir.online(member.agent)) return "offline";
     return "reading";
   }
@@ -274,7 +276,8 @@ export class GroupService {
       if (state !== "reading") continue;
       this.store.use(group.id, agent, day);
       woken.push(agent);
-      const left = member.quota + this.store.extra(group.id, agent, day) - this.store.used(group.id, agent, day);
+      const { used, extra } = this.store.usage(group.id, agent, day);
+      const left = todayTotal({ quota: member.quota, extraToday: extra }) - used;
       if (left > 0 && left <= (member.quota < 10 ? 1 : 5) && this.store.warn(group.id, agent, day)) this.low.push({ groupId: group.id, agent });
     }
     return woken;
@@ -801,8 +804,9 @@ export class GroupService {
 
   // What the caller's AIs (`agents`, on its computer) have to answer now. The
   // latest @ missed while the computer was off is taken up first, within a
-  // day; one left for 每天次数 waits until its person raises them (setQuota),
-  // so a computer coming back does not spend today's on yesterday's. What it
+  // day; one left for 每天次数 waits until its person raises them (setQuota)
+  // or adds a day's more (addToday), so a computer coming back does not
+  // spend today's on yesterday's. What it
   // was woken for over a day ago and never answered is too late: 不在线.
   work(caller: Caller, agents: string[]): { groupId: string; agent: string; seq: number }[] {
     const now = this.stamp();
@@ -948,6 +952,7 @@ export class GroupService {
     const rows = this.store.members(groupId);
     const members: GroupMember[] = rows.map((m) => {
       const agent = this.dir.agent(m.agent, viewer);
+      const today = m.owner === viewer ? this.store.usage(groupId, m.agent, day) : null;
       return {
         agent: m.agent,
         name: agent?.name ?? this.dir.name(m.agent, viewer),
@@ -955,7 +960,7 @@ export class GroupService {
         canReceive: !!agent && agent.canReceive !== false,
         online: this.dir.online(m.agent),
         joinedAt: m.joinedAt,
-        ...(m.owner === viewer ? { quota: m.quota, usedToday: this.store.used(groupId, m.agent, day), extraToday: this.store.extra(groupId, m.agent, day) } : {}),
+        ...(today ? { quota: m.quota, usedToday: today.used, extraToday: today.extra } : {}),
       };
     });
     const messages = mine.length

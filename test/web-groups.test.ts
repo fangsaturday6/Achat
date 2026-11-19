@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { GROUP_LIMITS } from "../src/relay/groups.js";
 import type { RunningRelay } from "../src/relay/server.js";
-import { ALL, GROUP_STATUS_LABELS, RECEIPT_LABELS } from "../src/types.js";
+import { ALL, GROUP_STATUS_LABELS, RECEIPT_LABELS, todayTotal } from "../src/types.js";
 import * as page from "../web/groups.js";
 import { isOwn } from "../web/text.js";
 import { startTestRelay } from "./helpers.js";
@@ -302,6 +302,8 @@ test("what was added for today counts: the bottom and 群设置 say what is used
   const added = { agent: "f/claude", name: "我的 Claude", owner: "fang", canReceive: true, online: true, quota: 30, usedToday: 32, extraToday: 30 };
   assert.equal(page.todayTotal(added), 60);
   assert.equal(page.todayTotal({ ...added, extraToday: undefined }), 30);
+  // The same sum as the service and the AI tools say.
+  for (const m of [added, { ...added, extraToday: undefined }, { ...added, extraToday: 0 }]) assert.equal(page.todayTotal(m), todayTotal(m));
   assert.deepEqual(page.quotaLine([added], "fang"), { agent: "f/claude", text: "我的 Claude 今天 32 / 60 次", full: false });
   assert.equal(page.quotaLine([{ ...added, usedToday: 60 }], "fang").full, true);
   // Nearest is still the fewest times left today.

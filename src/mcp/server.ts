@@ -22,6 +22,7 @@ import {
   personWaiting,
   RECEIPT_LABELS,
   STATUS_LABELS,
+  todayTotal,
   type GroupDetail,
   type GroupSummary,
   type GroupTarget,
@@ -929,7 +930,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
         `群成员：${d.members.map((m) => `${m.name}${m.agent === c.agentId ? "（你）" : ""}${m.canReceive && !m.online ? "（不在线）" : ""}`).join("、")}`,
         ...d.members
           .filter((m) => m.quota !== undefined)
-          .map((m) => cjk(m.name, `今天被叫醒 ${m.usedToday}/${m.quota! + (m.extraToday ?? 0)} 次${m.extraToday ? `（主人今天多加了 ${m.extraToday} 次）` : ""}`)),
+          .map((m) => cjk(m.name, `今天被叫醒 ${m.usedToday}/${todayTotal({ quota: m.quota!, extraToday: m.extraToday })} 次${m.extraToday ? `（主人今天多加了 ${m.extraToday} 次）` : ""}`)),
         "",
       ];
       for (const m of d.messages.slice(-30)) {

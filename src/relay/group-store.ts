@@ -548,21 +548,19 @@ export class GroupStore {
     this.db.prepare("UPDATE group_receipts SET state = ?, updated_at = ? WHERE group_id = ? AND state = ?").run(to, now, groupId, from);
   }
 
-  used(groupId: string, agent: string, day: string): number {
-    const r = this.db.prepare("SELECT used FROM group_usage WHERE group_id = ? AND agent = ? AND day = ?").get(groupId, agent, day) as { used: number } | undefined;
-    return r?.used ?? 0;
+  // How many times an AI was woken in a group on `day`, and how many more
+  // than its 每天次数 its person let it be woken that day (加一份).
+  usage(groupId: string, agent: string, day: string): { used: number; extra: number } {
+    const r = this.db.prepare("SELECT used, extra FROM group_usage WHERE group_id = ? AND agent = ? AND day = ?").get(groupId, agent, day) as
+      | { used: number; extra: number }
+      | undefined;
+    return { used: r?.used ?? 0, extra: r?.extra ?? 0 };
   }
 
   use(groupId: string, agent: string, day: string): void {
     this.db
       .prepare("INSERT INTO group_usage (group_id, agent, day, used) VALUES (?, ?, ?, 1) ON CONFLICT (group_id, agent, day) DO UPDATE SET used = used + 1")
       .run(groupId, agent, day);
-  }
-
-  // How many more times than its 每天次数 an AI may be woken on `day` (加一份).
-  extra(groupId: string, agent: string, day: string): number {
-    const r = this.db.prepare("SELECT extra FROM group_usage WHERE group_id = ? AND agent = ? AND day = ?").get(groupId, agent, day) as { extra: number } | undefined;
-    return r?.extra ?? 0;
   }
 
   // 加一份: another day's 每天次数 (`share`) for `day`, once. Asked again, or

@@ -274,6 +274,13 @@ export interface GroupMember {
   extraToday?: number;
 }
 
+// How many times one of the person's AIs may be woken in a group today: its
+// 每天次数, and what they added for today (加一份). web/groups.js, which
+// cannot import this, has the same todayTotal; a test keeps them alike.
+export function todayTotal(m: { quota: number; extraToday?: number }): number {
+  return m.quota + (m.extraToday ?? 0);
+}
+
 export interface GroupInvite {
   id: string;
   // The person invited.

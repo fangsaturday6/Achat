@@ -7,7 +7,7 @@ import { NO_PICK, resolveUse, type ModelOffer, type ModelUse } from "../models.j
 import { redact } from "../redact.js";
 import { cjk } from "../text.js";
 import { beijingDay, mentionsIn, passReason } from "../groups.js";
-import { canAddRounds, MIN_ROUND_BUDGET_USD, MODE_LABELS, MORE_SCOPE, waitingForAsker, type GroupAct, type GroupEvent, type GroupMessage, type GroupWork, type Message, type RelayEvent, type ThreadDetail, type ThreadMode } from "../types.js";
+import { canAddRounds, MIN_ROUND_BUDGET_USD, MODE_LABELS, MORE_SCOPE, todayTotal, waitingForAsker, type GroupAct, type GroupEvent, type GroupMessage, type GroupWork, type Message, type RelayEvent, type ThreadDetail, type ThreadMode } from "../types.js";
 import type { Alerter, Asker, Asking, Chooser, Choosing } from "./dialog.js";
 import { LoginWait } from "./login-wait.js";
 import type { Notifier } from "./notify.js";
@@ -584,7 +584,7 @@ export class Sidecar {
       const g = await this.relay.group(groupId);
       const m = g.members.find((x) => x.agent === agent);
       if (!m || m.quota === undefined || m.usedToday === undefined) return;
-      const total = m.quota + (m.extraToday ?? 0);
+      const total = todayTotal({ quota: m.quota, extraToday: m.extraToday });
       const title = cjk(m.name.replace(/^我的/, "你的"), `在「${g.name}」群今天还剩 ${total - m.usedToday} 次`);
       const body = `${m.usedToday} / ${total} 次`;
       const choosing = this.opts.choose?.({ icon: "answer", title, body, more: `加 ${m.quota} 次`, stop: "用完就停" });

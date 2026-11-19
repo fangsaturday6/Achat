@@ -23,8 +23,8 @@ test("a group keeps its members, messages with receipts and files, invites and d
 
   groups.use("g_1", "b", "2026-11-18");
   groups.use("g_1", "b", "2026-11-18");
-  assert.equal(groups.used("g_1", "b", "2026-11-18"), 2);
-  assert.equal(groups.used("g_1", "b", "2026-11-19"), 0);
+  assert.deepEqual(groups.usage("g_1", "b", "2026-11-18"), { used: 2, extra: 0 });
+  assert.deepEqual(groups.usage("g_1", "b", "2026-11-19"), { used: 0, extra: 0 });
 
   groups.addInvite({ id: "gi_1", groupId: "g_1", account: "lin", agent: null, invitedBy: "a", expiresAt: "2026-11-25T02:00:00.000Z" }, now);
   assert.equal(groups.invitesFor("lin", now).length, 1);
@@ -49,16 +49,16 @@ test("a database from before 加一份 keeps each day's count, with nothing adde
     INSERT INTO group_usage VALUES ('g_1', 'b', '2026-11-18', 3);
   `);
   const groups = new GroupStore(store);
-  assert.deepEqual([groups.used("g_1", "b", "2026-11-18"), groups.extra("g_1", "b", "2026-11-18")], [3, 0]);
+  assert.deepEqual(groups.usage("g_1", "b", "2026-11-18"), { used: 3, extra: 0 });
   groups.addShare("g_1", "b", "2026-11-18", 30);
   groups.addShare("g_1", "b", "2026-11-18", 30);
   groups.addShare("g_1", "b", "2026-11-19", 5);
-  assert.deepEqual([groups.extra("g_1", "b", "2026-11-18"), groups.extra("g_1", "b", "2026-11-19"), groups.used("g_1", "b", "2026-11-19")], [30, 5, 0], "a day's share once a day");
+  assert.deepEqual([groups.usage("g_1", "b", "2026-11-18"), groups.usage("g_1", "b", "2026-11-19")], [{ used: 3, extra: 30 }, { used: 0, extra: 5 }], "a day's share once a day");
   groups.addShare("g_1", "b", "2026-11-19", 8);
-  assert.equal(groups.extra("g_1", "b", "2026-11-19"), 8, "up to a 每天次数 raised since");
+  assert.equal(groups.usage("g_1", "b", "2026-11-19").extra, 8, "up to a 每天次数 raised since");
   assert.deepEqual([groups.warn("g_1", "b", "2026-11-18"), groups.warn("g_1", "b", "2026-11-18"), groups.warn("g_1", "b", "2026-11-20")], [true, false, true]);
   new GroupStore(store); // opening again changes nothing
-  assert.equal(groups.extra("g_1", "b", "2026-11-18"), 30);
+  assert.equal(groups.usage("g_1", "b", "2026-11-18").extra, 30);
 });
 
 test("how far an AI's front session looked only goes forward, and starts over from where it joins", () => {
