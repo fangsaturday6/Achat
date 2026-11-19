@@ -539,6 +539,22 @@ export class GroupStore {
     ).map(toReceipt);
   }
 
+  // What `asker` asked of the AIs it woke, in any of `states`, newest first:
+  // of one AI (`doer`), the requests of its act.
+  requests(groupId: string, asker: string, states: ReceiptState[], doer?: string): StoredReceipt[] {
+    if (!states.length) return [];
+    const marks = states.map(() => "?").join(", ");
+    const only = doer === undefined ? "" : " AND r.agent = ?";
+    return (
+      this.db
+        .prepare(
+          `SELECT r.* FROM group_receipts r JOIN group_messages m ON m.group_id = r.group_id AND m.seq = r.seq
+           WHERE r.group_id = ? AND m.sender = ? AND r.state IN (${marks})${only} ORDER BY r.seq DESC`,
+        )
+        .all(groupId, asker, ...states, ...(doer === undefined ? [] : [doer])) as Row[]
+    ).map(toReceipt);
+  }
+
   // The newest message an AI is done with in a group: answered, passed on or failed.
   doneSeq(groupId: string, agent: string): number {
     return (
@@ -643,11 +659,11 @@ export class GroupStore {
   }
 
   // Every act of a group still waiting or under way ends, such as at 叫停;
-  // with `doer`, only that AI's, such as when it leaves.
-  endActs(groupId: string, status: GroupActStatus, now: string, doer?: string): void {
-    const only = doer === undefined ? "" : " AND doer = ?";
+  // with `who`, only those asked of that AI, or by it, such as when it leaves.
+  endActs(groupId: string, status: GroupActStatus, now: string, who?: { doer: string } | { asker: string }): void {
+    const only = who === undefined ? "" : "doer" in who ? " AND doer = ?" : " AND asker = ?";
     this.db
       .prepare(`UPDATE group_acts SET status = ?, updated_at = ? WHERE group_id = ? AND status IN ('asking', 'active')${only}`)
-      .run(status, now, groupId, ...(doer === undefined ? [] : [doer]));
+      .run(status, now, groupId, ...(who === undefined ? [] : ["doer" in who ? who.doer : who.asker]));
   }
 }

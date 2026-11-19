@@ -400,9 +400,12 @@ export class GroupService {
     this.transaction(() => {
       this.store.leaveMember(group.id, agent, now);
       // What it was still reading, or asked to 动手 for, stays unanswered, and
-      // the line under it says why; what was asked of it ends with it.
+      // the line under it says why; what was asked of it ends with it. What
+      // it asked others to 动手 for ends too: nobody is left to do it for.
       for (const r of this.store.receiptsOf(group.id, agent, ["reading", "asking", "acting"])) this.store.setReceipt(group.id, r.seq, agent, "failed", "不在群里了", r.epoch, now);
-      this.store.endActs(group.id, "stopped", now, agent);
+      this.store.endActs(group.id, "stopped", now, { doer: agent });
+      for (const r of this.store.requests(group.id, agent, ["asking", "acting"])) this.store.setReceipt(group.id, r.seq, r.agent, "passed", "对方不在群里了", r.epoch, now);
+      this.store.endActs(group.id, "stopped", now, { asker: agent });
       // A dissolved group is only read now: leaving it changes nothing in it.
       if (group.status === "dissolved") return;
       this.store.addMessage(group.id, { sender: null, kind: "system", body: note }, now);
@@ -647,8 +650,8 @@ export class GroupService {
   }
 
   // An AI's receipts in one state for what `asker` said: the requests of one act.
-  private askedBy(groupId: string, agent: string, asker: string | null | undefined, state: ReceiptState) {
-    return this.store.receiptsOf(groupId, agent, [state]).filter((r) => this.store.message(groupId, r.seq)?.sender === asker);
+  private askedBy(groupId: string, agent: string, asker: string | null | undefined, state: ReceiptState): StoredReceipt[] {
+    return asker ? this.store.requests(groupId, asker, [state], agent) : [];
   }
 
   // The rounds start, the first being what asked: its person said yes, or it
