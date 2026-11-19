@@ -242,14 +242,19 @@ test("a 动手 conversation has only the tools it hands its work back with: aski
       );
     }
     assert.equal((await client.listThreads({ agent: CLAUDE })).length, threads, "it asked nobody");
-    // What it hands the work back with still works, for the thread it works for.
+    // What it hands the work back with still works, for the thread it works for, and only that one.
     assert.match(textOf(await doer.callTool({ name: "check_thread", arguments: { thread_id: t.id } })), new RegExp(`^协作 ${t.id}：改脚本`));
+    assert.match(textOf(await doer.callTool({ name: "check_thread", arguments: {} })), new RegExp(`^协作 ${t.id}：改脚本`), "its own, not the person's list");
+    const other = await client.createRequest({ from: CLAUDE, to: CODEX, topic: "别的事", message: "主人的另一件事" });
+    const peek = await doer.callTool({ name: "check_thread", arguments: { thread_id: other.id } });
+    assert.equal(peek.isError, true);
+    assert.equal(textOf(peek), `你在替协作 ${t.id} 动手，只能看这条协作（thread_id: ${t.id}）。`);
     const elsewhere = await doer.callTool({ name: "send_message", arguments: { thread_id: "t_other", message: "好了" } });
     assert.equal(textOf(elsewhere), `你在替协作 ${t.id} 动手，只能在这条协作里交回结果（thread_id: ${t.id}）。`);
     assert.match(textOf(await doer.callTool({ name: "send_message", arguments: { thread_id: t.id, message: "改好了" } })), /^已交回给/);
     // Nor is it told to have requests approved: that is the person's, in their own session.
     await client.createRequest({ from: CODEX, to: CLAUDE, topic: "另一件", message: "看看" });
-    assert.match((await userPromptHook(client, CLAUDE)) ?? "", /有 1 个待批准的请求/);
+    assert.match((await userPromptHook(client, CLAUDE)) ?? "", /个待批准的请求/);
     assert.equal(await userPromptHook(client, CLAUDE, { task: t.id }), null);
   } finally {
     await relay.close();

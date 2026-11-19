@@ -467,6 +467,14 @@ export function createMcpServer(opts: McpOptions): McpServer {
     },
     guard(async ({ thread_id }: { thread_id?: string }) => {
       const c = opts.connection();
+      // A 动手 conversation reads only the thread it works for: what the
+      // person's other threads say would go back with its work. (A group's
+      // never gets here: see tool.)
+      const doer = doing();
+      if (doer && "thread" in doer) {
+        if (thread_id && thread_id !== doer.thread) return text(`你在替协作 ${doer.thread} 动手，只能看这条协作（thread_id: ${doer.thread}）。`, true);
+        thread_id = doer.thread;
+      }
       if (!thread_id) return text(await listRecent(c));
       const t = await c.client.getThread(thread_id);
       const spent = t.mode === "do" ? "" : `，已花费 ${money(t.costUsd)}`;
@@ -835,6 +843,13 @@ export function createMcpServer(opts: McpOptions): McpServer {
     return (await c.client.agents()).find((a) => a.client === "person" && a.name === "我")?.id ?? null;
   }
 
+  // The group a 动手 conversation works for, if `group` names it; null for
+  // any other, without naming the person's groups.
+  async function ownGroup(c: McpConnection, task: { group: string }, group: string): Promise<GroupSummary | null> {
+    const g = await resolveGroup(c, group).catch(() => null);
+    return g?.id === task.group ? g : null;
+  }
+
   // "你在替群「网关」里的老王的 Codex 动手": the group and asker a 动手 conversation works for.
   async function doingFor(c: McpConnection, task: { group: string; asker: string }): Promise<string> {
     const d = await c.client.group(task.group).catch(() => null);
@@ -930,8 +945,8 @@ export function createMcpServer(opts: McpOptions): McpServer {
       // (A thread's never gets here: see tool.)
       const doer = doing();
       const task = doer && "group" in doer ? doer : null;
-      const g = await resolveGroup(c, group);
-      if (task && g.id !== task.group) return text(`${await doingFor(c, task)}，只能把结果发回这个群（group: ${task.group}）。`, true);
+      const g = task ? await ownGroup(c, task, group) : await resolveGroup(c, group);
+      if (!g) return text(`${await doingFor(c, task!)}，只能把结果发回这个群（group: ${task!.group}）。`, true);
       const before = await c.client.group(g.id);
       if (!before.members.some((m) => m.agent === c.agentId)) {
         const me = (await c.client.agents()).find((a) => a.id === c.agentId)?.name ?? c.agentId;
@@ -991,6 +1006,14 @@ export function createMcpServer(opts: McpOptions): McpServer {
     guard(async ({ group }: { group?: string }) => {
       const c = opts.connection();
       if (c.mode !== "cloud") return text(GROUPS_NEED_ACCOUNT, true);
+      // A 动手 conversation reads only the group it works for: what the
+      // person's other groups say would go back with its work.
+      const doer = doing();
+      if (doer && "group" in doer) {
+        const g = await ownGroup(c, doer, group ?? doer.group);
+        if (!g) return text(`${await doingFor(c, doer)}，只能看这个群（group: ${doer.group}）。`, true);
+        group = g.id;
+      }
       if (!group) {
         const list = await c.client.groups();
         if (!list.length) return text("主人的 AI 还不在任何群里。要建群用 create_group。");

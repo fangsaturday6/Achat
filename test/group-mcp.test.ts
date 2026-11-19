@@ -470,6 +470,15 @@ test("a 动手 conversation in a group has only the tools it sends its work back
       );
     }
     assert.equal((await fangMac.client.groups()).length, groups, "no group made");
+    // It reads only the group it works for, and is not told what the person's others are.
+    assert.match(textOf(await doer.callTool({ name: "check_group", arguments: {} })), /^群「网关」/, "its own, not the person's list");
+    for (const other of ["别的群", "没有这个群"]) {
+      const peek = await doer.callTool({ name: "check_group", arguments: { group: other } });
+      assert.equal(peek.isError, true);
+      assert.equal(textOf(peek), `你在替群「网关」里的老王的 Codex 动手，只能看这个群（group: ${g.id}）。`);
+      const say = await doer.callTool({ name: "send_group_message", arguments: { group: other, message: "好了", wait: false } });
+      assert.equal(textOf(say), `你在替群「网关」里的老王的 Codex 动手，只能把结果发回这个群（group: ${g.id}）。`);
+    }
     const now = await wangLaptop.client.group(g.id);
     assert.equal(now.messages.length, said, "nobody invited, nothing said");
     assert.equal(now.status, "open", "not 叫停");
