@@ -482,8 +482,10 @@ export class RelayClient {
     return this.call("GET", `/api/groups/work?${new URLSearchParams({ agents: agents.join(",") })}`);
   }
 
-  groupWorkFor(id: string, agent: string, fresh = false): Promise<GroupWork | null> {
-    const q = new URLSearchParams({ agent, ...(fresh ? { fresh: "1" } : {}) });
+  // What waits on `agent` in a group, or with `seq` that message, such as a
+  // round of 动手 groupWork listed.
+  groupWorkFor(id: string, agent: string, fresh = false, seq?: number): Promise<GroupWork | null> {
+    const q = new URLSearchParams({ agent, ...(fresh ? { fresh: "1" } : {}), ...(seq !== undefined ? { seq: String(seq) } : {}) });
     return this.call("GET", `/api/groups/${encodeURIComponent(id)}/work?${q}`);
   }
 

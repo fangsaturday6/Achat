@@ -82,7 +82,10 @@ export async function groupsApi(req: IncomingMessage, res: ServerResponse, url: 
       await groups.waitFor(id, Number.isFinite(timeout) ? timeout : 25_000);
       return ok(200, groups.detail(caller, id));
     }
-    if (action === "work") return ok(200, groups.workFor(caller, id, url.searchParams.get("agent") ?? "", url.searchParams.get("fresh") === "1"));
+    if (action === "work") {
+      const seq = url.searchParams.get("seq");
+      return ok(200, groups.workFor(caller, id, url.searchParams.get("agent") ?? "", url.searchParams.get("fresh") === "1", seq === null ? undefined : Number(seq)));
+    }
     return false;
   }
   if (method !== "POST") return false;

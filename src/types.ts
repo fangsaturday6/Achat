@@ -370,6 +370,10 @@ export interface GroupWork {
   // What the one who wrote `wake` asked of this AI, still waiting for its
   // person or under way; null when they asked it to do nothing.
   act: GroupAct | null;
+  // 动手 under way for them: each of their requests still waiting for a
+  // result, oldest first, which its next round is given however long ago
+  // they came. Empty otherwise.
+  requests: GroupMessage[];
 }
 
 // 动手 in a group (8n): one yes from the person lets `asker` have `doer`

@@ -884,6 +884,31 @@ describe("groups", () => {
     assert.equal(groups.approveAct(computer("fang"), g.id, byWang.act.id).own, false);
   });
 
+  test("动手 under way is listed act by act beside what waits for its person, and fetched by message with every request it has still to answer", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    const ask = (caller: Caller, from: string) => groups.postMessage(caller, g.id, { from, body: "@老方的 Claude 动手", mentions: ["fang/claude"] }).messages.at(-1)!.seq;
+    const request = (seq: number) => groups.requestAct(computer("fang"), g.id, { doer: "fang/claude", seq });
+    const first = ask(computer("wang"), "wang/codex");
+    groups.approveAct(computer("fang"), g.id, request(first).act.id);
+    const second = ask(computer("wang"), "wang/codex");
+    assert.equal(request(second).run, true);
+    const inPerson = ask(web("wang"), "p_wang");
+    assert.equal(request(inPerson).run, false);
+
+    // What waits for 老方 is put to him again; 老王's Codex's act goes on with its next round.
+    assert.deepEqual(groups.work(computer("fang"), ["fang/claude"]), [
+      { groupId: g.id, agent: "fang/claude", seq: inPerson },
+      { groupId: g.id, agent: "fang/claude", seq: second },
+    ]);
+    const round = groups.workFor(computer("fang"), g.id, "fang/claude", true, second)!;
+    assert.deepEqual([round.wake.seq, round.act!.asker, round.requests.map((m) => m.seq)], [second, "wang/codex", [first, second]]);
+    groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "@老王的 Codex 第一件做好了", mentions: ["wang/codex"], replyTo: first, epoch: 0 });
+    assert.deepEqual(groups.workFor(computer("fang"), g.id, "fang/claude", true, second)!.requests.map((m) => m.seq), [second]);
+    assert.deepEqual(groups.workFor(computer("fang"), g.id, "fang/claude", false, inPerson)!.requests, []);
+    assert.equal(groups.workFor(computer("fang"), g.id, "fang/claude", false, first), null, "answered: nothing waits on it");
+  });
+
   test("动手 asked by an AI that leaves ends: what waited for its person, and what was still to be done, need no answer", () => {
     const g = start();
     groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });

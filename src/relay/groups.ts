@@ -619,9 +619,15 @@ export class GroupService {
     this.requireGroup(groupId);
     if (!caller.actsAs(input.agent)) throw new RelayError(403, "只有被叫醒的 AI 可以这样报");
     const r = this.store.receipt(groupId, input.seq, input.agent);
-    // 动手 that could not start fails the same way; it is never held.
-    if (r?.state === "reading" || (r?.state === "acting" && state === "failed")) {
-      this.store.setReceipt(groupId, input.seq, input.agent, state, input.reason.trim().slice(0, 120) || null, r.epoch, this.stamp());
+    const reason = input.reason.trim().slice(0, 120) || null;
+    // A round of 动手 that could not start fails the same way, with every
+    // request it was for, as its result would answer them (settle); it is
+    // never held.
+    if (r?.state === "acting" && state === "failed") {
+      this.transaction(() => this.settle(groupId, input.agent, input.seq, state, reason, {}, this.stamp()));
+      this.emit("group.updated", groupId, { seq: input.seq });
+    } else if (r?.state === "reading") {
+      this.store.setReceipt(groupId, input.seq, input.agent, state, reason, r.epoch, this.stamp());
       this.emit("group.updated", groupId, { seq: input.seq });
     }
     return this.detail(caller, groupId);
@@ -818,17 +824,26 @@ export class GroupService {
     return this.detail(caller, groupId);
   }
 
-  // What waits on an AI in a group, the newest of the first kind there is:
-  // an @ to read; else a request to 动手 still waiting for its person, put to
-  // them again; else 动手 under way, whose next round its computer may still
-  // have to start: one round at a time, so a request that came while the
-  // round before was being done waits for that result, also over a restart.
-  private waitingOn(groupId: string, agent: string): StoredReceipt | undefined {
-    for (const state of ["reading", "asking", "acting"] as const) {
+  // What waits on an AI in a group, the newest of the first kind there is
+  // among `states`: an @ to read; else a request to 动手 still waiting for
+  // its person, put to them again; else 动手 under way.
+  private waitingOn(groupId: string, agent: string, states: ReceiptState[] = ["reading", "asking", "acting"]): StoredReceipt | undefined {
+    for (const state of states) {
       const r = this.store.receiptsOf(groupId, agent, [state])[0];
       if (r) return r;
     }
     return undefined;
+  }
+
+  // 动手 under way for each asker, whose next round the AI's computer may
+  // still have to start: the newest request of each act. One round at a
+  // time, so a request that came while the round before was being done
+  // waits for that result, also over a restart, whatever else waits.
+  private roundsOf(groupId: string, agent: string): StoredReceipt[] {
+    return this.store
+      .actsOf(groupId, agent, "active")
+      .map((act) => this.askedBy(groupId, agent, act.asker, "acting")[0])
+      .filter((r): r is StoredReceipt => r !== undefined);
   }
 
   // 动手 its person left unanswered (稍后) for a day since it was last asked
@@ -864,23 +879,26 @@ export class GroupService {
         }
         const { wake, expired } = this.transaction(() => ({ expired: this.expireAsking(group.id, agent, since, now), wake: this.takeUp(group, agent, ["offline"], now) }));
         if (wake.length || expired) this.emit("group.updated", group.id, { wake });
-        const waiting = this.waitingOn(group.id, agent);
-        if (waiting) out.push({ groupId: group.id, agent, seq: waiting.seq });
+        const waiting = this.waitingOn(group.id, agent, ["reading", "asking"]);
+        for (const r of [...(waiting ? [waiting] : []), ...this.roundsOf(group.id, agent)]) out.push({ groupId: group.id, agent, seq: r.seq });
       }
     }
     return out;
   }
 
-  // What an AI woken here reads: what waits on it (waitingOn), and from
-  // where its background session left off (the 20 before it joined, the
-  // first time or with `fresh`). `act`: what the one who wrote it asked of
-  // this AI. Null when nothing waits on it.
-  workFor(caller: Caller, groupId: string, agent: string, fresh = false): GroupWork | null {
+  // What an AI woken here reads: what waits on it (waitingOn), or with `seq`
+  // that message, if it still waits on it, such as a round of 动手 (work
+  // lists them); and from where its background session left off (the 20
+  // before it joined, the first time or with `fresh`). `act`: what the one
+  // who wrote it asked of this AI; `requests`: what an act under way has
+  // still to answer. Null when nothing waits on it.
+  workFor(caller: Caller, groupId: string, agent: string, fresh = false, seq?: number): GroupWork | null {
     const group = this.requireGroup(groupId);
     if (!caller.actsAs(agent)) throw new RelayError(403, "只能取自己的 AI 要回的消息");
     const member = this.store.member(groupId, agent);
     if (!member || member.leftAt) throw new RelayError(404, "找不到这个群");
-    const waiting = this.waitingOn(groupId, agent);
+    const asked = seq === undefined ? null : this.store.receipt(groupId, seq, agent);
+    const waiting = seq === undefined ? this.waitingOn(groupId, agent) : asked && (["reading", "asking", "acting"] as ReceiptState[]).includes(asked.state) ? asked : null;
     if (!waiting) return null;
     const from = Math.max(0, member.joinedSeq - this.limits.seeBefore);
     const goesOn = member.session !== null && !fresh;
@@ -903,6 +921,9 @@ export class GroupService {
       names: this.names(messages, members, plain),
       owner: { seat: this.dir.seat(owner), name: this.dir.person(owner, "") },
       act: wake.sender ? this.store.openAct(groupId, wake.sender, agent) : null,
+      requests: this.askedBy(groupId, agent, wake.sender, "acting")
+        .reverse()
+        .map((r) => this.store.message(groupId, r.seq)!),
     };
   }
 

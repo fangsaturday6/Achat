@@ -220,6 +220,18 @@ export function groupSystemPrompt(me: AgentConfig, name: string, owner: string, 
   ].join("\n");
 }
 
+// Whether `work.wake` asked this AI to 动手: waiting for its person, or under way.
+function askedToAct(work: GroupWork, agent: string): boolean {
+  const state = work.wake.receipts.find((r) => r.agent === agent)?.state;
+  return state === "asking" || state === "acting";
+}
+
+// One conversation does what one asker asks of one AI in a group, across
+// its acts, in one folder: what the TaskBook keeps it by.
+export function actKey(groupId: string, asker: string, doer: string): string {
+  return `${groupId}~${asker}~${doer}`;
+}
+
 // The AI's own name as the group's members list has it (nobody's side).
 function plainName(work: GroupWork, agent: string, fallback: string): string {
   return work.members.find((m) => m.agent === agent)?.name ?? fallback;
@@ -275,18 +287,29 @@ export function groupDoerSystemPrompt(me: AgentConfig, name: string, owner: stri
   ].join("\n");
 }
 
-// What a 动手 conversation in a group is given: the first time, the
-// group's recent messages and the request last; after that only what came
-// after `since`, what it was given before. The last line says where the
-// result goes. `to`: whom it is for, by the name everyone reads and what
-// send_group_message's mentions take (null: a person who cannot be @ed).
-// `saved`: where each message's files are on this computer, by seq.
-export function groupDoerPrompt(work: GroupWork, self: string, ask: GroupMessage, to: { name: string; mention: string | null }, since = 0, saved = new Map<number, string[]>()): string {
+// The messages a round of 动手 in a group is given, in order, its latest
+// request (`work.wake`) last: what came after `since`, what it was given
+// before (0 the first time), of the group's recent messages, and every
+// request of the act it has still to answer, however long ago it came.
+export function roundMessages(work: GroupWork, since = 0): GroupMessage[] {
+  const ask = work.wake;
+  const before = [...work.messages, ...work.requests].filter((m) => m.seq > since && m.seq < ask.seq);
+  return [...new Map(before.map((m) => [m.seq, m])).values()].sort((a, b) => a.seq - b.seq).concat(ask);
+}
+
+// What a 动手 conversation in a group is given (roundMessages): the first
+// time, the group's recent messages and the request last; after that only
+// what came since. The last line says where the result goes. `to`: whom it
+// is for, by the name everyone reads and what send_group_message's mentions
+// take (null: a person who cannot be @ed). `saved`: where each message's
+// files are on this computer, by seq.
+export function groupDoerPrompt(work: GroupWork, self: string, to: { name: string; mention: string | null }, since = 0, saved = new Map<number, string[]>()): string {
   const who = writer(work, self);
+  const ask = work.wake;
   const lines = since
     ? [`${cjk(to.name, "在 Achat 群")}「${work.group.name}」（${work.group.id}）里接着说：`, ""]
     : [`Achat 群「${work.group.name}」（${work.group.id}）：`, ""];
-  for (const m of [...work.messages.filter((m) => m.seq > since && m.seq < ask.seq), ask]) {
+  for (const m of roundMessages(work, since)) {
     if (m.kind === "system") lines.push(`— ${m.body}`, "");
     else lines.push(...said(who(m), m, saved));
   }
@@ -364,9 +387,14 @@ export class Sidecar {
   // shown last, and the dialog on screen.
   private actShown = new Map<string, number>();
   private actAsking = new Map<string, Asking>();
-  // 动手 here that waits its turn, by act: looked at again on the group's
-  // next event, since the round before may be back (nextRound).
-  private turns = new Map<string, { groupId: string; agent: string }>();
+  // 动手 here that waits its turn, by asker and AI (actKey), with its newest
+  // request: looked at again on the group's next event, since the round
+  // before may be back (nextRound); gone once nothing waits on it.
+  private turns = new Map<string, { groupId: string; agent: string; seq: number }>();
+  // 动手 conversations being opened, by asker and AI: a request that comes
+  // meanwhile waits its turn. The TaskBook says what one was given only once
+  // it is open, so one that never opened is taken up again.
+  private opening = new Set<string>();
   // Waiting out a login that ran out, and trying a slow answer once more.
   private loginWait: LoginWait;
   private timers = new Set<ReturnType<typeof setTimeout>>();
@@ -510,10 +538,11 @@ export class Sidecar {
           if (t.lastMessage.byPerson || toAnswerHere(await this.relay.getThread(t.id))) this.watchSeen(t.id);
         }
       }
-      // Groups: what the AIs here were @ed for while nobody listened, and the
-      // latest @ missed while this computer was off, within a day.
+      // Groups: what the AIs here were @ed for while nobody listened, the
+      // latest @ missed while this computer was off, within a day, and each
+      // act's next round of 动手.
       try {
-        for (const w of await this.relay.groupWork(Object.keys(this.opts.runners))) void this.answerGroup(w.groupId, w.agent);
+        for (const w of await this.relay.groupWork(Object.keys(this.opts.runners))) void this.takeTurn(w.groupId, w.agent, w.seq);
       } catch (err) {
         // On this computer alone, or from an Achat service from before groups, there are none.
         if (!(err instanceof RelayClientError && (err.status === 404 || err.status === 409))) throw err;
@@ -563,7 +592,7 @@ export class Sidecar {
     for (const agent of e.wake ?? []) if (this.mine(agent)) void this.answerGroup(e.groupId, agent);
     // A round of 动手 waiting its turn there: its round before may be back.
     if (e.type === "group.message" || e.type === "group.updated") {
-      for (const t of this.turns.values()) if (t.groupId === e.groupId) void this.answerGroup(t.groupId, t.agent);
+      for (const t of [...this.turns.values()]) if (t.groupId === e.groupId) void this.takeTurn(t.groupId, t.agent, t.seq);
     }
     if (e.type === "group.quotaLow") {
       for (const agent of e.members) if (this.mine(agent)) void this.offerMoreWakes(e.groupId, agent);
@@ -673,17 +702,9 @@ export class Sidecar {
         return;
       }
       // 动手 asked of it with this message: put to its person again, or
-      // carried on one round at a time; where it cannot 动手, left as it is.
-      const asked = work.wake.receipts.find((r) => r.agent === agent)?.state;
-      if (asked === "asking" || asked === "acting") {
-        if (!runner.judge || !this.opts.doers?.[agent]) {
-          this.log(`${groupId} 第 ${work.wake.seq} 条请 ${me.name} 动手，这台电脑上它不能动手，不在后台回答`);
-          return;
-        }
-        if (asked === "asking") await this.groupAct(work, agent, me);
-        else if (work.act?.status === "active") {
-          await this.nextRound((await this.relay.groupWorkFor(groupId, agent, true)) ?? work, work.wake, work.act, me);
-        }
+      // carried on one round at a time.
+      if (askedToAct(work, agent)) {
+        await this.actOn(work, agent, me);
         return;
       }
       if (this.opts.doers?.[agent] && (await this.judgeGroup(work, runner)) === "do" && (await this.groupAct(work, agent, me))) return;
@@ -783,14 +804,53 @@ export class Sidecar {
     }
   }
 
+  // What waits on an AI here for one message (`seq`): what the service
+  // listed when this computer started, or a round of 动手 that waited its
+  // turn. An @ is answered as any (answerGroup); 动手 goes on (actOn). A
+  // turn goes once nothing waits on it: answered, 叫停, the group dissolved,
+  // the AI gone from it.
+  private async takeTurn(groupId: string, agent: string, seq: number): Promise<void> {
+    try {
+      const work = await this.relay.groupWorkFor(groupId, agent, false, seq);
+      if (!work || !askedToAct(work, agent)) {
+        this.endTurns(groupId, agent, seq);
+        if (work) void this.answerGroup(groupId, agent);
+        return;
+      }
+      await this.actOn(work, agent, (await this.agent(agent)) ?? { id: agent, name: agent, client: "claude" as const });
+    } catch (err) {
+      if (this.stopping.signal.aborted) return;
+      // Gone from the group, or a service from before 动手 in groups.
+      if (err instanceof RelayClientError && (err.status === 404 || err.status === 403)) this.endTurns(groupId, agent, seq);
+      this.log(`${groupId} 第 ${seq} 条：${(err as Error).message}`);
+    }
+  }
+
+  // The turns waiting on `seq` there end: nothing waits on it any more.
+  private endTurns(groupId: string, agent: string, seq: number): void {
+    for (const [key, t] of this.turns) if (t.groupId === groupId && t.agent === agent && t.seq === seq) this.turns.delete(key);
+  }
+
+  // 动手 asked of an AI here with `work.wake`: still waiting for its person,
+  // it is put to them (groupAct); under way, carried on one round at a time.
+  // Where it cannot 动手, it is left as it is, and not answered in the background.
+  private async actOn(work: GroupWork, agent: string, me: AgentConfig): Promise<void> {
+    if (!this.opts.runners[agent]?.judge || !this.opts.doers?.[agent]) {
+      this.log(`${work.group.id} 第 ${work.wake.seq} 条请 ${me.name} 动手，这台电脑上它不能动手，不在后台回答`);
+      return;
+    }
+    if (work.wake.receipts.find((r) => r.agent === agent)?.state === "asking") await this.groupAct(work, agent, me);
+    else if (work.act?.status === "active") await this.nextRound(work.group.id, agent, work.act, me);
+    else this.endTurns(work.group.id, agent, work.wake.seq);
+  }
+
   // 动手 asked for in a group: its person says yes here first, except
-  // between their own AIs, and within an act's rounds the same asker goes on
-  // without asking again. False when the Achat service does not know 动手 in
-  // groups yet: then it is answered as before.
+  // when they asked themself (the service says, GroupAct.own), and within
+  // an act's rounds the same asker goes on without asking again. False when
+  // the Achat service does not know 动手 in groups yet: then it is answered
+  // as before.
   private async groupAct(work: GroupWork, agent: string, me: AgentConfig): Promise<boolean> {
     const groupId = work.group.id;
-    // The 20 before, the first time: the conversation that does the work has seen none of the group.
-    const fresh = (await this.relay.groupWorkFor(groupId, agent, true)) ?? work;
     let asked: { act: GroupAct; run: boolean };
     try {
       asked = await this.relay.requestGroupAct(groupId, agent, work.wake.seq);
@@ -801,8 +861,8 @@ export class Sidecar {
       this.log(`${groupId} 没有请到动手：${err.message}`);
       return err.status === 409;
     }
-    if (asked.run) await this.nextRound(fresh, work.wake, asked.act, me);
-    else void this.askGroupAct(fresh, work.wake, asked.act, me);
+    if (asked.run) await this.nextRound(groupId, agent, asked.act, me);
+    else void this.askGroupAct(work, work.wake, asked.act, me);
     return true;
   }
 
@@ -839,7 +899,7 @@ export class Sidecar {
       }
       this.actAsking.set(act.id, asking);
       const answer = await asking.answer;
-      if (answer === "approve") await this.nextRound(work, ask, await this.relay.approveGroupAct(groupId, act.id), me);
+      if (answer === "approve") await this.nextRound(groupId, act.doer, await this.relay.approveGroupAct(groupId, act.id), me);
       if (answer === "decline") await this.relay.declineGroupAct(groupId, act.id);
     } catch (err) {
       if (this.stopping.signal.aborted) return;
@@ -853,60 +913,81 @@ export class Sidecar {
     }
   }
 
-  // 动手 for one asker goes one round at a time (8n): a request that comes
-  // while the round before is being done here (given to the conversation,
-  // the line under it still 正在动手) waits its turn, and the group's next
-  // event looks again (onGroupEvent). Once that result is back, the next
-  // round is given every request since and answers the latest. After this
-  // computer starts again, what no conversation was given yet is taken up
-  // the same way: the TaskBook keeps what each act was given.
-  private async nextRound(work: GroupWork, ask: GroupMessage, act: GroupAct, me: AgentConfig): Promise<void> {
-    const given = this.tasks.seen(act.id);
-    if (given && ask.seq > given) {
-      const d = await this.relay.group(act.groupId);
-      const before = d.messages.find((m) => m.seq === given)?.receipts.find((r) => r.agent === act.doer);
-      if (before?.state === "acting") {
-        this.turns.set(act.id, { groupId: act.groupId, agent: act.doer });
-        return;
-      }
-    }
-    this.turns.delete(act.id);
-    if (ask.seq > given) await this.groupTask(work, ask, act, me);
-  }
-
-  // 动手 in a group: the first round opens a conversation of its own, in a
-  // folder named after the group; each later one within the rounds carries
-  // on from the conversation before, given only what came after.
-  private async groupTask(work: GroupWork, ask: GroupMessage, act: GroupAct, me: AgentConfig): Promise<void> {
-    const groupId = work.group.id;
-    const opener = this.opts.doers?.[act.doer];
-    if (!opener) {
-      await this.relay.failGroup(groupId, { agent: act.doer, seq: ask.seq, reason: cjk(plainName(work, act.doer, me.name), "在这台电脑上还不能动手") });
+  // 动手 for one asker goes one round at a time (8n), in one conversation
+  // for that asker and AI (actKey): a request that comes while the round
+  // before is being done here (given to the conversation, the line under it
+  // still 正在动手), or while the conversation opens, waits its turn, and
+  // the group's next event looks again (onGroupEvent). Once that result is
+  // back, the next round is given every request since and answers the
+  // latest (act.askSeq). After this computer starts again, what no
+  // conversation was given yet is taken up the same way: the TaskBook keeps
+  // what each conversation was given.
+  private async nextRound(groupId: string, agent: string, act: GroupAct, me: AgentConfig): Promise<void> {
+    const key = actKey(groupId, act.asker, agent);
+    const turn = { groupId, agent, seq: act.askSeq };
+    const given = this.tasks.seen(key);
+    if (act.askSeq <= given) return this.endTurns(groupId, agent, act.askSeq);
+    if (this.opening.has(key)) {
+      this.turns.set(key, turn);
       return;
     }
-    const before = this.tasks.get(act.id) ?? undefined;
-    const since = before ? this.tasks.seen(act.id) : 0;
-    // Given to this round now, before anything is awaited: a request that
-    // comes meanwhile waits its turn (nextRound).
-    this.tasks.markSeen(act.id, ask.seq);
-    const to = await this.askerOf(work, act.asker);
-    // A group's files are kept under its id, which the conversation may read.
-    mkdirSync(filesDir(groupId), { recursive: true, mode: 0o700 });
-    const saved = await saveAllFiles(this.relay, [...work.messages, ask].filter((m) => m.seq > since).map((m) => ({ ...m, threadId: groupId })));
-    const use = await this.ownUse(act.doer);
-    const rec = await opener.open({
-      ...(use ? { model: use.model, label: use.label, effort: use.effort } : {}),
-      threadId: act.id,
-      topic: work.group.name,
-      prompt: groupDoerPrompt(work, act.doer, ask, to, since, saved),
-      systemPrompt: groupDoerSystemPrompt(me, plainName(work, act.doer, me.name), work.owner.name, work.group.name),
-      from: before,
-      readDirs: [filesDir(groupId)],
-      own: act.own,
-      inGroup: true,
-    });
-    this.tasks.set(act.id, rec);
-    this.log(`${groupId} 在新对话里动手：${rec.dir}`);
+    // Held before anything is awaited: a request that comes meanwhile waits.
+    this.opening.add(key);
+    try {
+      const before = given ? (await this.relay.group(groupId)).messages.find((m) => m.seq === given) : undefined;
+      if (before?.receipts.find((r) => r.agent === agent)?.state === "acting") {
+        this.turns.set(key, turn);
+        return;
+      }
+      this.turns.delete(key);
+      await this.groupTask(groupId, agent, act, me);
+    } finally {
+      this.opening.delete(key);
+    }
+  }
+
+  // A round of 动手 in a group: the first opens a conversation of its own,
+  // in a folder named after the group; each later one, also of an act
+  // approved anew once ten rounds were used, carries on from the
+  // conversation before, in its folder, given only what came since. What it
+  // was given is written once it is open: one that never opened is taken up
+  // again. One that cannot open says why under each request it was for.
+  private async groupTask(groupId: string, agent: string, act: GroupAct, me: AgentConfig): Promise<void> {
+    const opener = this.opts.doers?.[agent];
+    const work = await this.relay.groupWorkFor(groupId, agent, true, act.askSeq);
+    if (!opener || !work || work.act?.id !== act.id || work.act.status !== "active") return;
+    const key = actKey(groupId, act.asker, agent);
+    const before = this.tasks.get(key) ?? undefined;
+    const since = before ? this.tasks.seen(key) : 0;
+    try {
+      const to = await this.askerOf(work, act.asker);
+      // A group's files are kept under its id, which the conversation may read.
+      mkdirSync(filesDir(groupId), { recursive: true, mode: 0o700 });
+      const saved = await saveAllFiles(this.relay, roundMessages(work, since).map((m) => ({ ...m, threadId: groupId })));
+      const use = await this.ownUse(agent);
+      const rec = await opener.open({
+        ...(use ? { model: use.model, label: use.label, effort: use.effort } : {}),
+        threadId: act.id,
+        topic: work.group.name,
+        prompt: groupDoerPrompt(work, agent, to, since, saved),
+        systemPrompt: groupDoerSystemPrompt(me, plainName(work, agent, me.name), work.owner.name, work.group.name),
+        from: before,
+        readDirs: [filesDir(groupId)],
+        own: act.own,
+        inGroup: true,
+      });
+      this.tasks.set(key, rec);
+      this.tasks.markSeen(key, work.wake.seq);
+      this.log(`${groupId} 在新对话里动手：${rec.dir}`);
+    } catch (err) {
+      if (this.stopping.signal.aborted) return;
+      const raw = (err as Error).message || "出错了";
+      this.log(`${groupId} 第 ${work.wake.seq} 条动手没有开始：${raw}`);
+      if (err instanceof RelayClientError) return;
+      // Under the latest request, and every one before it this round was for.
+      // Everyone in the group reads this: plain words, nothing from this computer.
+      await this.relay.failGroup(groupId, { agent, seq: work.wake.seq, reason: failureLine(raw) }).catch((e: Error) => this.log(`${groupId} 的出错没有传到：${e.message}`));
+    }
   }
 
   // The other side said something in a thread an AI here asked. Usually the
