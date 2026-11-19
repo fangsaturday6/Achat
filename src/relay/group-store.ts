@@ -270,10 +270,14 @@ export class GroupStore {
     this.db = store.db;
     this.db.exec(SCHEMA);
     // Columns added later; older rows take the defaults (nothing added, nobody
-    // told, nothing looked at in front).
+    // told).
     addColumn(this.db, "group_usage", "extra", "INTEGER NOT NULL DEFAULT 0");
     addColumn(this.db, "group_usage", "warned", "INTEGER NOT NULL DEFAULT 0");
-    addColumn(this.db, "group_members", "seen_seq", "INTEGER NOT NULL DEFAULT 0");
+    // Members from before have their front session start where their group
+    // is now: what was answered before is no news, as for one joining now.
+    if (addColumn(this.db, "group_members", "seen_seq", "INTEGER NOT NULL DEFAULT 0")) {
+      this.db.exec("UPDATE group_members SET seen_seq = (SELECT COALESCE(MAX(seq), 0) FROM group_messages WHERE group_id = group_members.group_id)");
+    }
   }
 
   transaction<T>(fn: () => T): T {

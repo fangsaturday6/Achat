@@ -77,3 +77,26 @@ test("how far an AI's front session looked only goes forward, and starts over fr
   groups.addMember({ groupId: "g_1", agent: "a", owner: "fang", quota: 30, joinedSeq: 7 }, now);
   assert.equal(groups.member("g_1", "a")!.seenSeq, 7, "what was answered while it was out is not news");
 });
+
+test("a database from before 前台提醒 has each AI's front session start at its group's latest message, so answers from before are no news", () => {
+  const store = new Store(":memory:");
+  const before = new GroupStore(store);
+  const now = "2026-11-18T02:00:00.000Z";
+  before.createGroup({ id: "g_1", name: "前台", owner: "fang" }, now);
+  before.createGroup({ id: "g_2", name: "还没说话", owner: "fang" }, now);
+  for (const groupId of ["g_1", "g_2"]) {
+    for (const agent of ["a", "b"]) before.addMember({ groupId, agent, owner: "fang", quota: 30, joinedSeq: 0 }, now);
+  }
+  const asked = before.addMessage("g_1", { sender: "a", kind: "message", body: "@b 好了吗", mentions: ["b"] }, now);
+  before.addMessage("g_1", { sender: "b", kind: "message", body: "好了", replyTo: asked.seq }, now);
+  store.db.exec("ALTER TABLE group_members DROP COLUMN seen_seq");
+
+  const groups = new GroupStore(store);
+  assert.deepEqual([groups.member("g_1", "a")!.seenSeq, groups.member("g_1", "b")!.seenSeq, groups.member("g_2", "a")!.seenSeq], [2, 2, 0]);
+  assert.deepEqual(groups.unseenReplies("a"), []);
+  // Answers after that are news, also once it is opened again.
+  const again = groups.addMessage("g_1", { sender: "a", kind: "message", body: "@b 还有呢", mentions: ["b"] }, now);
+  const answer = groups.addMessage("g_1", { sender: "b", kind: "message", body: "没了", replyTo: again.seq }, now);
+  new GroupStore(store);
+  assert.deepEqual(groups.unseenReplies("a"), [{ groupId: "g_1", seq: answer.seq }]);
+});
