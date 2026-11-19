@@ -34,12 +34,11 @@ async function accountOf(b: Browser): Promise<string> {
   return (await b.call("GET", "/api/me")).account.id;
 }
 
-// Every invite this person has to the group, answered on the web.
+// This person's invite card, answered on the web: 加入 answers every invite
+// they have to the group.
 async function accept(b: Browser, groupId: string, body: Record<string, unknown> = {}): Promise<void> {
-  const account = await accountOf(b);
-  for (const i of (await b.call("GET", `/api/groups/${groupId}`)).invites.filter((x: any) => x.account === account)) {
-    await b.call("POST", `/api/groups/${groupId}/invites/${i.id}/accept`, body);
-  }
+  const { myInvite } = await b.call("GET", `/api/groups/${groupId}`);
+  await b.call("POST", `/api/groups/${groupId}/invites/${myInvite.id}/accept`, body);
 }
 
 const seat = (account: string): string => `p_${account}`;
@@ -156,12 +155,12 @@ const weekly = await lin.call("POST", "/api/groups", { from: seat(linId), name: 
 await accept(fang, weekly.id);
 await lin.call("POST", `/api/groups/${weekly.id}/messages`, { from: seat(linId), body: "本周三件事都已上线" });
 
-// 发版计划：老王建的，邀请老方本人，再单独点名王闯的 Codex；开场白带一个附件。
-// 老方和王闯看到的都是进群卡片：老方自己选 AI，王闯那张只有被点名的 Codex。
+// 发版计划：老王建的，邀请老方本人，再点名王闯的 Codex 和 Claude；开场白带一个附件。
+// 老方和王闯看到的都是进群卡片：老方自己选 AI，王闯那张是被点名的两个 AI，一起加入或拒绝。
 await wang.call("POST", "/api/groups", {
   from: seat(wangId),
   name: "发版计划",
-  members: [{ agent: wangCodex }, { account: fangId }, { agent: chuangCodex }],
+  members: [{ agent: wangCodex }, { account: fangId }, { agent: chuangCodex }, { agent: chuangClaude }],
   message: "@所有人 周五发版，各自确认一下要发的改动",
   files: [textFile("发版清单.txt", "1. 支付宝回调\n2. 对账任务\n")],
 });
@@ -170,7 +169,7 @@ mailer.loud = true;
 console.log(`
 演示数据准备好了：${base}
 - 用 fang@example.com 登录（验证码会打印在下面）。老方有三个群：支付对接（王闯的 Codex 正在看）、周会纪要（有新消息）、发版计划（[待加入]），还有老王的 Codex 发来、等你批准的私聊。
-- 换一个无痕窗口，用 wang@、lin@、chuang@example.com 登录，看别人那边（王闯的“发版计划”也是 [待加入]，只点名了他的 Codex）。
+- 换一个无痕窗口，用 wang@、lin@、chuang@example.com 登录，看别人那边（王闯的“发版计划”也是 [待加入]，点名了他的 Codex 和 Claude）。
 - 在群里 @ 老王、王闯的 AI，一两秒后它们回话或者说无需回复；小林的电脑一直关着。
 按 Ctrl+C 停止。`);
 process.on("SIGINT", () => void cloud.close().then(() => process.exit(0)));

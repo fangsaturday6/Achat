@@ -203,8 +203,8 @@ export class GroupService {
   // An invite to a person, or one waiting already, made new for another 7
   // days. A person has one invite card: one that lets them pick covers any of
   // their AIs, and asking them to pick while an AI of theirs is asked for by
-  // name waits on that one. Another AI by name is its own invite, which they
-  // answer in 群设置 once they are in.
+  // name waits on that one. Another AI by name is its own invite, on the
+  // same card until they are in (see card), a tile in 群设置 after.
   private offer(groupId: string, t: { account: string; agent: string | null }, by: string, now: string): void {
     const expiresAt = new Date(this.now().getTime() + this.limits.inviteTtlMs).toISOString();
     const theirs = this.store.openInvites(groupId, now).filter((i) => i.account === t.account);
@@ -418,13 +418,26 @@ export class GroupService {
     return invite;
   }
 
-  // The person picks which of their AIs join (or the one named), and how
-  // many times a day each may be woken here.
+  // What an answer to `invite` answers. Someone not yet in has one invite
+  // card however many of their AIs were asked for by name: answering it
+  // answers them all. Once in, each AI asked for is a tile in 群设置,
+  // answered on its own.
+  private card(caller: Caller, groupId: string, invite: InviteRow): InviteRow[] {
+    if (this.mine(caller, groupId).length) return [invite];
+    return this.store.openInvites(groupId, this.stamp()).filter((i) => i.account === caller.account);
+  }
+
+  // The person picks which of their AIs join, or those asked for by name
+  // join (leaving out any since removed), and how many times a day each may
+  // be woken here.
   acceptInvite(caller: Caller, groupId: string, inviteId: string, input: { agents?: string[]; quota?: number }): GroupDetail {
     const invite = this.requireInvite(caller, groupId, inviteId);
     const group = this.requireGroup(groupId);
     this.requireOpen(group);
-    const agents = invite.agent ? [invite.agent] : [...new Set(input.agents ?? [])];
+    const card = this.card(caller, groupId, invite);
+    const named = card.every((i) => i.agent) ? card.map((i) => i.agent!) : null;
+    const agents = named ? named.filter((a) => this.dir.agent(a)) : [...new Set(input.agents ?? [])];
+    if (named && !agents.length) throw new RelayError(409, "邀请的 AI 已经移除了");
     if (!agents.length) throw new RelayError(400, "选至少一个 AI 进群");
     for (const a of agents) {
       const agent = this.dir.agent(a);
@@ -436,7 +449,7 @@ export class GroupService {
     if (members.length + newcomers.length > this.limits.maxMembers) throw new RelayError(409, `群里最多 ${this.limits.maxMembers} 个 AI`);
     const now = this.stamp();
     const wake = this.store.transaction(() => {
-      this.store.answerInvite(invite.id, "accepted");
+      for (const i of card) this.store.answerInvite(i.id, "accepted");
       return this.admit(group, newcomers, caller.account, quota, now);
     });
     this.emit("group.updated", groupId, { wake });
@@ -445,7 +458,9 @@ export class GroupService {
 
   declineInvite(caller: Caller, groupId: string, inviteId: string): { ok: true } {
     const invite = this.requireInvite(caller, groupId, inviteId);
-    this.store.answerInvite(invite.id, "declined");
+    this.store.transaction(() => {
+      for (const i of this.card(caller, groupId, invite)) this.store.answerInvite(i.id, "declined");
+    });
     this.emit("group.updated", groupId, {}, [this.dir.seat(caller.account)]);
     return { ok: true };
   }

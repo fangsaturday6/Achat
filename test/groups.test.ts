@@ -5,8 +5,8 @@ import { GroupService, type Caller, type GroupDirectory } from "../src/relay/gro
 import { Store } from "../src/relay/store.js";
 import { ALL } from "../src/types.js";
 
-// 老方 has Claude and Codex; 老王 has Codex and Claude; 小林 has Claude and
-// 豆包; 王闯 has Codex. 老方 is friends with 老王 and 小林; 王闯 only with 老王.
+// 老方 has Claude and Codex; 老王 has Codex and Claude; 小林 has Claude,
+// 豆包 and Codex; 王闯 has Codex. 老方 is friends with 老王 and 小林; 王闯 only with 老王.
 const AIS: AgentConfig[] = [
   { id: "fang/claude", name: "老方的 Claude", client: "claude", owner: "fang" },
   { id: "fang/codex", name: "老方的 Codex", client: "codex", owner: "fang" },
@@ -14,6 +14,7 @@ const AIS: AgentConfig[] = [
   { id: "wang/claude", name: "老王的 Claude", client: "claude", owner: "wang" },
   { id: "lin/claude", name: "小林的 Claude", client: "claude", owner: "lin" },
   { id: "r_lin", name: "小林的豆包", client: "doubao", owner: "lin", canReceive: false },
+  { id: "lin/codex", name: "小林的 Codex", client: "codex", owner: "lin" },
   { id: "chuang/codex", name: "王闯的 Codex", client: "codex", owner: "chuang" },
 ];
 const PEOPLE: Record<string, string> = { fang: "老方", wang: "老王", lin: "小林", chuang: "王闯" };
@@ -105,7 +106,7 @@ describe("groups", () => {
     const g = start();
     groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex", "wang/claude"] });
     groups.invite(computer("fang"), g.id, { from: "fang/claude", members: [{ agent: "r_lin" }] });
-    for (const i of groups.detail(web("lin"), g.id).invites.filter((i) => i.account === "lin")) groups.acceptInvite(web("lin"), g.id, i.id, {});
+    groups.acceptInvite(web("lin"), g.id, inviteTo(g, "lin"), {});
 
     assert.deepEqual(groups.postMessage(web("fang"), g.id, { from: "p_fang", body: "大家好" }).messages.at(-1)!.receipts, []);
     online.delete("wang/claude");
@@ -479,6 +480,51 @@ describe("groups", () => {
     // A group made with a person and their AI by name invites the person once.
     const made = groups.createGroup(computer("fang"), { from: "fang/claude", name: "两次", members: [{ account: "wang" }, { agent: "wang/codex" }] });
     assert.deepEqual(made.invites.map((i) => [i.account, i.agent]), [["wang", null]]);
+  });
+
+  test("someone not yet in answers one card for all their AIs asked for by name; once in, each on its own", () => {
+    const g = groups.createGroup(computer("fang"), { from: "fang/claude", name: "两个", members: [{ agent: "lin/claude" }, { agent: "r_lin" }] });
+    const open = (account: string) => groups.detail(web("fang"), g.id).invites.filter((i) => i.account === account).map((i) => i.agent);
+    assert.deepEqual(open("lin"), ["lin/claude", "r_lin"]);
+    // 拒绝 on the card declines both: the group does not come back.
+    groups.declineInvite(web("lin"), g.id, groups.detail(web("lin"), g.id).myInvite!.id);
+    assert.deepEqual(open("lin"), []);
+    assert.throws(() => groups.detail(web("lin"), g.id), /找不到这个群/);
+
+    // Asked again: 加入 brings both in, at the 每天次数 picked; what was ticked does not matter.
+    groups.invite(computer("fang"), g.id, { from: "fang/claude", members: [{ agent: "lin/claude" }, { agent: "r_lin" }] });
+    const joined = groups.acceptInvite(web("lin"), g.id, groups.detail(web("lin"), g.id).myInvite!.id, { agents: ["lin/codex"], quota: 8 });
+    assert.deepEqual(joined.members.filter((m) => m.owner === "lin").map((m) => [m.agent, m.quota]), [["lin/claude", 8], ["r_lin", 8]]);
+    assert.deepEqual(open("lin"), []);
+
+    // In the group, each AI asked for by name is a tile of its own in 群设置.
+    const later = groups.createGroup(computer("fang"), { from: "fang/claude", name: "后来", members: [{ agent: "lin/claude" }] });
+    groups.acceptInvite(web("lin"), later.id, inviteTo(later, "lin"), {});
+    const tiles = groups.invite(computer("fang"), later.id, { from: "fang/claude", members: [{ agent: "r_lin" }, { agent: "lin/codex" }] });
+    groups.acceptInvite(web("lin"), later.id, tiles.invites.find((i) => i.agent === "r_lin")!.id, {});
+    const now = groups.detail(web("lin"), later.id);
+    assert.deepEqual(now.members.filter((m) => m.owner === "lin").map((m) => m.agent), ["lin/claude", "r_lin"]);
+    assert.deepEqual(now.invites.map((i) => i.agent), ["lin/codex"]);
+  });
+
+  test("an AI asked for by name that is gone is left out of 加入; with none left, 加入 says so", () => {
+    const g = groups.createGroup(computer("fang"), { from: "fang/claude", name: "两个", members: [{ agent: "lin/claude" }, { agent: "lin/codex" }] });
+    const gone = AIS.findIndex((a) => a.id === "lin/codex");
+    const [removed] = AIS.splice(gone, 1);
+    try {
+      const joined = groups.acceptInvite(web("lin"), g.id, inviteTo(g, "lin"), {});
+      assert.deepEqual(joined.members.filter((m) => m.owner === "lin").map((m) => m.agent), ["lin/claude"]);
+      const only = groups.createGroup(computer("fang"), { from: "fang/claude", name: "一个", members: [{ agent: "lin/claude" }] });
+      const claude = AIS.findIndex((a) => a.id === "lin/claude");
+      const [alsoRemoved] = AIS.splice(claude, 1);
+      try {
+        assert.throws(() => groups.acceptInvite(web("lin"), only.id, inviteTo(only, "lin"), {}), /已经移除/);
+      } finally {
+        AIS.splice(claude, 0, alsoRemoved);
+      }
+    } finally {
+      AIS.splice(gone, 0, removed);
+    }
   });
 
   test("waiting ends at the group's next change", async () => {

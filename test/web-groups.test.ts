@@ -432,7 +432,7 @@ describe("who 发起群聊 and 邀请 list, and who can be ticked", () => {
   });
 });
 
-test("the invite card offers the person's own AIs, those that can answer ticked; only the one asked for by name", () => {
+test("the invite card offers the person's own AIs, those that can answer ticked; only those asked for by name, on one card", () => {
   const agents = [
     { id: "w/codex", name: "我的 Codex", client: "codex", owner: "wang" },
     { id: "w/claude", name: "我的 Claude", client: "claude", owner: "wang" },
@@ -441,14 +441,22 @@ test("the invite card offers the person's own AIs, those that can answer ticked;
     // A friend's AI, in /api/agents too, is never offered.
     { id: "c/codex", name: "王闯的 Codex", client: "codex", owner: "chuang" },
   ];
-  assert.deepEqual(page.inviteChoices({ agent: null }, agents, "wang").map((c: any) => [c.name, c.checked, c.locked, c.speaksOnly]), [
+  assert.deepEqual(page.inviteChoices([{ agent: null }], agents, "wang").map((c: any) => [c.name, c.checked, c.locked, c.speaksOnly]), [
     ["我的 Codex", true, false, false],
     ["我的 Claude", true, false, false],
     ["我的豆包", false, false, true],
   ]);
-  assert.deepEqual(page.inviteChoices({ agent: "w/claude" }, agents, "wang").map((c: any) => [c.name, c.checked, c.locked]), [["我的 Claude", true, true]]);
-  assert.deepEqual(page.inviteChoices({ agent: "gone" }, agents, "wang"), []);
-  assert.deepEqual(page.inviteChoices({ agent: "c/codex" }, agents, "wang"), [], "named for someone else's AI");
+  assert.deepEqual(page.inviteChoices([{ agent: "w/claude" }], agents, "wang").map((c: any) => [c.name, c.checked, c.locked]), [["我的 Claude", true, true]]);
+  assert.deepEqual(
+    page.inviteChoices([{ agent: "w/claude" }, { agent: "r_w" }, { agent: "gone" }], agents, "wang").map((c: any) => [c.name, c.checked, c.locked]),
+    [
+      ["我的 Claude", true, true],
+      ["我的豆包", true, true],
+    ],
+    "two asked for by name: one card, both ticked and fixed",
+  );
+  assert.deepEqual(page.inviteChoices([{ agent: "gone" }], agents, "wang"), []);
+  assert.deepEqual(page.inviteChoices([{ agent: "c/codex" }], agents, "wang"), [], "named for someone else's AI");
 });
 
 test("the invite card says which computer an AI is on, unless its name says it already", () => {
@@ -462,19 +470,23 @@ test("the invite card says which computer an AI is on, unless its name says it a
     { id: "m", name: "MacBook", agents: [{ id: "m/claude" }, { id: "m/codex" }] },
     { id: "i", name: "iMac", agents: [{ id: "i/claude" }] },
   ];
-  assert.deepEqual(page.inviteChoices({ agent: null }, agents, "fang", devices).map((c: any) => [c.name, c.note]), [
+  assert.deepEqual(page.inviteChoices([{ agent: null }], agents, "fang", devices).map((c: any) => [c.name, c.note]), [
     ["我的 Claude（MacBook）", null],
     ["我的 Claude（iMac）", null],
     ["我的 Codex", "MacBook"],
     ["我的豆包", "只能发言"],
   ]);
-  assert.equal(page.inviteChoices({ agent: null }, agents, "fang")[2].note, null, "no computers known");
+  assert.equal(page.inviteChoices([{ agent: null }], agents, "fang")[2].note, null, "no computers known");
 });
 
 test("an invite card with nothing to bring in says why, in a few words", () => {
-  const none = page.inviteChoices({ agent: null }, [], "fang");
-  assert.deepEqual(page.inviteEmpty({ agent: null, agentName: null }, none), { text: "先连接 AI", connect: true });
-  assert.deepEqual(page.inviteEmpty({ agent: "f/claude", agentName: "我的 Claude" }, none), { text: "我的 Claude 已移除", connect: false });
-  const one = page.inviteChoices({ agent: null }, [{ id: "f/claude", name: "我的 Claude", client: "claude", owner: "fang" }], "fang");
-  assert.equal(page.inviteEmpty({ agent: null, agentName: null }, one), null);
+  const none = page.inviteChoices([{ agent: null }], [], "fang");
+  assert.deepEqual(page.inviteEmpty([{ agent: null, agentName: null }], none), { text: "先连接 AI", connect: true });
+  assert.deepEqual(page.inviteEmpty([{ agent: "f/claude", agentName: "我的 Claude" }], none), { text: "我的 Claude 已移除", connect: false });
+  assert.deepEqual(page.inviteEmpty([{ agent: "f/claude", agentName: "我的 Claude" }, { agent: "r_f", agentName: "我的豆包" }], none), {
+    text: "我的 Claude、我的豆包已移除",
+    connect: false,
+  });
+  const one = page.inviteChoices([{ agent: null }], [{ id: "f/claude", name: "我的 Claude", client: "claude", owner: "fang" }], "fang");
+  assert.equal(page.inviteEmpty([{ agent: null, agentName: null }], one), null);
 });

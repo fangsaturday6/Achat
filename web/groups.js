@@ -346,15 +346,20 @@ export function targetsOf(picked) {
   return picked.map((p) => (p.person ? { account: p.person } : { agent: p.agent }));
 }
 
-// The AIs the person `me` may bring into a group they are invited to: their
-// own, of `agents` (/api/agents, which has their friends' too), those that
-// can answer ticked; just the one asked for by name, ticked and fixed. 豆包
-// and the like can join but only speak when told. `note`, gray on the right:
-// 只能发言, or the computer it is on (`devices`, from /api/me), unless its
-// name already says so, as with two Claudes: "我的 Claude（MacBook）".
-export function inviteChoices(invite, agents, me, devices = []) {
+// The person's invite card is all their invites to the group (`invites`):
+// one that lets them pick, or each AI asked for by name; 加入 and 拒绝
+// answer them all.
+//
+// The AIs the person `me` may bring in with it: their own, of `agents`
+// (/api/agents, which has their friends' too), those that can answer
+// ticked; just those asked for by name, ticked and fixed. 豆包 and the like
+// can join but only speak when told. `note`, gray on the right: 只能发言,
+// or the computer it is on (`devices`, from /api/me), unless its name
+// already says so, as with two Claudes: "我的 Claude（MacBook）".
+export function inviteChoices(invites, agents, me, devices = []) {
+  const named = invites.every((i) => i.agent) ? invites.map((i) => i.agent) : null;
   const mine = agents.filter((a) => a.owner === me && a.client !== "person");
-  const shown = invite.agent ? mine.filter((a) => a.id === invite.agent) : mine;
+  const shown = named ? mine.filter((a) => named.includes(a.id)) : mine;
   return shown.map((a) => {
     const device = devices.find((d) => d.agents?.some((x) => x.id === a.id))?.name ?? null;
     const speaksOnly = a.canReceive === false;
@@ -362,8 +367,8 @@ export function inviteChoices(invite, agents, me, devices = []) {
       id: a.id,
       name: a.name,
       client: a.client,
-      checked: !!invite.agent || !speaksOnly,
-      locked: !!invite.agent,
+      checked: !!named || !speaksOnly,
+      locked: !!named,
       speaksOnly,
       note: speaksOnly ? "只能发言" : device && !a.name.includes(`（${device}）`) ? device : null,
     };
@@ -371,10 +376,10 @@ export function inviteChoices(invite, agents, me, devices = []) {
 }
 
 // Why an invite card has nothing to bring in, so 加入 cannot be pressed: the
-// AI it asks for is gone, or the person has none yet (`connect`: the way to
-// one). Null when there is something.
-export function inviteEmpty(invite, choices) {
+// AIs it asks for are gone, or the person has none yet (`connect`: the way
+// to one). Null when there is something.
+export function inviteEmpty(invites, choices) {
   if (choices.length) return null;
-  if (invite.agent) return { text: cjk(invite.agentName ?? "这个 AI", "已移除"), connect: false };
+  if (invites.every((i) => i.agent)) return { text: cjk(invites.map((i) => i.agentName).filter(Boolean).join("、") || "这个 AI", "已移除"), connect: false };
   return { text: "先连接 AI", connect: true };
 }

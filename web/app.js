@@ -1855,14 +1855,17 @@ async function openGroupPicker({ group } = {}) {
 
 // Invited: a card from whoever invited the person, with the opening message
 // and its files, who is in the group, which of their AIs to bring in, and
-// how many times a day each may be woken; 拒绝 or 加入. What the person
-// ticks and types is kept by invite (state.inviteDrafts), so a redraw that
-// events bring keeps it, and 每天次数 being changed holds the redraw off
-// (data-hold). With nothing to bring in, a gray line says why.
+// how many times a day each may be woken; 拒绝 or 加入, which answer every
+// invite the person has to the group. What the person ticks and types is
+// kept by invite (state.inviteDrafts), so a redraw that events bring keeps
+// it, and 每天次数 being changed holds the redraw off (data-hold). With
+// nothing to bring in, a gray line says why.
 function renderInvite(g) {
   const invite = g.myInvite;
-  const choices = inviteChoices(invite, [...state.agents.values()], state.me.account.id, state.me.devices);
-  const empty = inviteEmpty(invite, choices);
+  const mine = g.invites.filter((i) => i.account === state.me.account.id);
+  const invites = mine.length ? mine : [invite];
+  const choices = inviteChoices(invites, [...state.agents.values()], state.me.account.id, state.me.devices);
+  const empty = inviteEmpty(invites, choices);
   const draft = state.inviteDrafts.get(invite.id) ?? { ticked: new Map(), quota: String(QUOTA.perDay) };
   state.inviteDrafts.set(invite.id, draft);
   const focused = document.getElementById("invite-card")?.contains(document.activeElement) ? document.activeElement.id : "";
