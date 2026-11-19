@@ -157,7 +157,7 @@ describe("动手 on the receiving computer", () => {
     const start = opener.starts[0];
     assert.match(start.prompt, /写一个 SRT 转 Markdown 的脚本/);
     assert.match(start.systemPrompt, new RegExp(`send_message（thread_id: ${start.threadId}）`));
-    assert.equal(start.from, undefined);
+    assert.deepEqual([start.from, start.inGroup], [undefined, undefined], "a thread's, handed back to the thread");
     assert.equal(runner.calls.length, 0, "动手 does not answer in the background");
     await until(async () => notes.some((n) => n.startsWith("你的 Claude 开始动手 字幕脚本")));
 
@@ -258,14 +258,13 @@ test("Codex works in its folder with nobody to approve commands: online only bet
   assert.ok(own.includes("sandbox_workspace_write.network_access=true"));
   const later = codexTaskArgs({ threadId: "t1", topic: "画图", prompt: "接着画", systemPrompt: "规则", from: { sessionId: "0199-abc", dir: "/x" } });
   // Nobody is there to approve an MCP call either, so handing the work back
-  // through Achat goes ahead; asking anyone else still does not.
-  for (const args of [first, later]) {
-    assert.ok(args.includes('mcp_servers.achat.tools.send_message.approval_mode="approve"'));
-    assert.ok(args.includes('mcp_servers.achat.tools.check_thread.approval_mode="approve"'));
-    assert.ok(args.includes('mcp_servers.achat.tools.send_group_message.approval_mode="approve"'));
-    assert.ok(args.includes('mcp_servers.achat.tools.check_group.approval_mode="approve"'));
-    assert.ok(!args.some((a) => a.includes("send_request")));
-  }
+  // through Achat goes ahead, to the thread it works for; asking anyone else,
+  // or speaking in the person's groups, still does not.
+  const approved = (args: string[]) => args.filter((a) => a.endsWith('.approval_mode="approve"')).map((a) => a.split(".")[3]);
+  for (const args of [first, later]) assert.deepEqual(approved(args), ["send_message", "check_thread"]);
+  // 动手 asked for in a group hands back to the group, and nothing else.
+  const inGroup = codexTaskArgs({ threadId: "ga_1", topic: "支付对接", prompt: "做", systemPrompt: "规则", inGroup: true });
+  assert.deepEqual(approved(inGroup), ["send_group_message", "check_group"]);
   assert.deepEqual(later.slice(0, 2), ["exec", "resume"]);
   assert.deepEqual(later.slice(-2), ["0199-abc", "-"]);
   assert.equal(codexSessionId("OpenAI Codex v0.169\n--------\nworkdir: /x\nsession id: 01a1e4e6-9149-7ef2-a71d-01b8e8de82bc\n--------"), "01a1e4e6-9149-7ef2-a71d-01b8e8de82bc");

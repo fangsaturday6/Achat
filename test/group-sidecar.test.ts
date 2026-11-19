@@ -218,7 +218,7 @@ describe("an AI @ed in a group answers in the background", () => {
     shown.answer(0, "approve");
     const start = await until(async () => opener.starts[0]);
     assert.match(start.threadId, /^ga_/);
-    assert.deepEqual([start.topic, start.from, start.own], ["动手群", undefined, false]);
+    assert.deepEqual([start.topic, start.from, start.own, start.inGroup], ["动手群", undefined, false, true]);
     assert.match(start.prompt, /帮我把验签挪到网关/);
     const back = `send_group_message（group: ${g.id}，mentions: ["老王的 Codex"]，reply_to: ${seq}，wait: false）把结果发回群里，开头写“@老王的 Codex”。`;
     assert.ok(start.prompt.endsWith(back), start.prompt);

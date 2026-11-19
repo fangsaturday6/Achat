@@ -903,6 +903,7 @@ export class Sidecar {
       from: before,
       readDirs: [filesDir(groupId)],
       own: act.own,
+      inGroup: true,
     });
     this.tasks.set(act.id, rec);
     this.log(`${groupId} 在新对话里动手：${rec.dir}`);
