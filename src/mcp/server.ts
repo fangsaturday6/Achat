@@ -784,19 +784,21 @@ export function createMcpServer(opts: McpOptions): McpServer {
       description:
         "建一个 Achat 群，把主人自己的 AI、朋友的 AI 或朋友拉进来一起讨论，例如“拉老王、小林的 AI 建个群讨论支付对接”。" +
         "拉朋友时邀请发给对方本人，由他在网页上选哪些 AI 进群；点名某个 AI 就只邀请那一个；主人自己的 AI 直接进群。" +
-        "message 是开场白，算 @所有人：每个 AI 进群后都会看到并回答（一天以内）。会等大家加入、回完开场白再返回，等不及就用 check_group 看。",
+        "message 是开场白，算 @所有人，可以用 files 带上文件：每个 AI 进群后都会看到并回答（一天以内）。会等大家加入、回完开场白再返回，等不及就用 check_group 看。",
       inputSchema: {
         name: z.string().max(30).optional().describe("群名，例如“支付对接”；不填就取开场白的第一句"),
         members: z.array(z.string()).min(1).describe("要拉进群的人或 AI，例如“老王”“小林的 Claude”“我的 Codex”"),
-        message: z.string().optional().describe("开场白，会 @所有人"),
+        message: z.string().optional().describe("开场白，会 @所有人；只写“@所有人”不算开场白，不叫醒谁"),
+        files: z.array(z.string()).max(9).optional().describe("和开场白一起发的文件或图片：这台电脑上的完整路径，最多 9 个，合计不超过 20 MB"),
       },
     },
-    guard(async ({ name, members, message }: { name?: string; members: string[]; message?: string }, extra) => {
+    guard(async ({ name, members, message, files }: { name?: string; members: string[]; message?: string; files?: string[] }, extra) => {
       const c = opts.connection();
       if (c.mode !== "cloud") return text(GROUPS_NEED_ACCOUNT, true);
+      const outgoing = files?.length ? readFiles(files) : undefined;
       const targets: GroupTarget[] = [];
       for (const m of members) targets.push(await resolveTarget(c, m));
-      const created = await c.client.createGroup({ from: c.agentId, name, members: targets, message });
+      const created = await c.client.createGroup({ from: c.agentId, name, members: targets, message, files: outgoing });
       const opener = created.openerSeq;
       const done = await waitGroupUntil(c, created, (d) => !d.invites.length && (opener === null || answeredAll(opener)(d)), extra);
       const lines = [`已建群「${done.name}」（${done.id}）。群里：${done.members.map((m) => m.name).join("、")}。`];

@@ -234,6 +234,26 @@ describe("groups", () => {
     assert.ok(!late.messages[0].receipts.some((r) => r.agent === "lin/claude"));
   });
 
+  test("@所有人 with nothing else is no opening message: nothing is said and nobody is woken", () => {
+    for (const message of ["@所有人", " @所有人 \n@所有人 "]) {
+      const g = groups.createGroup(web("fang"), { from: "p_fang", members: [{ agent: "fang/claude" }, { account: "wang" }], message });
+      assert.equal(g.name, "群聊");
+      assert.equal(g.openerSeq, null);
+      assert.deepEqual(g.messages, []);
+      const joined = groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+      assert.deepEqual(joined.messages.flatMap((m) => m.receipts), [], "nobody is woken when they join either");
+    }
+    // A file is something to discuss: it opens the group, without the bare @所有人.
+    const file = { name: "清单.txt", data: Buffer.from("1. 回调").toString("base64") };
+    const withFile = groups.createGroup(web("fang"), { from: "p_fang", members: [{ agent: "fang/claude" }], message: "@所有人", files: [file] });
+    assert.equal(withFile.openerSeq, 1);
+    assert.deepEqual([withFile.messages[0].body, withFile.messages[0].files.map((f) => f.name), withFile.messages[0].mentions], ["", ["清单.txt"], [ALL]]);
+    // An AI starting one is the same.
+    const byAi = groups.createGroup(computer("fang"), { from: "fang/claude", name: "支付对接", members: [{ agent: "fang/codex" }], message: "@所有人" });
+    assert.equal(byAi.openerSeq, null);
+    assert.deepEqual(byAi.messages, []);
+  });
+
   test("the list shows groups and invites; unread is someone else's words; 群主 passes on when its AIs leave; a dissolved group is read only", () => {
     const g = start();
     groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });

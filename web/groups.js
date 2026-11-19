@@ -278,11 +278,67 @@ export function quotaOf(text) {
 // What is picked in 发起群聊 and 邀请: people ({person, name}), who choose
 // their AIs, and AIs ({agent, owner, name}). Picking a person drops their
 // AIs picked one by one, and the other way round; picking again unpicks.
+const pickKey = (p) => (p.person ? `person:${p.person}` : `agent:${p.agent}`);
+
+export function isPicked(picked, item) {
+  return picked.some((p) => pickKey(p) === pickKey(item));
+}
+
 export function togglePick(picked, item) {
-  const key = (p) => p.agent ?? `person:${p.person}`;
-  if (picked.some((p) => key(p) === key(item))) return picked.filter((p) => key(p) !== key(item));
+  if (isPicked(picked, item)) return picked.filter((p) => pickKey(p) !== pickKey(item));
   const clash = item.person ? (p) => p.owner === item.person : (p) => p.person === item.owner;
   return [...picked.filter((p) => !clash(p)), item];
+}
+
+// What stops 完成: a new group needs one of the person's own AIs (as
+// createGroup in src/relay/groups.ts checks); an invite (`group`) does not.
+export function pickProblem(picked, me, group) {
+  return !group && !picked.some((p) => p.owner === me) ? "群里至少要有你自己的一个 AI" : null;
+}
+
+// The rows of 发起群聊 and 邀请: a heading, the person's own AIs, a heading,
+// then each friend ({person, name}, who picks their AIs) with their AIs under
+// them while the arrow (`toggle`) has them open. Searching (`query`) shows
+// those that fit, opened, with no arrow. In 邀请 (`group`) an AI already in
+// is left out; a friend with an AI in is not offered as a person again, only
+// their AIs still out (nothing, once all are in); and a friend invited and
+// not yet in, or an AI an invite asks for (the person's own too, answered on
+// its tile in 群设置), shows 等加入 (`waiting`) and cannot be picked: one
+// person, one invite card.
+export function pickerRows({ me, agents, contacts, group = null, query = "", opened = new Set() }) {
+  const q = query.toLowerCase();
+  const fits = (...texts) => !q || texts.some((t) => t.toLowerCase().includes(q));
+  const inGroup = new Set((group?.members ?? []).map((m) => m.agent));
+  const invitesOf = (account) => (group?.invites ?? []).filter((i) => i.account === account);
+  const asked = (account, a) => invitesOf(account).some((i) => i.agent === null || i.agent === a.id);
+  const ai = (a, owner, waiting, indent) => ({
+    kind: "ai",
+    item: { agent: a.id, owner, name: a.name, client: a.client, speaksOnly: a.canReceive === false },
+    waiting,
+    indent,
+  });
+  const own = agents.filter((a) => a.owner === me && a.client !== "person" && !inGroup.has(a.id) && fits(a.name)).map((a) => ai(a, me, asked(me, a), false));
+  const friends = contacts.flatMap((f) => {
+    const out = f.agents.filter((a) => !inGroup.has(a.id));
+    const isIn = (group?.members ?? []).some((m) => m.owner === f.id);
+    const invites = invitesOf(f.id);
+    const waits = (a) => (!isIn && invites.length > 0) || asked(f.id, a);
+    if (isIn) return out.filter((a) => fits(a.name)).map((a) => ai(a, f.id, waits(a), false));
+    if (!fits(f.name, ...out.map((a) => a.name))) return [];
+    const open = !!q || opened.has(f.id);
+    const person = { kind: "person", item: { person: f.id, name: f.name }, waiting: invites.length > 0, toggle: q || !out.length ? null : open ? "open" : "closed" };
+    return [person, ...(open ? out.filter((a) => fits(a.name)).map((a) => ai(a, f.id, waits(a), true)) : [])];
+  });
+  return [
+    ...(own.length ? [{ kind: "head", text: "我的 AI" }, ...own] : []),
+    ...(friends.length ? [{ kind: "head", text: "朋友" }, ...friends] : []),
+  ];
+}
+
+// What stops a new group's first words from going: "@所有人" alone, with no
+// file, says nothing to discuss (createGroup takes it as no opening message).
+export function openingProblem(text, files) {
+  return !text.replaceAll(`@${EVERYONE}`, "").trim() && !files ? "写一句要讨论的事" : null;
 }
 
 // What 完成 sends, as /api/groups takes members: {"agent"} or {"account"}.
@@ -290,18 +346,35 @@ export function targetsOf(picked) {
   return picked.map((p) => (p.person ? { account: p.person } : { agent: p.agent }));
 }
 
-// The AIs a person may bring into a group they are invited to: their own,
-// those that can answer ticked; just the one asked for by name, ticked and
-// fixed. 豆包 and the like can join but only speak when told.
-export function inviteChoices(invite, agents) {
-  const mine = agents.filter((a) => a.client !== "person");
+// The AIs the person `me` may bring into a group they are invited to: their
+// own, of `agents` (/api/agents, which has their friends' too), those that
+// can answer ticked; just the one asked for by name, ticked and fixed. 豆包
+// and the like can join but only speak when told. `note`, gray on the right:
+// 只能发言, or the computer it is on (`devices`, from /api/me), unless its
+// name already says so, as with two Claudes: "我的 Claude（MacBook）".
+export function inviteChoices(invite, agents, me, devices = []) {
+  const mine = agents.filter((a) => a.owner === me && a.client !== "person");
   const shown = invite.agent ? mine.filter((a) => a.id === invite.agent) : mine;
-  return shown.map((a) => ({
-    id: a.id,
-    name: a.name,
-    client: a.client,
-    checked: !!invite.agent || a.canReceive !== false,
-    locked: !!invite.agent,
-    speaksOnly: a.canReceive === false,
-  }));
+  return shown.map((a) => {
+    const device = devices.find((d) => d.agents?.some((x) => x.id === a.id))?.name ?? null;
+    const speaksOnly = a.canReceive === false;
+    return {
+      id: a.id,
+      name: a.name,
+      client: a.client,
+      checked: !!invite.agent || !speaksOnly,
+      locked: !!invite.agent,
+      speaksOnly,
+      note: speaksOnly ? "只能发言" : device && !a.name.includes(`（${device}）`) ? device : null,
+    };
+  });
+}
+
+// Why an invite card has nothing to bring in, so 加入 cannot be pressed: the
+// AI it asks for is gone, or the person has none yet (`connect`: the way to
+// one). Null when there is something.
+export function inviteEmpty(invite, choices) {
+  if (choices.length) return null;
+  if (invite.agent) return { text: cjk(invite.agentName ?? "这个 AI", "已移除"), connect: false };
+  return { text: "先连接 AI", connect: true };
 }

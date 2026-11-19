@@ -756,6 +756,9 @@ body.public { background: var(--panel); }
 .pick.indent { padding-left: 42px; }
 .pick input[type="checkbox"] { width: 16px; height: 16px; margin: 0; flex-shrink: 0; accent-color: var(--accent); }
 .pick .grow, .pick-row .grow { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* 等加入: invited already, shown grayed out, as on a member tile. */
+.pick.invited, .pick.invited:hover { color: var(--muted); background: none; }
+.pick.invited .avatar { opacity: 0.45; }
 .dialog.wide > .error { padding: 8px 20px 0; }
 .dialog-actions { height: 64px; padding: 0 20px; display: flex; gap: 10px; align-items: center; justify-content: flex-end; }
 .picker-count { display: none; margin-right: auto; }
@@ -774,6 +777,7 @@ body.public { background: var(--panel); }
 .invite-card .faces .muted { margin-left: 4px; }
 .invite-pick { padding-top: 6px; border-top: 1px solid var(--line); display: flex; flex-direction: column; }
 .invite-pick .pick { height: 36px; padding: 0; }
+.invite-empty { padding: 8px 0 2px; }
 @media (max-width: 719px) {
   .msg-col:has(> .invite-card) { --col-max: calc(100% - 44px); }
 }

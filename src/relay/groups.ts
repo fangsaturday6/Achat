@@ -357,7 +357,9 @@ export class GroupService {
 
   createGroup(caller: Caller, input: { from: string; name?: string; members: GroupTarget[]; message?: string; files?: NewFile[] }): GroupDetail {
     const from = this.requireSpeaker(caller, input.from);
-    const text = input.message?.trim() ?? "";
+    // "@所有人" with nothing to discuss is no opening message: it would wake every AI for nothing.
+    const said = input.message?.trim() ?? "";
+    const text = said.replaceAll("@所有人", "").trim() ? said : "";
     const files = this.checkFiles(input.files);
     if (text.length > 20000) throw new RelayError(400, "消息需要在 1 到 20000 个字之间");
     const name = input.name?.trim() || nameFrom(text) || "群聊";

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -69,6 +72,34 @@ test("an AI makes a group, talks in it, reads it, sets its 每天次数 and 叫�
   } finally {
     sidecar.stop();
     stayOn();
+    await cloud.close();
+  }
+});
+
+test("an AI opens a group with files, as on the web; @所有人 alone opens nothing", async () => {
+  const { cloud, mailer } = await startTestCloud();
+  const fang = await logIn(cloud, mailer, "fang@example.com", "老方");
+  const fangMac = await addComputer(cloud, fang, "MacBook", ["claude", "codex"]);
+  const dir = mkdtempSync(join(tmpdir(), "achat-group-file-"));
+  const path = join(dir, "发版清单.txt");
+  writeFileSync(path, "1. 支付宝回调\n");
+  try {
+    const ai = await mcp(fangMac.client, fangMac.agent("claude"));
+    const made = textOf(await ai.callTool({ name: "create_group", arguments: { name: "发版计划", members: ["我的 Codex"], message: "@所有人 看看清单", files: [path] } }));
+    assert.match(made, /已建群「发版计划」/);
+    const g = (await fangMac.client.groups()).find((x) => x.name === "发版计划")!;
+    const opener = (await fangMac.client.group(g.id)).messages[0];
+    assert.deepEqual([opener.body, opener.files.map((f) => f.name)], ["@所有人 看看清单", ["发版清单.txt"]]);
+
+    const missing = await ai.callTool({ name: "create_group", arguments: { name: "找不到", members: ["我的 Codex"], files: ["/没有/这个.txt"] } });
+    assert.equal(missing.isError, true);
+    assert.match(textOf(missing), /找不到文件：\/没有\/这个\.txt/);
+    assert.ok(!(await fangMac.client.groups()).some((x) => x.name === "找不到"), "nothing is made");
+
+    await ai.callTool({ name: "create_group", arguments: { name: "只有点名", members: ["我的 Codex"], message: "@所有人" } });
+    const bare = (await fangMac.client.groups()).find((x) => x.name === "只有点名")!;
+    assert.equal((await fangMac.client.group(bare.id)).openerSeq, null);
+  } finally {
     await cloud.close();
   }
 });

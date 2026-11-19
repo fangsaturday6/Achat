@@ -9,11 +9,16 @@ import {
   GROUP_STATUS_LABELS,
   groupPreview,
   inviteChoices,
+  inviteEmpty,
   invitesWaiting,
   isAnswering,
+  isPicked,
   leaveNote,
   mentionAt,
+  openingProblem,
   pickerOptions,
+  pickerRows,
+  pickProblem,
   QUOTA,
   quotaLine,
   quotaOf,
@@ -106,6 +111,8 @@ const state = {
   group: null,
   composer: null,
   newGroup: null,
+  // What the person ticked and typed on an invite card, by invite, so a redraw keeps it.
+  inviteDrafts: new Map(),
 };
 
 class ApiError extends Error {
@@ -1713,75 +1720,83 @@ function leaveGroup(g, agents) {
 
 // 发起群聊, and 邀请 in 群设置: the person's own AIs and friends on the left
 // (a friend opens to show their AIs, to invite just one), what is picked on
-// the right. A friend picked as a person chooses their AIs ("他来选 AI").
-// The one dialog wider than 380px (docs/ui.md).
+// the right. A friend picked as a person chooses their AIs ("他来选 AI");
+// in 邀请, who is invited already shows 等加入 (pickerRows). A new group
+// picked again starts from what was picked before. The one dialog wider
+// than 380px (docs/ui.md). One at a time: a second click while the first
+// is loading opens nothing more.
+let pickerOpening = false;
+
 async function openGroupPicker({ group } = {}) {
-  await loadPeople();
+  if (pickerOpening || document.getElementById("group-picker")) return;
+  pickerOpening = true;
+  try {
+    await loadPeople();
+  } catch (err) {
+    return void toast(err.message);
+  } finally {
+    pickerOpening = false;
+  }
   const me = state.me.account.id;
-  const inGroup = new Set((group?.members ?? []).map((m) => m.agent));
-  const mine = [...state.agents.values()].filter((a) => a.owner === me && a.client !== "person" && !inGroup.has(a.id));
-  const friends = state.contacts.map((c) => ({ ...c, agents: c.agents.filter((a) => !inGroup.has(a.id)) }));
-  const aiOf = (a, owner) => ({ agent: a.id, owner, name: a.name, client: a.client, speaksOnly: a.canReceive === false });
+  const rowsOf = (query, opened) => pickerRows({ me, agents: [...state.agents.values()], contacts: state.contacts, group, query, opened });
+  const draft = group ? null : state.newGroup;
   // A new group starts with the person's first AI that can answer: a group needs one of theirs.
-  const first = group ? null : mine.find((a) => a.canReceive !== false);
-  let picked = first ? [aiOf(first, me)] : [];
+  const first = group || draft ? null : rowsOf("", new Set()).find((r) => r.kind === "ai" && !r.item.speaksOnly)?.item;
+  let picked = draft?.picked ?? (first ? [first] : []);
   let query = "";
   const opened = new Set();
-  const has = (item) => picked.some((p) => (p.agent ?? p.person) === (item.agent ?? item.person));
   const face = (p) => (!p.person && p.owner === me ? clientAvatar(p.client, 28) : avatar(p.name, 28));
   const list = h("div", { class: "picker-list" });
   const chosen = h("div", { class: "picker-picked" });
   const count = h("span", { class: "muted picker-count" });
-  const error = h("p", { class: "error", role: "alert" });
+  const error = h("p", { class: "error", role: "alert", id: "group-picker-error" });
   const search = h("input", { type: "search", id: "group-picker-search", placeholder: "搜索", "aria-label": "搜索朋友和 AI" });
   const done = h("button", { type: "button", class: "btn primary", id: "group-picker-done" }, "完成");
   const cancel = h("button", { type: "button", class: "btn", id: "group-picker-cancel" }, "取消");
-  const closeButton = h("button", { type: "button", class: "icon-btn", "aria-label": "关闭" }, icon("close", 18, 1.8));
-  const fits = (...texts) => !query || texts.some((t) => t.toLowerCase().includes(query.toLowerCase()));
-  const choice = (item, indent = false) => {
-    const box = h("input", { type: "checkbox", id: item.person ? `pick-person-${item.person}` : `pick-${item.agent}`, checked: has(item) });
-    box.addEventListener("change", () => {
-      picked = togglePick(picked, item);
+  const closeButton = h("button", { type: "button", class: "icon-btn", id: "group-picker-close", "aria-label": "关闭" }, icon("close", 18, 1.8));
+  // Every change to what is picked: what went wrong with the last 完成 goes.
+  const change = (next) => {
+    picked = next;
+    error.textContent = "";
+    paint();
+  };
+  // A friend or an AI to tick (#pick-person-<account>, #pick-<AI>), or 等加入.
+  const choice = ({ item, waiting, indent }) => {
+    const box = h("input", { type: "checkbox", id: item.person ? `pick-person-${item.person}` : `pick-${item.agent}`, checked: !waiting && isPicked(picked, item), disabled: waiting });
+    box.addEventListener("change", () => change(togglePick(picked, item)));
+    const note = waiting ? "等加入" : item.speaksOnly ? "只能发言" : null;
+    return h("label", { class: `pick${indent ? " indent" : ""}${waiting ? " invited" : ""}` }, box, face(item), h("span", { class: "grow" }, item.name), note ? h("span", { class: "muted" }, note) : null);
+  };
+  // A friend, with the arrow (#pick-open-<account>) that shows or hides their AIs.
+  const personRow = (row) => {
+    const id = row.item.person;
+    const open = row.toggle === "open";
+    const arrow = row.toggle
+      ? h("button", { type: "button", class: "icon-btn", id: `pick-open-${id}`, "aria-label": `${open ? "收起" : "展开"}${row.item.name}的 AI`, "aria-expanded": String(open) }, icon(open ? "down" : "right", 12, 2))
+      : null;
+    arrow?.addEventListener("click", () => {
+      if (open) opened.delete(id);
+      else opened.add(id);
       paint();
     });
-    return h("label", { class: `pick${indent ? " indent" : ""}` }, box, face(item), h("span", { class: "grow" }, item.name), item.speaksOnly ? h("span", { class: "muted" }, "只能发言") : null);
+    return h("div", { class: "pick-row" }, choice(row), arrow);
   };
+  // What is picked, each with its × (#unpick-<AI>, #unpick-person-<account>).
+  const pickedRow = (p) => {
+    const x = h("button", { type: "button", class: "icon-btn", id: p.person ? `unpick-person-${p.person}` : `unpick-${p.agent}`, "aria-label": `去掉${p.name}` }, icon("close", 12, 2));
+    x.addEventListener("click", () => change(togglePick(picked, p)));
+    return h("div", { class: "pick-row", "data-agent": p.agent ?? null, "data-person": p.person ?? null }, face(p), h("span", { class: "grow" }, p.name), p.person ? h("span", { class: "muted" }, "他来选 AI") : null, x);
+  };
+  // Drawn anew on each change; the control that had the focus has it again,
+  // found by its id, or the search box once it is gone (an × taken away).
   function paint() {
-    const own = mine.filter((a) => fits(a.name)).map((a) => choice(aiOf(a, me)));
-    const people = friends
-      .filter((f) => fits(f.name, ...f.agents.map((a) => a.name)))
-      .flatMap((f) => {
-        const open = opened.has(f.id) || (!!query && f.agents.some((a) => fits(a.name)));
-        const arrow = f.agents.length
-          ? h("button", { type: "button", class: "icon-btn", "aria-label": `${open ? "收起" : "展开"}${f.name}的 AI`, "aria-expanded": String(open) }, icon(open ? "down" : "right", 12, 2))
-          : null;
-        arrow?.addEventListener("click", () => {
-          if (open) opened.delete(f.id);
-          else opened.add(f.id);
-          paint();
-        });
-        return [h("div", { class: "pick-row" }, choice({ person: f.id, name: f.name }), arrow), ...(open ? f.agents.map((a) => choice(aiOf(a, f.id), true)) : [])];
-      });
-    list.replaceChildren(
-      own.length ? h("span", { class: "muted picker-head" }, "我的 AI") : null,
-      ...own,
-      people.length ? h("span", { class: "muted picker-head" }, "朋友") : null,
-      ...people,
-    );
+    const focused = overlay?.contains(document.activeElement) ? document.activeElement.id : "";
+    list.replaceChildren(...rowsOf(query, opened).map((r) => (r.kind === "head" ? h("span", { class: "muted picker-head" }, r.text) : r.kind === "person" ? personRow(r) : choice(r))));
     const label = `已选 ${picked.length} 个`;
     count.textContent = label;
-    chosen.replaceChildren(
-      h("span", { class: "muted picker-head" }, label),
-      ...picked.map((p) => {
-        const x = h("button", { type: "button", class: "icon-btn", "aria-label": `去掉${p.name}` }, icon("close", 12, 2));
-        x.addEventListener("click", () => {
-          picked = togglePick(picked, p);
-          paint();
-        });
-        return h("div", { class: "pick-row", "data-agent": p.agent ?? null, "data-person": p.person ?? null }, face(p), h("span", { class: "grow" }, p.name), p.person ? h("span", { class: "muted" }, "他来选 AI") : null, x);
-      }),
-    );
+    chosen.replaceChildren(h("span", { class: "muted picker-head" }, label), ...picked.map(pickedRow));
     done.disabled = !picked.length;
+    if (focused) (document.getElementById(focused) ?? search).focus();
   }
   const close = () => {
     overlay.remove();
@@ -1808,13 +1823,12 @@ async function openGroupPicker({ group } = {}) {
     "click",
     busy(done, async () => {
       error.textContent = "";
+      const problem = pickProblem(picked, me, group);
+      if (problem) return void (error.textContent = problem);
       if (!group) {
-        if (!picked.some((p) => p.owner === me)) {
-          error.textContent = "群里至少要有你自己的一个 AI";
-          return;
-        }
-        // The group is made with its first words: see renderNewGroup.
-        state.newGroup = { targets: targetsOf(picked), members: picked.filter((p) => p.agent), title: picked.map((p) => p.name).join("、") };
+        // The group is made with its first words: see renderNewGroup. What is
+        // half written there stays (the writer goes along).
+        state.newGroup = { ...state.newGroup, picked, targets: targetsOf(picked), members: picked.filter((p) => p.agent), title: picked.map((p) => p.name).join("、") };
         close();
         if (location.hash === "#/new-group") await refresh();
         else location.hash = "#/new-group";
@@ -1839,25 +1853,28 @@ async function openGroupPicker({ group } = {}) {
   search.focus();
 }
 
-// Which of the person's computers an AI is on, for telling two Claudes apart.
-function deviceOf(agentId) {
-  return state.me.devices.find((d) => d.agents?.some((a) => a.id === agentId))?.name ?? null;
-}
-
 // Invited: a card from whoever invited the person, with the opening message
 // and its files, who is in the group, which of their AIs to bring in, and
-// how many times a day each may be woken; 拒绝 or 加入.
+// how many times a day each may be woken; 拒绝 or 加入. What the person
+// ticks and types is kept by invite (state.inviteDrafts), so a redraw that
+// events bring keeps it, and 每天次数 being changed holds the redraw off
+// (data-hold). With nothing to bring in, a gray line says why.
 function renderInvite(g) {
   const invite = g.myInvite;
-  const me = state.me.account.id;
-  const choices = inviteChoices(invite, [...state.agents.values()].filter((a) => a.owner === me));
+  const choices = inviteChoices(invite, [...state.agents.values()], state.me.account.id, state.me.devices);
+  const empty = inviteEmpty(invite, choices);
+  const draft = state.inviteDrafts.get(invite.id) ?? { ticked: new Map(), quota: String(QUOTA.perDay) };
+  state.inviteDrafts.set(invite.id, draft);
+  const focused = document.getElementById("invite-card")?.contains(document.activeElement) ? document.activeElement.id : "";
   const opener = g.messages[0] ?? null;
   const picks = choices.map((c) => {
-    const box = h("input", { type: "checkbox", id: `invite-ai-${c.id}`, checked: c.checked, disabled: c.locked, "data-agent": c.id });
-    const where = c.speaksOnly ? "只能发言" : deviceOf(c.id);
-    return h("label", { class: "pick" }, box, clientAvatar(c.client, 28), h("span", { class: "grow" }, c.name), where ? h("span", { class: "muted" }, where) : null);
+    const box = h("input", { type: "checkbox", id: `invite-ai-${c.id}`, checked: c.locked || (draft.ticked.get(c.id) ?? c.checked), disabled: c.locked, "data-agent": c.id });
+    box.addEventListener("change", () => draft.ticked.set(c.id, box.checked));
+    return h("label", { class: "pick" }, box, clientAvatar(c.client, 28), h("span", { class: "grow" }, c.name), c.note ? h("span", { class: "muted" }, c.note) : null);
   });
-  const quota = h("input", { class: "quota-box", id: "invite-quota", type: "text", inputmode: "numeric", value: String(QUOTA.perDay), "aria-label": "每天最多被叫醒几次" });
+  const quota = h("input", { class: "quota-box", id: "invite-quota", type: "text", inputmode: "numeric", value: draft.quota, "aria-label": "每天最多被叫醒几次", "data-hold": "" });
+  quota.addEventListener("input", () => (draft.quota = quota.value));
+  const why = empty && h("p", { class: "muted invite-empty", id: "invite-empty" }, empty.connect ? h("a", { href: "#/start", id: "invite-connect" }, empty.text) : empty.text);
   const error = h("p", { class: "error", role: "alert" });
   const path = `/api/groups/${encodeURIComponent(g.id)}/invites/${encodeURIComponent(invite.id)}`;
   const decline = h("button", { type: "button", class: "btn", id: "invite-decline" }, "拒绝");
@@ -1866,6 +1883,7 @@ function renderInvite(g) {
     busy(decline, async () => {
       try {
         await api("POST", `${path}/decline`, {});
+        state.inviteDrafts.delete(invite.id);
         location.hash = "#/";
       } catch (err) {
         error.textContent = err.message;
@@ -1883,6 +1901,7 @@ function renderInvite(g) {
       if (perDay === null) return void (error.textContent = `每天次数需要在 1 到 ${QUOTA.max} 之间`);
       try {
         await api("POST", `${path}/accept`, { agents, quota: perDay });
+        state.inviteDrafts.delete(invite.id);
         await refresh();
       } catch (err) {
         error.textContent = err.message;
@@ -1896,8 +1915,8 @@ function renderInvite(g) {
     opener?.body ? h("p", {}, ...withAts(opener.body, opener.mentions, g.names)) : null,
     opener?.files.length ? h("div", { class: "card-files" }, ...opener.files.map(fileTile)) : null,
     h("span", { class: "with-avatar faces" }, ...facesOf(g).slice(0, 3).map((name) => avatar(name, 20)), h("span", { class: "muted" }, `群里有 ${g.members.length} 个 AI`)),
-    h("div", { class: "invite-pick" }, ...picks),
-    h("label", { class: "muted quota-label", for: quota.id }, "查对话记录 · 每天", quota, "次"),
+    h("div", { class: "invite-pick" }, ...picks, why),
+    choices.length ? h("label", { class: "muted quota-label", for: quota.id }, "查对话记录 · 每天", quota, "次") : null,
     error,
     h("div", { class: "card-actions" }, decline, accept),
   );
@@ -1909,23 +1928,32 @@ function renderInvite(g) {
   );
   state.composer = null;
   showMain(g.name, log, { back: "#/" });
+  if (focused) document.getElementById(focused)?.focus({ preventScroll: true });
 }
 
 // A new group before its first words: they are its opening message
-// (@所有人) and give it its name; only then is it made.
+// (@所有人) and give it its name; only then is it made. "@所有人" alone is
+// not enough (openingProblem): the words stay in the box with a red line.
+// With nothing picked (a reload, an address typed in, or 返回 after the
+// group was made), 消息 instead; the new group takes this page's place in
+// the history, so 返回 from it does not come back here.
 function renderNewGroup() {
   const draft = state.newGroup;
   const seat = mySeat();
-  if (!draft || !seat) return showEmpty();
+  if (!draft || !seat) return void location.replace("#/");
   // The same box while the page redraws, so what is half written stays.
   const first = !draft.writer;
   draft.writer ??= writeBox({
     label: "发到新群聊",
     send: async (text, files) => {
-      const { body } = composeMessage(text, draft.members, myName());
-      const g = await api("POST", "/api/groups", { from: seat, members: draft.targets, message: body, files });
+      const problem = openingProblem(text, files.length);
+      if (problem) throw new Error(problem);
+      // Picked again since the box was made: what is picked now.
+      const { targets, members } = state.newGroup;
+      const { body } = composeMessage(text, members, myName());
+      const g = await api("POST", "/api/groups", { from: seat, members: targets, message: body, files });
       state.newGroup = null;
-      location.hash = `#/g/${encodeURIComponent(g.id)}`;
+      location.replace(`#/g/${encodeURIComponent(g.id)}`);
     },
   });
   const { foot, box, button, take } = draft.writer;
@@ -1935,10 +1963,12 @@ function renderNewGroup() {
     box.value = "@所有人 ";
   }
   // Redrawn, the box stays on the page with its focus and caret (see showMain).
+  // Put back on it (come back to, or picked again), it has the focus again.
+  const refocus = foot.parentNode !== document.getElementById("main") || document.activeElement === document.body;
   showMain(draft.title, h("div"), { foot, back: "#/", drop: take });
-  if (!first) return;
+  if (!refocus) return;
   box.focus();
-  box.setSelectionRange(box.value.length, box.value.length);
+  if (first) box.setSelectionRange(box.value.length, box.value.length);
 }
 
 // --- 通讯录
@@ -2403,10 +2433,14 @@ async function loadPeople() {
   if (cloud) state.contacts = await api("GET", "/api/contacts");
 }
 
-async function refresh() {
+// Fetches what the page shows and draws it. `fromEvent`: set off by an event
+// or the window's focus, not the person; once the data is in, it looks again
+// whether to hold back (holding), since a menu may have opened meanwhile.
+async function refresh({ fromEvent = false } = {}) {
   // This draws whatever an event held back; closing a menu below must not ask for it again.
   heldRedraw = false;
   const r = route();
+  const hash = location.hash;
   if (r.view === "start") return renderStart(r.id);
   if (r.view === "posts" && !cloud) {
     location.hash = "#/";
@@ -2443,6 +2477,12 @@ async function refresh() {
   } catch (err) {
     if (err.status === 401 && cloud) return boot();
     state.error = err.message;
+  }
+  // Another address since: the refresh the change set off draws that one.
+  if (location.hash !== hash) return;
+  if (fromEvent && holding()) {
+    heldRedraw = true;
+    return;
   }
   const app = document.getElementById("app");
   app.dataset.view = r.view;
@@ -2506,13 +2546,19 @@ function changing() {
   return !!field?.closest("[data-hold]") && field.value !== field.defaultValue;
 }
 
+// A menu or panel is open, or a field marked data-hold is being changed.
+function holding() {
+  return !!closeOpenMenu || changing();
+}
+
+// Asked before fetching, and again by refresh before drawing.
 function redrawFromEvent() {
-  if (closeOpenMenu || changing()) {
+  if (holding()) {
     heldRedraw = true;
     return;
   }
   heldRedraw = false;
-  void refresh();
+  void refresh({ fromEvent: true });
 }
 
 function releaseRedraw() {

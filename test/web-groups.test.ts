@@ -300,20 +300,181 @@ test("发起群聊: a friend, or some of their AIs, never both; what 完成 send
   assert.deepEqual(picked.map((p: any) => p.name), ["我的 Claude", "老王的 Codex"], "and the other way round");
   assert.deepEqual(page.targetsOf(page.togglePick(picked, wangCodex)), [{ agent: "f/claude" }]);
   assert.deepEqual(page.targetsOf([mine, wang]), [{ agent: "f/claude" }, { account: "wang" }]);
+  // What is ticked: a person, or an AI, never taken for the other.
+  assert.equal(page.isPicked([mine, wang], { person: "wang", name: "老王" }), true);
+  assert.equal(page.isPicked([mine, wang], wangCodex), false);
+  assert.equal(page.isPicked([{ agent: "wang", owner: "x", name: "叫 wang 的 AI" }], wang), false);
+  // A new group needs one of the person's own AIs; an invite does not.
+  assert.equal(page.pickProblem([wang], "fang", null), "群里至少要有你自己的一个 AI");
+  assert.equal(page.pickProblem([mine, wang], "fang", null), null);
+  assert.equal(page.pickProblem([wang], "fang", { id: "g_1" }), null);
+});
+
+test("a new group starts only with words to discuss or a file: @所有人 alone is not enough", () => {
+  assert.equal(page.openingProblem("@所有人", 0), "写一句要讨论的事");
+  assert.equal(page.openingProblem(" @所有人 @所有人 \n", 0), "写一句要讨论的事");
+  assert.equal(page.openingProblem("@所有人 周五发版", 0), null);
+  assert.equal(page.openingProblem("@所有人", 1), null, "a file is something to discuss");
+});
+
+describe("who 发起群聊 and 邀请 list, and who can be ticked", () => {
+  const me = "fang";
+  const agents = [
+    { id: "f/claude", name: "我的 Claude", client: "claude", owner: "fang" },
+    { id: "f/codex", name: "我的 Codex", client: "codex", owner: "fang" },
+    { id: "p_fang", name: "我", client: "person", owner: "fang", canReceive: false },
+    // A friend's AI is in /api/agents too: it is never one of the person's own.
+    { id: "w/codex", name: "老王的 Codex", client: "codex", owner: "wang" },
+  ];
+  const contacts = [
+    { id: "wang", name: "老王", agents: [{ id: "w/codex", name: "老王的 Codex", client: "codex" }, { id: "w/claude", name: "老王的 Claude", client: "claude" }] },
+    { id: "chuang", name: "王闯", agents: [{ id: "c/codex", name: "王闯的 Codex", client: "codex" }, { id: "c/claude", name: "王闯的 Claude", client: "claude" }] },
+    { id: "lin", name: "小林", agents: [{ id: "l/claude", name: "小林的 Claude", client: "claude" }, { id: "l/doubao", name: "小林的豆包", client: "doubao", canReceive: false }] },
+    { id: "xia", name: "小夏", agents: [{ id: "x/claude", name: "小夏的 Claude", client: "claude" }] },
+    { id: "zhou", name: "老周", agents: [] },
+  ];
+  // Each row as [kind, name, 等加入, indented or the arrow].
+  const shown = (rows: any[]) =>
+    rows.map((r) => (r.kind === "head" ? ["head", r.text] : r.kind === "person" ? ["person", r.item.name, r.waiting, r.toggle] : ["ai", r.item.name, r.waiting, r.indent]));
+
+  test("发起群聊: the person's own AIs, then each friend, opened by the arrow", () => {
+    const rows = page.pickerRows({ me, agents, contacts, opened: new Set(["lin"]) });
+    assert.deepEqual(shown(rows), [
+      ["head", "我的 AI"],
+      ["ai", "我的 Claude", false, false],
+      ["ai", "我的 Codex", false, false],
+      ["head", "朋友"],
+      ["person", "老王", false, "closed"],
+      ["person", "王闯", false, "closed"],
+      ["person", "小林", false, "open"],
+      ["ai", "小林的 Claude", false, true],
+      ["ai", "小林的豆包", false, true],
+      ["person", "小夏", false, "closed"],
+      ["person", "老周", false, null],
+    ]);
+    const lin = rows.find((r: any) => r.item?.agent === "l/doubao");
+    assert.deepEqual(lin.item, { agent: "l/doubao", owner: "lin", name: "小林的豆包", client: "doubao", speaksOnly: true });
+    assert.deepEqual(rows.find((r: any) => r.item?.person === "lin").item, { person: "lin", name: "小林" });
+  });
+
+  test("searching shows the friends and AIs that fit, opened, with no arrow to close", () => {
+    assert.deepEqual(shown(page.pickerRows({ me, agents, contacts, query: "王" })), [
+      ["head", "朋友"],
+      ["person", "老王", false, null],
+      ["ai", "老王的 Codex", false, true],
+      ["ai", "老王的 Claude", false, true],
+      ["person", "王闯", false, null],
+      ["ai", "王闯的 Codex", false, true],
+      ["ai", "王闯的 Claude", false, true],
+    ]);
+    assert.deepEqual(shown(page.pickerRows({ me, agents, contacts, query: "codex" })), [
+      ["head", "我的 AI"],
+      ["ai", "我的 Codex", false, false],
+      ["head", "朋友"],
+      ["person", "老王", false, null],
+      ["ai", "老王的 Codex", false, true],
+      ["person", "王闯", false, null],
+      ["ai", "王闯的 Codex", false, true],
+    ]);
+    assert.deepEqual(shown(page.pickerRows({ me, agents, contacts, query: "老周" })), [
+      ["head", "朋友"],
+      ["person", "老周", false, null],
+    ]);
+    assert.deepEqual(page.pickerRows({ me, agents, contacts, query: "没有这个人" }), []);
+  });
+
+  test("邀请: who is in is left out, a friend already in is offered only their AIs still out, and who is invited shows 等加入", () => {
+    const group = {
+      id: "g_1",
+      members: [
+        { agent: "f/claude", owner: "fang" },
+        { agent: "w/codex", owner: "wang" },
+        { agent: "x/claude", owner: "xia" },
+        { agent: "l/claude", owner: "lin" },
+      ],
+      invites: [
+        // 王闯 is invited and not yet in: an invite for one AI of his by name.
+        { id: "gi_1", account: "chuang", name: "王闯", agent: "c/claude", agentName: "王闯的 Claude" },
+        // 小林 is in, and her 豆包 is asked for by name.
+        { id: "gi_2", account: "lin", name: "小林", agent: "l/doubao", agentName: "小林的豆包" },
+      ],
+    };
+    const rows = page.pickerRows({ me, agents, contacts, group, opened: new Set(["chuang"]) });
+    assert.deepEqual(shown(rows), [
+      ["head", "我的 AI"],
+      ["ai", "我的 Codex", false, false],
+      ["head", "朋友"],
+      // 老王 is in: no row for him as a person, only his AI still out.
+      ["ai", "老王的 Claude", false, false],
+      // 王闯 waits on his invite: himself and each of his AIs.
+      ["person", "王闯", true, "open"],
+      ["ai", "王闯的 Codex", true, true],
+      ["ai", "王闯的 Claude", true, true],
+      // 小林 is in; her 豆包 waits on its invite.
+      ["ai", "小林的豆包", true, false],
+      // 小夏's one AI is in: nothing of hers is left. 老周 has no AI yet.
+      ["person", "老周", false, null],
+    ]);
+    // Someone in the group asked for the person's own Codex by name: answered on its tile.
+    const mineAsked = { ...group, invites: [{ id: "gi_4", account: "fang", name: "我", agent: "f/codex", agentName: "我的 Codex" }] };
+    assert.deepEqual(shown(page.pickerRows({ me, agents, contacts, group: mineAsked, query: "我的" })), [
+      ["head", "我的 AI"],
+      ["ai", "我的 Codex", true, false],
+    ]);
+    // A person invited to pick: the same, whichever AI.
+    const asked = { ...group, invites: [{ id: "gi_3", account: "chuang", name: "王闯", agent: null, agentName: null }] };
+    assert.deepEqual(shown(page.pickerRows({ me, agents, contacts, group: asked, query: "王闯" })), [
+      ["head", "朋友"],
+      ["person", "王闯", true, null],
+      ["ai", "王闯的 Codex", true, true],
+      ["ai", "王闯的 Claude", true, true],
+    ]);
+  });
 });
 
 test("the invite card offers the person's own AIs, those that can answer ticked; only the one asked for by name", () => {
-  const mine = [
-    { id: "w/codex", name: "我的 Codex", client: "codex" },
-    { id: "w/claude", name: "我的 Claude", client: "claude" },
-    { id: "r_w", name: "我的豆包", client: "doubao", canReceive: false },
-    { id: "p_wang", name: "我", client: "person", canReceive: false },
+  const agents = [
+    { id: "w/codex", name: "我的 Codex", client: "codex", owner: "wang" },
+    { id: "w/claude", name: "我的 Claude", client: "claude", owner: "wang" },
+    { id: "r_w", name: "我的豆包", client: "doubao", canReceive: false, owner: "wang" },
+    { id: "p_wang", name: "我", client: "person", canReceive: false, owner: "wang" },
+    // A friend's AI, in /api/agents too, is never offered.
+    { id: "c/codex", name: "王闯的 Codex", client: "codex", owner: "chuang" },
   ];
-  assert.deepEqual(page.inviteChoices({ agent: null }, mine).map((c: any) => [c.name, c.checked, c.locked, c.speaksOnly]), [
+  assert.deepEqual(page.inviteChoices({ agent: null }, agents, "wang").map((c: any) => [c.name, c.checked, c.locked, c.speaksOnly]), [
     ["我的 Codex", true, false, false],
     ["我的 Claude", true, false, false],
     ["我的豆包", false, false, true],
   ]);
-  assert.deepEqual(page.inviteChoices({ agent: "w/claude" }, mine).map((c: any) => [c.name, c.checked, c.locked]), [["我的 Claude", true, true]]);
-  assert.deepEqual(page.inviteChoices({ agent: "gone" }, mine), []);
+  assert.deepEqual(page.inviteChoices({ agent: "w/claude" }, agents, "wang").map((c: any) => [c.name, c.checked, c.locked]), [["我的 Claude", true, true]]);
+  assert.deepEqual(page.inviteChoices({ agent: "gone" }, agents, "wang"), []);
+  assert.deepEqual(page.inviteChoices({ agent: "c/codex" }, agents, "wang"), [], "named for someone else's AI");
+});
+
+test("the invite card says which computer an AI is on, unless its name says it already", () => {
+  const agents = [
+    { id: "m/claude", name: "我的 Claude（MacBook）", client: "claude", owner: "fang" },
+    { id: "i/claude", name: "我的 Claude（iMac）", client: "claude", owner: "fang" },
+    { id: "m/codex", name: "我的 Codex", client: "codex", owner: "fang" },
+    { id: "r_f", name: "我的豆包", client: "doubao", canReceive: false, owner: "fang" },
+  ];
+  const devices = [
+    { id: "m", name: "MacBook", agents: [{ id: "m/claude" }, { id: "m/codex" }] },
+    { id: "i", name: "iMac", agents: [{ id: "i/claude" }] },
+  ];
+  assert.deepEqual(page.inviteChoices({ agent: null }, agents, "fang", devices).map((c: any) => [c.name, c.note]), [
+    ["我的 Claude（MacBook）", null],
+    ["我的 Claude（iMac）", null],
+    ["我的 Codex", "MacBook"],
+    ["我的豆包", "只能发言"],
+  ]);
+  assert.equal(page.inviteChoices({ agent: null }, agents, "fang")[2].note, null, "no computers known");
+});
+
+test("an invite card with nothing to bring in says why, in a few words", () => {
+  const none = page.inviteChoices({ agent: null }, [], "fang");
+  assert.deepEqual(page.inviteEmpty({ agent: null, agentName: null }, none), { text: "先连接 AI", connect: true });
+  assert.deepEqual(page.inviteEmpty({ agent: "f/claude", agentName: "我的 Claude" }, none), { text: "我的 Claude 已移除", connect: false });
+  const one = page.inviteChoices({ agent: null }, [{ id: "f/claude", name: "我的 Claude", client: "claude", owner: "fang" }], "fang");
+  assert.equal(page.inviteEmpty({ agent: null, agentName: null }, one), null);
 });
