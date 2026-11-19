@@ -105,6 +105,8 @@ CREATE TABLE IF NOT EXISTS group_acts (
   asker TEXT NOT NULL,
   doer TEXT NOT NULL,
   status TEXT NOT NULL,
+  -- Its person's own asking (GroupAct.own): no dialog.
+  own INTEGER NOT NULL DEFAULT 0,
   max_rounds INTEGER NOT NULL,
   rounds_used INTEGER NOT NULL DEFAULT 0,
   -- The latest message that asked.
@@ -249,6 +251,7 @@ function toAct(r: Row): GroupAct {
     asker: r.asker as string,
     doer: r.doer as string,
     status: r.status as GroupActStatus,
+    own: r.own === 1,
     maxRounds: r.max_rounds as number,
     roundsUsed: r.rounds_used as number,
     askSeq: r.ask_seq as number,
@@ -273,6 +276,8 @@ export class GroupStore {
     // told).
     addColumn(this.db, "group_usage", "extra", "INTEGER NOT NULL DEFAULT 0");
     addColumn(this.db, "group_usage", "warned", "INTEGER NOT NULL DEFAULT 0");
+    // Acts from before were all asked for by someone else: their person said yes.
+    addColumn(this.db, "group_acts", "own", "INTEGER NOT NULL DEFAULT 0");
     // Members from before have their front session start where their group
     // is now: what was answered before is no news, as for one joining now.
     if (addColumn(this.db, "group_members", "seen_seq", "INTEGER NOT NULL DEFAULT 0")) {
@@ -597,10 +602,10 @@ export class GroupStore {
   addAct(a: Omit<GroupAct, "createdAt" | "updatedAt">, now: string): GroupAct {
     this.db
       .prepare(
-        `INSERT INTO group_acts (id, group_id, asker, doer, status, max_rounds, rounds_used, ask_seq, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO group_acts (id, group_id, asker, doer, status, own, max_rounds, rounds_used, ask_seq, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(a.id, a.groupId, a.asker, a.doer, a.status, a.maxRounds, a.roundsUsed, a.askSeq, now, now);
+      .run(a.id, a.groupId, a.asker, a.doer, a.status, a.own ? 1 : 0, a.maxRounds, a.roundsUsed, a.askSeq, now, now);
     return this.act(a.id)!;
   }
 

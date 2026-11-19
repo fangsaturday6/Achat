@@ -383,6 +383,11 @@ export interface GroupAct {
   // The AI asked, which works on its computer.
   doer: string;
   status: GroupActStatus;
+  // Asked for by its person in person, or by another of their AIs from the
+  // front: no dialog, and Codex's commands may go online, as between one
+  // person's own AIs in a thread. Not for an AI's background answer or
+  // 动手's result, which may echo someone else's words. The service says.
+  own: boolean;
   maxRounds: number;
   roundsUsed: number;
   // The latest message that asked: the result answers it (replyTo).

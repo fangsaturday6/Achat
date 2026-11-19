@@ -660,16 +660,28 @@ export class GroupService {
     return act?.status === "active" && act.askSeq === seq && act.roundsUsed >= act.maxRounds ? act : null;
   }
 
+  // Its person's own asking, which needs no dialog: their words in person,
+  // or another of their AIs speaking from the front. Not that AI's
+  // background answer, nor 动手's result: what someone else said may be
+  // echoed in it.
+  private ownAsk(msg: GroupMessage, owner: string): boolean {
+    if (msg.sender === this.dir.seat(owner)) return true;
+    const asker = msg.sender ? this.dir.agent(msg.sender) : undefined;
+    return !!asker && asker.client !== "person" && asker.owner === owner && msg.replyTo === null;
+  }
+
   // The computer of the AI woken for `seq` judged it is asked to 动手 (8k).
-  // Between one person's own AIs, or by its own person, it starts at once;
-  // within an act's rounds the same asker's next request goes on with it;
-  // otherwise the person decides in a dialog on that computer (approveAct,
-  // declineAct). `run`: the computer starts the work, or goes on with it, now.
+  // Asked by its own person in person, or by another of their AIs from the
+  // front, it starts at once (ownAsk); within an act's rounds the same
+  // asker's next request goes on with it; otherwise the person decides in a
+  // dialog on that computer (approveAct, declineAct). `run`: the computer
+  // starts the work, or goes on with it, now.
   requestAct(caller: Caller, groupId: string, input: { doer: string; seq: number }): { act: GroupAct; run: boolean } {
     const member = this.requireDoer(caller, groupId, input.doer);
     const r = this.store.receipt(groupId, input.seq, input.doer);
     if (!r || !(["reading", "asking", "acting"] as ReceiptState[]).includes(r.state)) throw new RelayError(409, "这条已经不用回了");
-    const asker = this.store.message(groupId, input.seq)!.sender!;
+    const msg = this.store.message(groupId, input.seq)!;
+    const asker = msg.sender!;
     const open = this.store.openAct(groupId, asker, input.doer);
     // Asked for already, such as a retry or after a restart: nothing changes.
     if (open && r.state !== "reading") return { act: open, run: open.status === "active" };
@@ -684,12 +696,12 @@ export class GroupService {
       if (open?.status === "active") this.finish(open, now);
       this.store.setReceipt(groupId, input.seq, input.doer, "asking", null, r.epoch, now);
       if (open?.status === "asking") return { act: this.store.updateAct(open.id, { askSeq: Math.max(open.askSeq, input.seq) }, now), run: false };
+      const own = this.ownAsk(msg, member.owner);
       const act = this.store.addAct(
-        { id: `ga_${randomBytes(6).toString("hex")}`, groupId, asker, doer: input.doer, status: "asking", maxRounds: GROUP_ACT_ROUNDS, roundsUsed: 0, askSeq: input.seq },
+        { id: `ga_${randomBytes(6).toString("hex")}`, groupId, asker, doer: input.doer, status: "asking", own, maxRounds: GROUP_ACT_ROUNDS, roundsUsed: 0, askSeq: input.seq },
         now,
       );
-      // Its own person, or another of their AIs: no dialog.
-      return this.dir.agent(asker)?.owner === member.owner ? { act: this.startAct(act, now), run: true } : { act, run: false };
+      return own ? { act: this.startAct(act, now), run: true } : { act, run: false };
     });
     this.emit("group.updated", groupId, { seq: input.seq });
     return result;

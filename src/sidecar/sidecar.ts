@@ -806,16 +806,17 @@ export class Sidecar {
     return true;
   }
 
-  // Whom an act is for: the name everyone reads; what send_group_message's
-  // mentions take (its own person is "主人"; a friend's person cannot be
-  // @ed by an AI); and whether it is between this person's own.
-  private async askerOf(work: GroupWork, asker: string, me: AgentConfig): Promise<{ name: string; mention: string | null; own: boolean }> {
-    if (asker === work.owner.seat) return { name: work.owner.name, mention: "主人", own: true };
+  // Whom an act is for: the name everyone reads, and what
+  // send_group_message's mentions take (its own person is "主人"; a friend's
+  // person cannot be @ed by an AI). Whether it is this person's own asking
+  // is the service's to say (GroupAct.own).
+  private async askerOf(work: GroupWork, asker: string): Promise<{ name: string; mention: string | null }> {
+    if (asker === work.owner.seat) return { name: work.owner.name, mention: "主人" };
     const name = work.names[asker] ?? work.members.find((m) => m.agent === asker)?.name ?? asker;
     const known = await this.agent(asker);
-    if (known?.client === "person") return { name, mention: null, own: false };
+    if (known?.client === "person") return { name, mention: null };
     // As this computer's side names it, so one of this person's own AIs is found too.
-    return { name, mention: known?.name ?? name, own: !!me.owner && known?.owner === me.owner };
+    return { name, mention: known?.name ?? name };
   }
 
   // Puts a request to 动手 in a group to the person here, once for each time
@@ -829,7 +830,7 @@ export class Sidecar {
     const groupId = work.group.id;
     let asking: Asking | null = null;
     try {
-      const from = (await this.askerOf(work, act.asker, me)).name;
+      const from = (await this.askerOf(work, act.asker)).name;
       const title = groupActTitle(work.group.name, from, me.name.replace(/^我的/, "你的"));
       asking = this.opts.ask?.({ mode: "do", title, topic: "", body: withFileNames(ask), scope: `${MODE_LABELS.do} · ${act.maxRounds} 轮` }) ?? null;
       if (!asking) {
@@ -888,7 +889,7 @@ export class Sidecar {
     // Given to this round now, before anything is awaited: a request that
     // comes meanwhile waits its turn (nextRound).
     this.tasks.markSeen(act.id, ask.seq);
-    const to = await this.askerOf(work, act.asker, me);
+    const to = await this.askerOf(work, act.asker);
     // A group's files are kept under its id, which the conversation may read.
     mkdirSync(filesDir(groupId), { recursive: true, mode: 0o700 });
     const saved = await saveAllFiles(this.relay, [...work.messages, ask].filter((m) => m.seq > since).map((m) => ({ ...m, threadId: groupId })));
@@ -901,7 +902,7 @@ export class Sidecar {
       systemPrompt: groupDoerSystemPrompt(me, plainName(work, act.doer, me.name), work.owner.name, work.group.name),
       from: before,
       readDirs: [filesDir(groupId)],
-      own: to.own,
+      own: act.own,
     });
     this.tasks.set(act.id, rec);
     this.log(`${groupId} 在新对话里动手：${rec.dir}`);
