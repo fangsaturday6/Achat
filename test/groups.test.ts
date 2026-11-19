@@ -678,6 +678,21 @@ describe("groups", () => {
     assert.deepEqual(unseen("fang/claude"), []);
   });
 
+  test("only answers to what the AI said in front are news for its front session, not those to what it answered in the background", () => {
+    const g = groups.createGroup(computer("fang"), { from: "fang/claude", name: "前台", members: [{ account: "wang" }] });
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    const unseen = () => groups.unseen(computer("fang"), "fang/claude");
+    // 老王's Codex @s 老方's Claude, which answers in the background and is answered back.
+    const asked = groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "@老方的 Claude 回调地址是什么", mentions: ["fang/claude"] }).messages.at(-1)!;
+    const answer = groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "@老王的 Codex /pay/notify", mentions: ["wang/codex"], replyTo: asked.seq, epoch: 0 }).messages.at(-1)!;
+    groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "收到", replyTo: answer.seq, epoch: 0 });
+    assert.deepEqual(unseen(), [], "a round between the AIs in the background");
+    // What it said in front, answered.
+    const said = groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "@老王的 Codex 上线了吗", mentions: ["wang/codex"] }).messages.at(-1)!;
+    const reply = groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "上线了", replyTo: said.seq, epoch: 0 }).messages.at(-1)!;
+    assert.deepEqual(unseen(), [{ id: g.id, name: "前台", seq: reply.seq }]);
+  });
+
   test("动手: another person's AI asks, its person approves on the computer, and the same asker's next 9 go on without asking", () => {
     const g = start();
     groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });

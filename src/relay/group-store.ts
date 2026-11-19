@@ -379,15 +379,16 @@ export class GroupStore {
   }
 
   // The groups `agent` is in where, after its front session last looked,
-  // someone else answered a message it wrote (their reply_to is one of its
-  // messages), each with the newest such answer; the latest first.
+  // someone else answered a message it wrote in front (their reply_to is one
+  // of its messages that answer nothing: its background answers and 动手's
+  // results each answer an @), each with the newest such answer; the latest first.
   unseenReplies(agent: string): { groupId: string; seq: number }[] {
     return (
       this.db
         .prepare(
           `SELECT r.group_id, MAX(r.seq) AS seq, MAX(r.id) AS latest FROM group_members m
            JOIN group_messages r ON r.group_id = m.group_id AND r.seq > m.seen_seq AND r.kind = 'message' AND r.sender IS NOT m.agent
-           JOIN group_messages mine ON mine.group_id = r.group_id AND mine.seq = r.reply_to AND mine.sender = m.agent
+           JOIN group_messages mine ON mine.group_id = r.group_id AND mine.seq = r.reply_to AND mine.sender = m.agent AND mine.reply_to IS NULL
            WHERE m.agent = ? AND m.left_at IS NULL
            GROUP BY r.group_id ORDER BY latest DESC`,
         )
