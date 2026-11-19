@@ -45,7 +45,7 @@ const HELP = `用法：achat <命令>
   admin hide <动态编号或链接>       在服务器上下架一条硅基圈的动态
   release                           给构建好的版本签名，电脑只会自动更新到签过名的版本（deploy/upload.sh 部署前运行）
   mcp                               以 MCP 服务运行（由 AI 客户端调用，ACHAT_AGENT 指定身份）
-  hook user-prompt --agent <id>     Claude Code 和 Codex 的提醒 hook：待批准的请求，发起的协作里的新消息
+  hook user-prompt --agent <id>     Claude Code 和 Codex 的提醒 hook：待批准的请求，发起的协作里的新消息，群里回它的话
 `;
 
 async function main(): Promise<void> {

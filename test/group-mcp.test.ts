@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { RelayClient } from "../src/client.js";
+import { userPromptHook } from "../src/hook.js";
 import { createMcpServer } from "../src/mcp/server.js";
 import { Sidecar } from "../src/sidecar/sidecar.js";
 import { addComputer, type Browser, logIn, ScriptedRunner, startTestCloud, until } from "./helpers.js";
@@ -59,6 +60,10 @@ test("an AI makes a group, talks in it, reads it, sets its 每天次数 and 叫�
     assert.match(created, /已建群「支付对接」/);
     assert.match(created, /老王的 Codex：\n订单和回调在我这边/);
     assert.match(created, /我的 Codex 不在线/);
+    // What create_group brought back is no news for the session that made the group.
+    const made = join(mkdtempSync(join(tmpdir(), "achat-transcript-")), "made.jsonl");
+    writeFileSync(made, JSON.stringify({ content: created }) + "\n");
+    assert.equal(await userPromptHook(fangMac.client, fangMac.agent("claude"), { transcriptPath: made }), null);
 
     const said = textOf(await ai.callTool({ name: "send_group_message", arguments: { group: "支付对接", message: "@老王的 Codex 微信呢", mentions: ["老王的 Codex"] } }));
     assert.match(said, /微信还没商户号/);
@@ -127,6 +132,64 @@ test("an AI that is not in the group is told to pull itself in with invite_to_gr
     assert.notEqual(pulled.isError, true);
     assert.match(textOf(await ai.callTool({ name: "send_group_message", arguments: { group: "只有 Codex", message: "我来了" } })), /已发到群「只有 Codex」/);
   } finally {
+    await cloud.close();
+  }
+});
+
+test("a reply that comes later in a group is brought up in the session that spoke there, until it reads the group", async () => {
+  const { cloud, mailer } = await startTestCloud();
+  const fang = await logIn(cloud, mailer, "fang@example.com", "老方");
+  const wang = await logIn(cloud, mailer, "wang@example.com", "老王");
+  await befriend(fang, wang, "wang@example.com");
+  const fangMac = await addComputer(cloud, fang, "MacBook", ["claude", "codex"]);
+  const wangLaptop = await addComputer(cloud, wang, "ThinkPad", ["codex"]);
+  const claude = fangMac.agent("claude");
+  const wangCodex = wangLaptop.agent("codex");
+  const wangId = (await wang.call("GET", "/api/me")).account.id;
+  const g = await fangMac.client.createGroup({ from: claude, name: "支付对接", members: [{ account: wangId }] });
+  const invited = (await wang.call("GET", "/api/groups")).find((x: any) => x.id === g.id);
+  await wang.call("POST", `/api/groups/${g.id}/invites/${invited.myInvite.id}/accept`, { agents: [wangCodex] });
+  let sidecar: Sidecar | null = null;
+  try {
+    const ai = await mcp(fangMac.client, claude);
+    const quiet = textOf(await ai.callTool({ name: "send_group_message", arguments: { group: "支付对接", message: "我先看看" } }));
+    assert.equal(quiet, `已发到群「支付对接」（${g.id}），没有叫醒谁，不用等回复。后面有人回你，主人下次跟你说话时会提醒你。`);
+
+    // 老王's computer is off: the tool comes back at once, and his Codex answers once it is on.
+    const asked = textOf(await ai.callTool({ name: "send_group_message", arguments: { group: "支付对接", message: "@老王的 Codex 微信呢", mentions: ["老王的 Codex"] } }));
+    assert.match(asked, /老王的 Codex 不在线/);
+    sidecar = new Sidecar({
+      client: wangLaptop.client,
+      agents: [],
+      runners: { [wangCodex]: new ScriptedRunner(["微信还没商户号"]) },
+      notify: () => {},
+      webUrl: cloud.url,
+      log: () => {},
+    });
+    sidecar.start();
+    await until(async () => (await fangMac.client.group(g.id)).messages.some((m) => m.sender === wangCodex));
+
+    const dir = mkdtempSync(join(tmpdir(), "achat-transcript-"));
+    const spoke = join(dir, "spoke.jsonl");
+    const other = join(dir, "other.jsonl");
+    writeFileSync(spoke, JSON.stringify({ content: asked }) + "\n");
+    writeFileSync(other, JSON.stringify({ content: "别的事" }) + "\n");
+    const reminder = await userPromptHook(fangMac.client, claude, { transcriptPath: spoke });
+    assert.equal(
+      JSON.parse(reminder ?? "{}").hookSpecificOutput?.additionalContext,
+      `Achat：群「支付对接」（${g.id}）里有人回了你发的消息。先用 achat 的 check_group（group: ${g.id}）看，再接着回答主人。`,
+    );
+    assert.equal(await userPromptHook(fangMac.client, claude, { transcriptPath: other }), null, "not in a session that never spoke there");
+    assert.equal(await userPromptHook(fangMac.client, fangMac.agent("codex"), { transcriptPath: spoke }), null, "nor for another AI");
+
+    assert.match(textOf(await ai.callTool({ name: "check_group", arguments: { group: "支付对接" } })), /微信还没商户号/);
+    assert.equal(await userPromptHook(fangMac.client, claude, { transcriptPath: spoke }), null, "once read, no more reminders");
+
+    // A day's more counts in what check_group says it may use today.
+    await fangMac.client.addGroupExtra(g.id, claude);
+    assert.match(textOf(await ai.callTool({ name: "check_group", arguments: { group: "支付对接" } })), /我的 Claude 今天被叫醒 0\/60 次/);
+  } finally {
+    sidecar?.stop();
     await cloud.close();
   }
 });

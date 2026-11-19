@@ -9,33 +9,38 @@ export interface HookInput {
   transcriptPath?: string;
 }
 
-// The threads among `threads` that this session took part in: a thread's id
-// shows up in the session's log once an Achat tool reported on it there. A
-// session that never saw the thread has nothing to continue.
-async function askedHere(threads: ThreadSummary[], transcriptPath: string | undefined): Promise<ThreadSummary[]> {
-  if (!threads.length || !transcriptPath) return [];
-  let log: string;
+// The session's own log, which tells the threads and groups it took part in:
+// an id shows up there once an Achat tool reported on it there. A session
+// that never saw a thread or a group has nothing to continue. Empty when
+// there is no log.
+async function sessionLog(transcriptPath: string | undefined): Promise<string> {
+  if (!transcriptPath) return "";
   try {
-    log = await readFile(transcriptPath, "utf8");
+    return await readFile(transcriptPath, "utf8");
   } catch {
-    return [];
+    return "";
   }
-  return threads.filter((t) => log.includes(t.id));
 }
 
 // Output for Claude Code's and Codex's UserPromptSubmit hook. For requests
 // waiting for approval it only says how many, never who sent them or what
 // they say, so nothing from the other side reaches the model before the person
 // approves. For threads this AI asked, it tells the session that asked when
-// the other side has said something since, so the work there carries on.
+// the other side has said something since, so the work there carries on; for
+// groups, the session that spoke there when someone replied to what it said
+// (8n), naming only the group.
 export async function userPromptHook(client: RelayClient, agentId: string, input: HookInput = {}): Promise<string | null> {
   if (process.env.ACHAT_HEADLESS) return null;
   let pending: ThreadSummary[];
   let news: ThreadSummary[];
+  let replied: { id: string; name: string; seq: number }[];
   try {
-    [pending, news] = await Promise.all([
+    [pending, news, replied] = await Promise.all([
       client.listThreads({ to: agentId, status: "pending", surfaced: true }),
       client.listThreads({ unseen: agentId }),
+      // Groups need an account: on this computer alone, or with an Achat
+      // service from before, there are none, and the rest is still told.
+      client.unseenGroups(agentId).catch(() => []),
     ]);
   } catch {
     return null;
@@ -47,7 +52,8 @@ export async function userPromptHook(client: RelayClient, agentId: string, input
         "让主人在弹出的对话框里同意或拒绝，然后继续主人刚才的事。不要猜测请求内容。",
     );
   }
-  const here = await askedHere(news, input.transcriptPath);
+  const log = news.length || replied.length ? await sessionLog(input.transcriptPath) : "";
+  const here = news.filter((t) => log.includes(t.id));
   if (here.length) {
     const agents = await client.agents().catch(() => []);
     const name = (id: string) => agents.find((a) => a.id === id)?.name ?? id;
@@ -65,6 +71,9 @@ export async function userPromptHook(client: RelayClient, agentId: string, input
           "先用 achat 的 check_thread 看完整内容，把原文转给主人，再接着做这件事。",
       );
     }
+  }
+  for (const g of replied.filter((g) => log.includes(g.id))) {
+    lines.push(`Achat：群「${g.name}」（${g.id}）里有人回了你发的消息。先用 achat 的 check_group（group: ${g.id}）看，再接着回答主人。`);
   }
   if (!lines.length) return null;
   return JSON.stringify({

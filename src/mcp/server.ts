@@ -777,6 +777,13 @@ export function createMcpServer(opts: McpOptions): McpServer {
     return (await c.client.agents()).find((a) => a.client === "person" && a.name === "我")?.id ?? null;
   }
 
+  // The AI has now been shown the group up to its latest message, so replies
+  // in it are no news for its session (8n, as 8e for threads).
+  async function groupSeen(c: McpConnection, d: GroupDetail): Promise<void> {
+    const last = d.messages.at(-1);
+    if (last) await c.client.markGroupSeen(d.id, c.agentId, last.seq).catch(() => {});
+  }
+
   server.registerTool(
     "create_group",
     {
@@ -801,6 +808,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
       const created = await c.client.createGroup({ from: c.agentId, name, members: targets, message, files: outgoing });
       const opener = created.openerSeq;
       const done = await waitGroupUntil(c, created, (d) => !d.invites.length && (opener === null || answeredAll(opener)(d)), extra);
+      await groupSeen(c, done);
       const lines = [`已建群「${done.name}」（${done.id}）。群里：${done.members.map((m) => m.name).join("、")}。`];
       if (done.invites.length) lines.push(`还没加入：${done.invites.map((i) => i.agentName ?? i.name).join("、")}（要对方本人在网页上点“加入”，7 天内有效）。`);
       if (opener !== null) lines.push("", ...(await groupOutcome(c, done, opener)));
@@ -856,9 +864,14 @@ export function createMcpServer(opts: McpOptions): McpServer {
       const ids = mentionIds(before, mentions ?? [], c.agentId, await ownSeat(c));
       const posted = await c.client.postGroupMessage(g.id, { from: c.agentId, body: message, mentions: ids, files: files?.length ? readFiles(files) : undefined });
       const seq = posted.messages.filter((m) => m.sender === c.agentId).at(-1)!.seq;
-      if (!posted.messages.find((m) => m.seq === seq)!.receipts.length) return text(`已发到群「${posted.name}」（${posted.id}），没有叫醒谁，不用等回复。`);
+      if (!posted.messages.find((m) => m.seq === seq)!.receipts.length) {
+        await groupSeen(c, posted);
+        return text(`已发到群「${posted.name}」（${posted.id}），没有叫醒谁，不用等回复。后面有人回你，主人下次跟你说话时会提醒你。`);
+      }
       const done = await waitGroupUntil(c, posted, answeredAll(seq), extra);
-      return text([`群「${done.name}」（${done.id}）里的回复：`, "", ...(await groupOutcome(c, done, seq))].join("\n"));
+      const lines = [`群「${done.name}」（${done.id}）里的回复：`, "", ...(await groupOutcome(c, done, seq))];
+      await groupSeen(c, done);
+      return text(lines.join("\n"));
     }),
   );
 
@@ -906,6 +919,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
         if (left.length) lines.push(`  （${left.map((r) => `${cjk(name(r.agent), RECEIPT_LABELS[r.state])}${r.reason ? `：${r.reason}` : ""}`).join("；")}）`);
       }
       lines.push("", d.status === "dissolved" ? "群已经解散了，只能看。" : "在群里说话用 send_group_message，@ 谁才叫醒谁。");
+      await groupSeen(c, d);
       return text(lines.join("\n"));
     }),
   );
