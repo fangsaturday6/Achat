@@ -638,6 +638,11 @@ export class GroupStore {
     return r ? toAct(r) : null;
   }
 
+  // Whether `doer` does 动手 for someone now, in any group.
+  doing(doer: string): boolean {
+    return this.db.prepare("SELECT 1 FROM group_acts WHERE doer = ? AND status = 'active' LIMIT 1").get(doer) !== undefined;
+  }
+
   // The acts asked of `doer` in a group that are `status` now, the oldest first.
   actsOf(groupId: string, doer: string, status: GroupActStatus): GroupAct[] {
     return (

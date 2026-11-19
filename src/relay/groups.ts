@@ -703,11 +703,12 @@ export class GroupService {
   // Its person's own asking, which needs no dialog: their words in person,
   // or another of their AIs speaking from the front. Not that AI's
   // background answer, nor 动手's result: what someone else said may be
-  // echoed in it.
+  // echoed in it. Nor what an AI doing 动手 for someone says, in any group:
+  // its 动手 conversation read their words, and may speak without reply_to.
   private ownAsk(msg: GroupMessage, owner: string): boolean {
     if (msg.sender === this.dir.seat(owner)) return true;
     const asker = msg.sender ? this.dir.agent(msg.sender) : undefined;
-    return !!asker && asker.client !== "person" && asker.owner === owner && msg.replyTo === null;
+    return !!asker && asker.client !== "person" && asker.owner === owner && msg.replyTo === null && !this.store.doing(asker.id);
   }
 
   // The computer of the AI woken for `seq` judged it is asked to 动手 (8k).
