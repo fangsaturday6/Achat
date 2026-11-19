@@ -638,6 +638,13 @@ export class GroupStore {
     return r ? toAct(r) : null;
   }
 
+  // The acts asked of `doer` in a group that are `status` now, the oldest first.
+  actsOf(groupId: string, doer: string, status: GroupActStatus): GroupAct[] {
+    return (
+      this.db.prepare("SELECT * FROM group_acts WHERE group_id = ? AND doer = ? AND status = ? ORDER BY created_at, rowid").all(groupId, doer, status) as Row[]
+    ).map(toAct);
+  }
+
   updateAct(id: string, patch: GroupActPatch, now: string): GroupAct {
     const sets = ["updated_at = ?"];
     const params: (string | number)[] = [now];

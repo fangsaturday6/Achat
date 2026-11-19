@@ -902,6 +902,33 @@ describe("groups", () => {
     assert.deepEqual(groups.work(computer("fang"), ["fang/claude", "fang/codex"]), []);
   });
 
+  test("动手 its person left a day unanswered ends, so 稍后 is not put to them again every time the computer starts", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    const ask = () => groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "@老方的 Claude 动手改一下", mentions: ["fang/claude"] }).messages.at(-1)!.seq;
+    const request = (seq: number) => groups.requestAct(computer("fang"), g.id, { doer: "fang/claude", seq });
+    const receipt = (seq: number) => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts.find((r) => r.agent === "fang/claude")!;
+    const later = (hours: number) => (now = new Date(now.getTime() + hours * 60 * 60 * 1000));
+    const first = ask();
+    const act = request(first).act;
+    // Asked again within the day: it waits a day from then.
+    later(20);
+    const second = ask();
+    request(second);
+    later(5);
+    assert.deepEqual(groups.work(computer("fang"), ["fang/claude"]), [{ groupId: g.id, agent: "fang/claude", seq: second }]);
+    later(20);
+    assert.deepEqual(groups.work(computer("fang"), ["fang/claude"]), []);
+    assert.deepEqual([receipt(first), receipt(second)], [
+      { agent: "fang/claude", state: "passed", reason: "主人一天没处理" },
+      { agent: "fang/claude", state: "passed", reason: "主人一天没处理" },
+    ]);
+    assert.equal(groups.store.act(act.id)!.status, "stopped");
+    // Asked once more, it is put to them anew.
+    const anew = request(ask());
+    assert.deepEqual([anew.act.status, anew.act.id === act.id], ["asking", false]);
+  });
+
   test("reply_to from the front only sends back 动手's result: what the background is reading stays its to answer", () => {
     const g = start();
     groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });

@@ -831,12 +831,26 @@ export class GroupService {
     return undefined;
   }
 
+  // 动手 its person left unanswered (稍后) for a day since it was last asked
+  // for ends, as an @ read for a day is 不在线: what asked need not be
+  // answered, and the line under it says why. Asked for again, it is put to
+  // them anew. True when one ended.
+  private expireAsking(groupId: string, agent: string, since: number, now: string): boolean {
+    const old = this.store.actsOf(groupId, agent, "asking").filter((a) => Date.parse(a.updatedAt) < since);
+    for (const act of old) {
+      for (const r of this.askedBy(groupId, agent, act.asker, "asking")) this.store.setReceipt(groupId, r.seq, agent, "passed", "主人一天没处理", r.epoch, now);
+      this.store.updateAct(act.id, { status: "stopped" }, now);
+    }
+    return old.length > 0;
+  }
+
   // What the caller's AIs (`agents`, on its computer) have to answer now. The
   // latest @ missed while the computer was off is taken up first, within a
   // day; one left for 每天次数 waits until its person raises them (setQuota)
   // or adds a day's more (addToday), so a computer coming back does not
   // spend today's on yesterday's. What it
-  // was woken for over a day ago and never answered is too late: 不在线.
+  // was woken for over a day ago and never answered is too late: 不在线;
+  // 动手 left a day for its person ends (expireAsking).
   work(caller: Caller, agents: string[]): { groupId: string; agent: string; seq: number }[] {
     const now = this.stamp();
     const since = this.now().getTime() - this.limits.catchUpMs;
@@ -848,8 +862,8 @@ export class GroupService {
         for (const r of this.store.receiptsOf(group.id, agent, ["reading"])) {
           if (Date.parse(r.updatedAt) < since) this.store.setReceipt(group.id, r.seq, agent, "offline", null, r.epoch, r.updatedAt);
         }
-        const wake = this.transaction(() => this.takeUp(group, agent, ["offline"], now));
-        if (wake.length) this.emit("group.updated", group.id, { wake });
+        const { wake, expired } = this.transaction(() => ({ expired: this.expireAsking(group.id, agent, since, now), wake: this.takeUp(group, agent, ["offline"], now) }));
+        if (wake.length || expired) this.emit("group.updated", group.id, { wake });
         const waiting = this.waitingOn(group.id, agent);
         if (waiting) out.push({ groupId: group.id, agent, seq: waiting.seq });
       }
