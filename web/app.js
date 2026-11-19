@@ -1,6 +1,8 @@
 // One page for both setups: on this computer (experiment 0) the relay fills in
 // a token; in the cloud the token is empty and the login cookie is used.
 // Layout, colours and wording follow docs/ui.md.
+import { cjk, messageText, SHOWN_TYPES } from "./text.js";
+import { GROUP_STATUS_LABELS, groupPreview, invitesWaiting } from "./groups.js";
 const token = window.ACHAT_TOKEN;
 const cloud = !token;
 const STATUS = { pending: "待批准", active: "进行中", declined: "已拒绝", closed: "已结束", stopped: "已停止", expired: "已过期" };
@@ -44,8 +46,6 @@ const ICONS = {
 // What a message may carry, as the relay checks it.
 const MAX_FILES = 9;
 const MAX_FILES_BYTES = 20 * 1024 * 1024;
-// Pictures shown in the conversation; other files are cards to download.
-const SHOWN_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
 const MODE = { answer: "问答", do: "动手" };
 // 推理档位, from least to most thinking, as in src/models.ts.
@@ -72,6 +72,12 @@ const state = {
   post: null,
   person: null,
   personPosts: [],
+  // 群: those in 消息, the one opened, the box written in it (kept across
+  // redraws), and the people picked for a new one.
+  groups: [],
+  group: null,
+  composer: null,
+  newGroup: null,
 };
 
 class ApiError extends Error {
@@ -82,13 +88,19 @@ class ApiError extends Error {
 }
 
 async function api(method, path, body) {
-  const res = await fetch(path, {
-    method,
-    headers: { ...(cloud ? { "x-achat-web": "1" } : { "x-achat-token": token }), "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: { ...(cloud ? { "x-achat-web": "1" } : { "x-achat-token": token }), "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    // The page never shows a browser's own words for a request that failed.
+    throw new ApiError(0, "连不上 Achat，检查网络后再试");
+  }
   const data = await res.json().catch(() => null);
-  if (!res.ok) throw new ApiError(res.status, data?.error ?? `HTTP ${res.status}`);
+  if (!res.ok) throw new ApiError(res.status, data?.error ?? "Achat 出错了，过一会儿再试");
   return data;
 }
 
@@ -130,18 +142,6 @@ function icon(name, size = 24, strokeWidth = 1.6) {
   return svg;
 }
 
-// Joins text with a space only where a Latin word meets a Chinese one:
-// "连接 Claude Code"、"连接豆包".
-function cjk(...parts) {
-  const han = /[一-鿿]/;
-  return parts.reduce((out, part) => {
-    const a = out.at(-1) ?? "";
-    const b = part[0] ?? "";
-    const gap = (/[A-Za-z0-9]/.test(a) && han.test(b)) || (han.test(a) && /[A-Za-z0-9]/.test(b));
-    return gap ? `${out} ${part}` : out + part;
-  });
-}
-
 function agentName(id) {
   return state.agents.get(id)?.name ?? id;
 }
@@ -163,13 +163,30 @@ function initialOf(name) {
   return name.replace(/的.*$/, "").slice(-1) || "?";
 }
 
+// An avatar's colour, fixed by its owner's name; src/text.ts picks the same way.
+function colorOf(owner) {
+  return AVATAR_COLORS[[...owner].reduce((n, c) => n + c.codePointAt(0), 0) % AVATAR_COLORS.length];
+}
+
 function avatar(name, size) {
   const owner = ownerOf(name);
-  const color = AVATAR_COLORS[[...owner].reduce((n, c) => n + c.codePointAt(0), 0) % AVATAR_COLORS.length];
   return h(
     "span",
-    { class: "avatar", style: `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.42)}px;background:${color}`, "aria-hidden": "true" },
+    { class: "avatar", style: `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.42)}px;background:${colorOf(owner)}`, "aria-hidden": "true" },
     initialOf(owner),
+  );
+}
+
+// A group's picture, as in WeChat: up to four members' faces in a 2 × 2 grid;
+// small ones are colour alone.
+function groupAvatar(faces, size) {
+  return h(
+    "span",
+    { class: `group-avatar${size < 40 ? " small" : ""}`, style: `width:${size}px;height:${size}px`, "aria-hidden": "true" },
+    ...faces.slice(0, 4).map((name) => {
+      const owner = ownerOf(name);
+      return h("span", { style: `background:${colorOf(owner)}` }, size < 40 ? "" : initialOf(owner));
+    }),
   );
 }
 
@@ -490,6 +507,10 @@ function route() {
   if (hash.startsWith("#/contacts")) return { view: "contacts", id: id("#/contacts/") };
   if (hash.startsWith("#/me")) return { view: "me", id: id("#/me/") };
   if (hash.startsWith("#/start")) return { view: "start", id: hash.split("/")[2] ?? "" };
+  if (hash.startsWith("#/g/")) {
+    const [group, part] = hash.slice(4).split("/");
+    return { view: "messages", id: null, group: decodeURIComponent(group), settings: part === "settings" };
+  }
   if (hash.startsWith("#/t/")) return { view: "messages", id: id("#/t/") };
   if (hash.startsWith("#/new/")) return { view: "messages", id: null, compose: id("#/new/") };
   if (hash.startsWith("#/posts")) return { view: "posts", sub: "feed", id: null };
@@ -514,7 +535,7 @@ function renderRail(view) {
     if (view === name) el.setAttribute("aria-current", "page");
     else el.removeAttribute("aria-current");
   }
-  setBadge("messages-badge", state.threads.filter(needsYou).length, ["消息", "个对话等你看"]);
+  setBadge("messages-badge", state.threads.filter(needsYou).length + invitesWaiting(state.groups), ["消息", "个对话等你看"]);
   setBadge("contacts-badge", state.me?.newFriends ?? 0, ["通讯录", "个新的朋友"]);
   // 硅基圈 needs an account; its dot says friends posted since the person last looked.
   const posts = document.getElementById("nav-posts");
@@ -564,10 +585,10 @@ function listHead(placeholder) {
   );
 }
 
-function item(href, current, pic, name, { sub, time, right } = {}) {
+function item(href, current, pic, name, { sub, time, right, id } = {}) {
   return h(
     "a",
-    { class: "item", href, "aria-current": current ? "true" : null },
+    { class: "item", href, id, "aria-current": current ? "true" : null },
     pic,
     h(
       "span",
@@ -636,8 +657,10 @@ function withCount(pic, count) {
   return h("span", { class: "avatar-wrap" }, pic, h("span", { class: "badge", "aria-hidden": "true" }, String(count)));
 }
 
+// Each person's row and, opened, their conversations under it, with the time
+// of their latest: 消息 sorts these and the groups together.
 function renderPeople(r) {
-  const rows = [];
+  const entries = [];
   for (const p of people()) {
     const threads = p.threads.filter((t) => matches(p.name, t.topic, agentName(t.from), agentName(t.to)));
     if (!threads.length) continue;
@@ -664,9 +687,8 @@ function renderPeople(r) {
       if (p.threads.some((t) => t.id === r.id)) renderListBody(r);
       else location.hash = `#/t/${latest.id}`;
     });
-    rows.push(toggle);
-    if (!open) continue;
-    for (const t of threads) {
+    const rows = [toggle];
+    for (const t of open ? threads : []) {
       const status =
         t.status === "pending" && isMine(t.to)
           ? h("span", { class: "convo-status tag-pending" }, "待批准")
@@ -682,14 +704,29 @@ function renderPeople(r) {
         ),
       );
     }
+    entries.push({ at: latest.updatedAt, rows });
   }
-  return rows;
+  return entries;
+}
+
+// A group in 消息: its 四宫格 with a red dot for new words (never a number),
+// its name, and the latest words, or the invite waiting in red.
+function groupRow(g, current) {
+  const { pending, text } = groupPreview(g);
+  const dot = g.role === "member" && g.unread ? h("span", { class: "dot-new", role: "img", "aria-label": "有新消息" }) : null;
+  return item(`#/g/${encodeURIComponent(g.id)}`, current, h("span", { class: "avatar-wrap" }, groupAvatar(g.faces, 40), dot), g.name, {
+    id: `group-${g.id}`,
+    sub: [pending ? h("span", { class: "tag-pending" }, "[待加入] ") : null, text],
+    time: g.status === "open" ? shortTime(g.updatedAt) : GROUP_STATUS_LABELS[g.status],
+  });
 }
 
 function renderListBody(r) {
   const body = document.getElementById("list-body");
   if (r.view === "messages") {
-    body.replaceChildren(...renderPeople(r));
+    const groups = state.groups.filter((g) => matches(g.name)).map((g) => ({ at: g.updatedAt, rows: [groupRow(g, r.group === g.id)] }));
+    const entries = [...renderPeople(r), ...groups].sort((a, b) => b.at.localeCompare(a.at));
+    body.replaceChildren(...entries.flatMap((e) => e.rows));
     return;
   }
   if (r.view === "contacts") {
@@ -938,12 +975,6 @@ function fileCard(f) {
   const card = h("button", { type: "button", class: "file-card", "aria-label": `下载 ${f.name}` }, fileText(f.name, f.size), fileTypeIcon(f.name));
   card.addEventListener("click", busy(card, () => saveFile(f).catch(() => toast("下载失败，再点一次"))));
   return card;
-}
-
-// The words of a message in a list: what it said, or what it sent.
-function messageText(m) {
-  if (m.body || !m.files?.length) return m.body;
-  return m.files.every((f) => SHOWN_TYPES.has(f.type)) ? "[图片]" : `[文件] ${m.files.find((f) => !SHOWN_TYPES.has(f.type)).name}`;
 }
 
 // A picture waiting to be sent, shown from the person's own copy.
@@ -1594,6 +1625,15 @@ async function refresh() {
   try {
     if (cloud) state.me = await api("GET", "/api/me");
     state.threads = await api("GET", "/api/threads");
+    // Groups need an account: only the cloud has them.
+    state.groups = cloud ? await api("GET", "/api/groups").catch(() => []) : [];
+    state.group = cloud && r.group ? await api("GET", `/api/groups/${encodeURIComponent(r.group)}`).catch(() => null) : null;
+    const shownGroup = state.group && state.groups.find((g) => g.id === state.group.id);
+    // Read once it is on screen, as a conversation is.
+    if (shownGroup?.unread && shownGroup.role === "member" && document.visibilityState === "visible") {
+      shownGroup.unread = false;
+      void api("POST", `/api/groups/${encodeURIComponent(shownGroup.id)}/read`, {}).catch(() => {});
+    }
     const unknown = state.threads.some((t) => !state.agents.has(t.from) || !state.agents.has(t.to));
     if (unknown || r.view !== "messages") await loadPeople();
     if (cloud && r.view === "contacts" && r.id === "new") state.friends = await api("GET", "/api/invites");
@@ -1616,12 +1656,13 @@ async function refresh() {
   }
   const app = document.getElementById("app");
   app.dataset.view = r.view;
-  app.dataset.pane = r.id || r.compose || (r.view === "messages" && state.detail) ? "main" : "list";
+  app.dataset.pane = r.id || r.compose || r.group || (r.view === "messages" && state.detail) ? "main" : "list";
   renderRail(r.view);
   if (r.view !== "posts") renderList(r);
   if (r.view === "posts") renderPosts(r);
   else if (r.view === "contacts") renderContact(r.id);
   else if (r.view === "me") renderMe(r.id);
+  else if (r.group) showEmpty();
   else if (state.detail) renderThread(state.detail);
   else if (r.compose) renderCompose(r.compose);
   else if (cloud && !checklistDone()) renderChecklist();
