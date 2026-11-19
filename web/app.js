@@ -2,7 +2,7 @@
 // a token; in the cloud the token is empty and the login cookie is used.
 // Layout, colours and wording follow docs/ui.md.
 import { cjk, messageText, SHOWN_TYPES } from "./text.js";
-import { GROUP_STATUS_LABELS, groupPreview, invitesWaiting } from "./groups.js";
+import { GROUP_STATUS_LABELS, groupPreview, invitesWaiting, RECEIPT_LABELS, receiptLine, segments, tagsOf, timeBreaks } from "./groups.js";
 const token = window.ACHAT_TOKEN;
 const cloud = !token;
 const STATUS = { pending: "待批准", active: "进行中", declined: "已拒绝", closed: "已结束", stopped: "已停止", expired: "已过期" };
@@ -304,6 +304,7 @@ function popup(button, container, menu) {
     document.removeEventListener("keydown", onKey);
     document.removeEventListener("click", onClick, true);
     closeOpenMenu = null;
+    releaseRedraw();
   }
   container.append(menu);
   button.setAttribute("aria-expanded", "true");
@@ -773,6 +774,8 @@ function otherSide(t) {
 // `drop`: takes files dragged onto the conversation.
 function showMain(title, body, { right, foot, back, center, onContent, flush, backAlways, drop } = {}) {
   const main = document.getElementById("main");
+  // renderGroup marks the group on screen again after this.
+  delete main.dataset.group;
   main.ondragover = drop
     ? (e) => {
         if (![...(e.dataTransfer?.types ?? [])].includes("Files")) return;
@@ -1175,6 +1178,83 @@ function sendLink(agent) {
   return agent.canReceive === false
     ? h("span", { class: "muted" }, "只能提问")
     : h("a", { class: "btn small", href: `#/new/${encodeURIComponent(agent.id)}` }, "发消息");
+}
+
+// --- 群: a group, as in WeChat's group chats
+
+// Words with each @ in blue, named from the person's side.
+function withAts(body, mentions, names) {
+  return segments(body, tagsOf(mentions, names, { name: myName(), seat: mySeat() })).map((s) => (s.at ? h("span", { class: "at" }, s.text) : s.text));
+}
+
+// A group: its messages, each @ in blue, and under each who did not reply.
+function renderGroup(g) {
+  const main = document.getElementById("main");
+  // A redraw of the same group keeps the place the person was reading,
+  // unless they were at the bottom, where the newest stays in view.
+  const old = main.dataset.group === g.id ? main.querySelector(".main-body") : null;
+  const stick = !old || old.scrollHeight - old.scrollTop - old.clientHeight < 80;
+  const keep = old?.scrollTop ?? 0;
+  const body = showMain(`${g.name}（${g.members.length}）`, groupLog(g), { back: "#/" });
+  main.dataset.group = g.id;
+  body.scrollTop = stick ? body.scrollHeight : keep;
+  for (const img of body.querySelectorAll("img")) img.addEventListener("load", () => stick && (body.scrollTop = body.scrollHeight), { once: true });
+}
+
+// The messages of a group, a time before the first and after each pause.
+// `withError`: what went wrong shows here, unless 群设置 shows it.
+function groupLog(g, withError = true) {
+  const breaks = timeBreaks(g.messages);
+  const log = h("div", { class: "log", role: "log", "aria-label": "群消息" });
+  for (const m of g.messages) {
+    if (breaks.has(m.seq)) log.append(h("span", { class: "event" }, shortTime(m.createdAt)));
+    log.append(m.kind === "system" ? h("span", { class: "event" }, m.body) : groupMessage(g, m));
+  }
+  if (withError && state.error) log.append(h("p", { class: "error", role: "alert" }, state.error));
+  return log;
+}
+
+// One message: who said it (the person's own on the right), the words, its
+// files, and under it who did not reply.
+function groupMessage(g, m) {
+  const name = g.names[m.sender] ?? "已移除的 AI";
+  const words = m.body ? h("div", { class: "bubble" }, ...withAts(m.body, m.mentions, g.names)) : null;
+  const said = words && m.redactions > 0 ? h("div", { class: "bubble-wrap" }, words, h("span", { class: "muted" }, `已过滤 ${m.redactions} 处`)) : words;
+  return h(
+    "div",
+    { class: `msg${name.startsWith("我") ? " right" : ""}`, "data-seq": String(m.seq) },
+    avatar(name, 34),
+    h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, name), said, ...m.files.map(fileTile), receiptsUnder(m, g.names)),
+  );
+}
+
+// The gray line under a message; when there is more to say, a click shows
+// each AI's state and why, until a click elsewhere or Esc.
+function receiptsUnder(m, names) {
+  const line = receiptLine(m.receipts, names);
+  if (!line) return null;
+  const spin = line.reading ? h("span", { class: "spinner small", "aria-hidden": "true" }) : null;
+  if (!line.open) return h("span", { class: "receipts" }, spin, line.text);
+  const id = `receipts-${m.seq}`;
+  const button = h("button", { type: "button", class: "receipts", "aria-haspopup": "dialog", "aria-expanded": "false", "aria-controls": id }, spin, line.text, icon("down", 12, 2));
+  button.addEventListener("click", () => {
+    if (closeOpenMenu) return closeOpenMenu();
+    const rows = line.items.map((i) =>
+      h(
+        "div",
+        { class: "receipt-row", "data-agent": i.agent },
+        avatar(i.name, 28),
+        h(
+          "span",
+          { class: "item-text" },
+          h("span", { class: "item-row" }, h("span", { class: "item-name" }, i.name), h("span", { class: "item-time" }, RECEIPT_LABELS[i.state])),
+          i.reason ? h("span", { class: "item-sub" }, i.reason) : null,
+        ),
+      ),
+    );
+    popup(button, button.parentElement, h("div", { class: "menu receipts-panel", role: "dialog", id, "aria-label": "没有回复的 AI" }, ...rows));
+  });
+  return button;
 }
 
 // --- 通讯录
@@ -1686,7 +1766,7 @@ async function refresh() {
   if (r.view === "posts") renderPosts(r);
   else if (r.view === "contacts") renderContact(r.id);
   else if (r.view === "me") renderMe(r.id);
-  else if (r.group) showEmpty();
+  else if (r.group) state.group ? renderGroup(state.group) : showEmpty();
   else if (state.detail) renderThread(state.detail);
   else if (r.compose) renderCompose(r.compose);
   else if (cloud && !checklistDone()) renderChecklist();
@@ -1718,9 +1798,29 @@ function startApp() {
     // The first-use pages are not redrawn by events: they hold a credential on screen.
     if (route().view === "start") return;
     clearTimeout(pending);
-    pending = setTimeout(() => void refresh(), 100);
+    pending = setTimeout(redrawFromEvent, 100);
   };
+  // A field marked data-hold, left: what the events brought shows now.
+  document.addEventListener("focusout", (e) => e.target instanceof Element && e.target.closest("[data-hold]") && releaseRedraw());
   return loadPeople().then(refresh);
+}
+
+// An event redraws the page, but not under a menu or panel that is open, nor
+// while a field marked data-hold has the focus: the redraw would throw them
+// away. It comes once they close.
+let heldRedraw = false;
+
+function redrawFromEvent() {
+  if (closeOpenMenu || document.activeElement?.closest("[data-hold]")) {
+    heldRedraw = true;
+    return;
+  }
+  heldRedraw = false;
+  void refresh();
+}
+
+function releaseRedraw() {
+  if (heldRedraw) setTimeout(redrawFromEvent, 0);
 }
 
 // --- pages outside the app: landing, login, links, first use (cloud only)

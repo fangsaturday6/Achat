@@ -50,3 +50,55 @@ test("a group in 消息: the invite waiting in red, else who said the latest wor
   assert.deepEqual(page.groupPreview({ ...base, lastMessage: said, lastSender: null }), { pending: false, text: "可以，网关把原始报文落一份" });
   assert.equal(page.invitesWaiting([{ ...base, role: "invited" }, { ...base, unread: true }]), 1);
 });
+
+test("each @ reads from the person's side, while the words keep nobody's side", () => {
+  const names = { "f/claude": "我的 Claude", "w/codex": "老王的 Codex", p_fang: "我" };
+  const me = { name: "老方", seat: "p_fang" };
+  assert.equal(page.plainName("我的 Claude", "老方"), "老方的 Claude");
+  assert.equal(page.plainName("我的豆包", "老方"), "老方的豆包");
+  assert.equal(page.plainName("我", "老方"), "老方");
+  assert.equal(page.plainName("老王的 Codex", "老方"), "老王的 Codex");
+  const tags = page.tagsOf([ALL, "f/claude", "w/codex"], names, me);
+  assert.deepEqual(page.segments("@所有人 先说现状。@老方的 Claude 和 @老王的 Codex 呢", tags), [
+    { text: "@所有人", at: true },
+    { text: " 先说现状。", at: false },
+    { text: "@我的 Claude", at: true },
+    { text: " 和 ", at: false },
+    { text: "@老王的 Codex", at: true },
+    { text: " 呢", at: false },
+  ]);
+  assert.deepEqual(page.segments("没有点名", tags), [{ text: "没有点名", at: false }]);
+  // An AI calling its own person: "@老方", never taken from inside "@老方的 Claude".
+  const both = page.tagsOf(["p_fang", "f/claude"], names, me);
+  assert.deepEqual(page.segments("@老方的 Claude 和 @老方 都看看", both), [
+    { text: "@我的 Claude", at: true },
+    { text: " 和 ", at: false },
+    { text: "@老方", at: true },
+    { text: " 都看看", at: false },
+  ]);
+});
+
+test("a time goes before the first message and after five quiet minutes", () => {
+  const at = (seq: number, t: string) => ({ seq, createdAt: `2026-11-19T${t}:00Z` });
+  assert.deepEqual([...page.timeBreaks([at(1, "02:52"), at(2, "02:53"), at(3, "02:58"), at(4, "03:05")])], [1, 3, 4]);
+  assert.deepEqual([...page.timeBreaks([])], []);
+});
+
+test("the line under a message says who did not reply, the same state together, and opens when there is more to say", () => {
+  const names = { a: "老王的 Claude", b: "小林的 Claude", c: "小林的豆包", d: "王闯的 Codex", e: "老王的 Codex" };
+  const r = (agent: string, state: string, reason: string | null = null) => ({ agent, state, reason });
+  assert.equal(page.receiptLine([r("e", "replied")], names), null);
+  const all = page.receiptLine([r("e", "replied"), r("a", "passed", "订单和回调由老王的 Codex 说"), r("b", "offline"), r("c", "cannot")], names);
+  assert.equal(all.text, "老王的 Claude 无需回复 · 小林的 Claude 不在线 · 小林的豆包 还不能接收");
+  assert.deepEqual([all.open, all.reading], [true, false]);
+  assert.deepEqual(all.items.map((i: any) => [i.name, i.state, i.reason]), [
+    ["老王的 Claude", "passed", "订单和回调由老王的 Codex 说"],
+    ["小林的 Claude", "offline", null],
+    ["小林的豆包", "cannot", null],
+  ]);
+  const one = page.receiptLine([r("d", "reading")], names);
+  assert.deepEqual([one.text, one.open, one.reading], ["王闯的 Codex 正在看…", false, true]);
+  assert.equal(page.receiptLine([r("a", "stopped"), r("b", "stopped")], names).text, "老王的 Claude、小林的 Claude 已叫停");
+  assert.equal(page.receiptLine(["a", "b", "c", "d"].map((x) => r(x, "stopped")), names).text, "老王的 Claude 等 4 个 AI 已叫停");
+  assert.equal(page.receiptLine([r("gone", "failed", "不在群里了")], names).text, "已移除的 AI 没答上");
+});
