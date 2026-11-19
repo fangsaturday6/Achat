@@ -387,7 +387,7 @@ describe("群 over the API", () => {
       await streaming;
       await wangLaptop.client.beat();
       const asked = (await fangMac.client.postGroupMessage(g.id, { from: claude, body: "@老王的 Codex 回调好了吗", mentions: [wangCodex] })).messages.at(-1)!;
-      const answer = (await wangLaptop.client.postGroupMessage(g.id, { from: wangCodex, body: "好了", replyTo: asked.seq, epoch: 0 })).messages.at(-1)!;
+      const answer = (await wangLaptop.client.postGroupMessage(g.id, { from: wangCodex, body: "好了", replyTo: asked.seq, epoch: 0, sessionId: "s1" })).messages.at(-1)!;
       const here = async () => (await fangMac.client.unseenGroups(claude)).filter((x) => x.id === g.id);
       assert.deepEqual(await here(), [{ id: g.id, name: "有人回你", seq: answer.seq }]);
       await assert.rejects(wangLaptop.client.unseenGroups(claude), /只能/);

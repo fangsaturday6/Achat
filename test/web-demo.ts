@@ -117,7 +117,7 @@ async function answer(c: Computer, groupId: string, agent: string): Promise<void
   if (step === "hang") return;
   const sent =
     "say" in step
-      ? c.client.postGroupMessage(groupId, { from: agent, body: step.say, mentions: step.at ?? [], replyTo: work.wake.seq, epoch: work.group.epoch })
+      ? c.client.postGroupMessage(groupId, { from: agent, body: step.say, mentions: step.at ?? [], replyTo: work.wake.seq, epoch: work.group.epoch, sessionId: "demo" })
       : c.client.passGroup(groupId, { agent, seq: work.wake.seq, epoch: work.group.epoch, reason: step.pass });
   await sent.catch((err) => console.log(`（${agent} 没答上：${(err as Error).message}）`));
 }

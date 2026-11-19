@@ -289,6 +289,7 @@ describe("groups", () => {
       mentions: ["fang/codex", "fang/claude"],
       replyTo: seq,
       epoch: asked.epoch,
+      sessionId: "s1",
     });
     const reply = answered.messages.at(-1)!;
     assert.deepEqual(reply.mentions, ["fang/claude"]);
@@ -387,7 +388,7 @@ describe("groups", () => {
     const missed = ask("电脑关着时问的");
     online.add("fang/codex");
     const asked = ask("现在问的");
-    groups.postMessage(computer("fang"), g.id, { from: "fang/codex", body: "两条一起答了", replyTo: asked.seq, epoch: 0 });
+    groups.postMessage(computer("fang"), g.id, { from: "fang/codex", body: "两条一起答了", replyTo: asked.seq, epoch: 0, sessionId: "s1" });
     const stateOf = (seq: number) => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts[0].state;
     assert.deepEqual([stateOf(missed.seq), stateOf(asked.seq)], ["replied", "replied"]);
   });
@@ -553,7 +554,7 @@ describe("groups", () => {
     const asked = ask("现在问的");
     for (let i = 0; i < 3; i++) assert.deepEqual(groups.work(computer("fang"), ["fang/codex"]), [{ groupId: g.id, agent: "fang/codex", seq: asked.seq }]);
     assert.equal(used(), 1);
-    groups.postMessage(computer("fang"), g.id, { from: "fang/codex", body: "两条一起答了", replyTo: asked.seq, epoch: 0 });
+    groups.postMessage(computer("fang"), g.id, { from: "fang/codex", body: "两条一起答了", replyTo: asked.seq, epoch: 0, sessionId: "s1" });
     const stateOf = (seq: number) => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts[0].state;
     assert.deepEqual([stateOf(missed.seq), stateOf(asked.seq)], ["replied", "replied"]);
 
@@ -699,7 +700,7 @@ describe("groups", () => {
     groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "@所有人 大家好", mentions: [ALL] });
     const asked = groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "@老王的 Codex 回调好了吗", mentions: ["wang/codex"] }).messages.at(-1)!;
     assert.deepEqual(unseen("fang/claude"), []);
-    const answer = groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "好了", replyTo: asked.seq, epoch: 0 }).messages.at(-1)!;
+    const answer = groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "好了", replyTo: asked.seq, epoch: 0, sessionId: "s1" }).messages.at(-1)!;
     assert.deepEqual(unseen("fang/claude"), [{ id: g.id, name: "前台", seq: answer.seq }]);
     assert.deepEqual(unseen("fang/codex"), [], "only answers to what it said itself");
 
@@ -713,7 +714,7 @@ describe("groups", () => {
     assert.deepEqual(unseen("fang/claude"), []);
     // Gone from the group: nothing more of it.
     const again = groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "@老王的 Codex 还有呢", mentions: ["wang/codex"] }).messages.at(-1)!;
-    groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "没了", replyTo: again.seq, epoch: 0 });
+    groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "没了", replyTo: again.seq, epoch: 0, sessionId: "s1" });
     groups.leave(computer("fang"), g.id, "fang/claude");
     assert.deepEqual(unseen("fang/claude"), []);
   });
@@ -724,12 +725,12 @@ describe("groups", () => {
     const unseen = () => groups.unseen(computer("fang"), "fang/claude");
     // 老王's Codex @s 老方's Claude, which answers in the background and is answered back.
     const asked = groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "@老方的 Claude 回调地址是什么", mentions: ["fang/claude"] }).messages.at(-1)!;
-    const answer = groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "@老王的 Codex /pay/notify", mentions: ["wang/codex"], replyTo: asked.seq, epoch: 0 }).messages.at(-1)!;
-    groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "收到", replyTo: answer.seq, epoch: 0 });
+    const answer = groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "@老王的 Codex /pay/notify", mentions: ["wang/codex"], replyTo: asked.seq, epoch: 0, sessionId: "s1" }).messages.at(-1)!;
+    groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "收到", replyTo: answer.seq, epoch: 0, sessionId: "s1" });
     assert.deepEqual(unseen(), [], "a round between the AIs in the background");
     // What it said in front, answered.
     const said = groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "@老王的 Codex 上线了吗", mentions: ["wang/codex"] }).messages.at(-1)!;
-    const reply = groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "上线了", replyTo: said.seq, epoch: 0 }).messages.at(-1)!;
+    const reply = groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "上线了", replyTo: said.seq, epoch: 0, sessionId: "s1" }).messages.at(-1)!;
     assert.deepEqual(unseen(), [{ id: g.id, name: "前台", seq: reply.seq }]);
   });
 
@@ -881,6 +882,20 @@ describe("groups", () => {
     const byWang = request(groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "@老方的 Claude 动手", mentions: ["fang/claude"] }).messages.at(-1)!.seq);
     assert.deepEqual([byWang.run, byWang.act.own], [false, false]);
     assert.equal(groups.approveAct(computer("fang"), g.id, byWang.act.id).own, false);
+  });
+
+  test("reply_to from the front only sends back 动手's result: what the background is reading stays its to answer", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    const asked = groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "@老方的 Claude 验签放哪", mentions: ["fang/claude"] }).messages.at(-1)!;
+    const front = (replyTo: number) => groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "在网关", replyTo, epoch: 0 });
+    assert.throws(() => front(asked.seq), (err: any) => err.status === 400 && /reply_to 只用来发回动手的结果/.test(err.message));
+    assert.throws(() => front(1), /reply_to 只用来发回动手的结果/, "nor for a message that did not wake it");
+    const receipt = groups.detail(web("fang"), g.id).messages.find((m) => m.seq === asked.seq)!.receipts[0];
+    assert.equal(receipt.state, "reading");
+    // The background answer, which says its session, still goes.
+    groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "在网关", replyTo: asked.seq, epoch: 0, sessionId: "s1" });
+    assert.equal(groups.detail(web("fang"), g.id).messages.find((m) => m.seq === asked.seq)!.receipts[0].state, "replied");
   });
 
   test("waiting ends at the group's next change", async () => {

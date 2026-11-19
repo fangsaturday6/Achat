@@ -860,7 +860,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
         message: z.string().describe("要说的话"),
         mentions: z.array(z.string()).optional().describe("要 @ 的 AI 的名字，例如“老王的 Codex”；所有人填“所有人”；主人填“主人”"),
         files: z.array(z.string()).max(9).optional().describe("一起发的文件或图片：这台电脑上的完整路径，最多 9 个，合计不超过 20 MB"),
-        reply_to: z.number().int().optional().describe("回复的是群里第几条消息：替别人动手、做完发回结果时照提示填"),
+        reply_to: z.number().int().optional().describe("只用来发回动手的结果：替别人动手、做完发回群里时，照提示填回的是第几条消息；平时说话不填"),
         wait: z.boolean().optional().describe("默认等 @ 的 AI 回复再返回；动手做完发回结果时填 false，发完立刻返回"),
       },
     },
@@ -878,7 +878,8 @@ export function createMcpServer(opts: McpOptions): McpServer {
       // tool shows only those to what it says now, so they are still brought
       // up, and it is told where to read them.
       const earlier = (await c.client.unseenGroups(c.agentId).catch(() => [])).some((u) => u.id === g.id);
-      // 动手's result answers the request it was for (reply_to), as a background answer does.
+      // 动手's result answers the request it was for (reply_to), as a background
+      // answer does; the service takes reply_to from here for nothing else.
       const posted = await c.client.postGroupMessage(g.id, {
         from: c.agentId,
         body: message,

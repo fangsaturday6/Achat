@@ -332,6 +332,18 @@ export class GroupService {
     if (!waiting) throw new RelayError(409, "这条已经不用回了");
   }
 
+  // What a message with reply_to may answer: a background answer, which says
+  // its session, what woke it; one from the front (MCP's send_group_message),
+  // only 动手 under way, whose result it sends back. Otherwise the front
+  // would settle what the background is reading, and that answer would be
+  // refused.
+  private requireAnswering(group: Group, agent: string, input: GroupPostInput): void {
+    const r = this.store.receipt(group.id, input.replyTo!, agent);
+    const waiting = !r || (["reading", "offline", "quota", "asking"] as ReceiptState[]).includes(r.state);
+    if (input.sessionId === undefined && waiting) throw new RelayError(400, "reply_to 只用来发回动手的结果");
+    this.requireReading(group, agent, input.replyTo!, input.epoch);
+  }
+
   // The AI is done with what woke it, up to `seq`: every @ still waiting on
   // it there ends the same way, those it had to leave while its computer was
   // off or its 每天次数 ran out too (within a day), since this answer read
@@ -541,7 +553,7 @@ export class GroupService {
     const answering = input.replyTo !== undefined;
     const mentions = this.checkMentions(groupId, from, input.mentions ?? [], answering && !person);
     if (answering && person) throw new RelayError(400, "只有被叫醒的 AI 会这样回");
-    if (answering) this.requireReading(group, from.id, input.replyTo!, input.epoch);
+    if (answering) this.requireAnswering(group, from.id, input);
     // 动手's result, sent back for a request under way.
     const acting = answering && this.store.receipt(groupId, input.replyTo!, from.id)?.state === "acting";
     const now = this.stamp();
