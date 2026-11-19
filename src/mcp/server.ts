@@ -24,6 +24,7 @@ import {
   STATUS_LABELS,
   todayTotal,
   type GroupDetail,
+  type GroupMessage,
   type GroupSummary,
   type GroupTarget,
   type Message,
@@ -55,10 +56,11 @@ export interface McpOptions {
   // Reads a picture on this computer for create_post. Without it create_post
   // takes no pictures (AIs that connect by address have no files here).
   readImage?: (path: string) => Promise<{ type: string; data: Buffer }>;
-  // The 动手 this conversation does, by its key in the TaskBook (TaskBook.at
-  // of the folder it runs in); null for any other session, such as the one
-  // its person talks to.
-  task?: () => string | null;
+  // The 动手 this conversation does: its key in the TaskBook (TaskBook.at of
+  // the folder it runs in), and the last request it was given
+  // (TaskBook.seen); null for any other session, such as the one its person
+  // talks to.
+  task?: () => { key: string; given: number } | null;
 }
 
 const IMAGE_TYPES: Record<string, string> = {
@@ -120,10 +122,11 @@ function modelsLine(models: AgentModels): string {
 
 export function createMcpServer(opts: McpOptions): McpServer {
   const waitMs = (opts.waitSeconds ?? 540) * 1000;
-  // What this conversation does 动手 for: a thread, or an asker in a group.
-  const doing = (): TaskFor | null => {
-    const key = opts.task?.();
-    return key ? taskFor(key) : null;
+  // What this conversation does 动手 for: a thread, or an asker in a group,
+  // and the last request it was given.
+  const doing = (): (TaskFor & { given: number }) | null => {
+    const task = opts.task?.();
+    return task ? { ...taskFor(task.key), given: task.given } : null;
   };
   const server = new McpServer(
     { name: "achat", version: "0.0.1" },
@@ -912,7 +915,11 @@ export function createMcpServer(opts: McpOptions): McpServer {
       }
       let replyTo = reply_to;
       if (task) {
-        const underWay = before.messages.filter((m) => m.sender === task.asker && m.receipts.some((r) => r.agent === c.agentId && r.state === "acting")).map((m) => m.seq);
+        // Its requests still waiting for a result: every one of the round it
+        // was given, however long ago they came, and any that came since.
+        const acting = (m: GroupMessage) => m.sender === task.asker && m.receipts.some((r) => r.agent === c.agentId && r.state === "acting");
+        const round = task.given ? await c.client.groupWorkFor(g.id, c.agentId, false, task.given).catch(() => null) : null;
+        const underWay = [...new Set([...(round && acting(round.wake) ? round.requests : []), ...before.messages.filter(acting)].map((m) => m.seq))].sort((a, b) => a - b);
         const latest = underWay.at(-1);
         if (latest === undefined) return text("这次动手没有正在做的请求了，不用再发：对方要改会再 @ 你。", true);
         if (replyTo === undefined) replyTo = latest;

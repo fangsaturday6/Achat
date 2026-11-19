@@ -14,7 +14,7 @@ import { actKey, TaskBook, type TaskOpener, type TaskRecord, type TaskStart } fr
 import { addComputer, type Browser, JudgingRunner, logIn, ScriptedRunner, startTestCloud, until } from "./helpers.js";
 
 // `task`: the 动手 it does, as a 动手 conversation's MCP server finds in the TaskBook.
-async function mcp(client: RelayClient, agentId: string, task: string | null = null): Promise<Client> {
+async function mcp(client: RelayClient, agentId: string, task: { key: string; given: number } | null = null): Promise<Client> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await createMcpServer({ connection: () => ({ client, agentId, webUrl: "https://achat.test", mode: "cloud" }), waitSeconds: 10, task: () => task }).connect(serverSide);
   const c = new Client({ name: "test", version: "1" });
@@ -422,7 +422,7 @@ async function actingFor(wangOn = false) {
     await until(async () => answers[0]);
     answers[0]("approve");
     await until(async () => opener.starts.length === 1);
-    const doer = await mcp(fangMac.client, claude, actKey(g.id, wangCodex, claude));
+    const doer = await mcp(fangMac.client, claude, { key: actKey(g.id, wangCodex, claude), given: seq });
     return { fangMac, wangLaptop, claude, wangCodex, g, seq, doer, close };
   } catch (err) {
     await close();
@@ -431,8 +431,10 @@ async function actingFor(wangOn = false) {
 }
 
 test("a 动手 conversation speaks only in the group it works for, and only to send back a request under way, reply_to filled in for it", async () => {
-  const { wangLaptop, g, seq, doer, close } = await actingFor();
+  const { fangMac, wangLaptop, claude, wangCodex, g, seq, doer, close } = await actingFor();
   try {
+    // However much was said since the request it works on.
+    for (let i = 1; i <= 201; i++) await wangLaptop.client.postGroupMessage(g.id, { from: wangCodex, body: `闲聊 ${i}` });
     const send = (args: Record<string, unknown>) => doer.callTool({ name: "send_group_message", arguments: { message: "@老王的 Codex 加好了", mentions: ["老王的 Codex"], wait: false, ...args } });
     const elsewhere = await send({ group: "别的群" });
     assert.equal(elsewhere.isError, true);
@@ -441,9 +443,8 @@ test("a 动手 conversation speaks only in the group it works for, and only to s
     assert.equal(wrong.isError, true);
     assert.equal(textOf(wrong), `reply_to 要填这次动手正在做的请求：第 ${seq} 条。`);
     assert.equal(textOf(await send({ group: g.id })), `已发到群「网关」（${g.id}），不等回复。`);
-    const after = await wangLaptop.client.group(g.id);
-    assert.equal(after.messages.find((m) => m.seq === seq)!.receipts[0].state, "replied");
-    assert.equal(after.messages.at(-1)!.replyTo, seq);
+    assert.equal((await wangLaptop.client.group(g.id)).messages.at(-1)!.replyTo, seq);
+    assert.equal(await fangMac.client.groupWorkFor(g.id, claude, false, seq), null, "answered: nothing waits on it");
     const done = await send({ group: g.id });
     assert.equal(done.isError, true);
     assert.equal(textOf(done), "这次动手没有正在做的请求了，不用再发：对方要改会再 @ 你。");

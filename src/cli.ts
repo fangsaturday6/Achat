@@ -102,7 +102,11 @@ async function main(): Promise<void> {
         link: (url) => startLink(url),
         readImage: readLocalImage,
         // A 动手 conversation runs in the folder it works in.
-        task: () => new TaskBook().at(process.cwd()),
+        task: () => {
+          const book = new TaskBook();
+          const key = book.at(process.cwd());
+          return key ? { key, given: book.seen(key) } : null;
+        },
       });
       await server.connect(new StdioServerTransport());
       return;
