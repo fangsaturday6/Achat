@@ -352,6 +352,11 @@ export class GroupStore {
     this.db.prepare("UPDATE group_invites SET expires_at = ? WHERE id = ?").run(expiresAt, id);
   }
 
+  // Open invites end with their group: none can be taken up once it is dissolved.
+  expireInvites(groupId: string, now: string): void {
+    this.db.prepare("UPDATE group_invites SET expires_at = ? WHERE group_id = ? AND answered IS NULL AND expires_at > ?").run(now, groupId, now);
+  }
+
   lastSeq(groupId: string): number {
     return (this.db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM group_messages WHERE group_id = ?").get(groupId) as { seq: number }).seq;
   }

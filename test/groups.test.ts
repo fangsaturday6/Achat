@@ -318,6 +318,51 @@ describe("groups", () => {
     assert.equal(list[0].updatedAt, now.toISOString());
   });
 
+  test("errors name the AI, never its id", () => {
+    const g = start();
+    assert.throws(
+      () => groups.invite(computer("fang"), g.id, { from: "fang/claude", members: [{ agent: "nobody/x" }] }),
+      (err: Error) => err.message === "找不到这个 AI，可能对方已经移除了它",
+    );
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    groups.leave(web("wang"), g.id, "wang/codex");
+    assert.throws(
+      () => groups.postMessage(web("fang"), g.id, { from: "p_fang", body: "还在吗", mentions: ["wang/codex"] }),
+      (err: Error) => err.message === "老王的 Codex 不在群里了，只能 @ 群里的 AI",
+    );
+    const again = groups.invite(computer("fang"), g.id, { from: "fang/claude", members: [{ account: "wang" }] });
+    assert.throws(
+      () => groups.acceptInvite(web("wang"), g.id, inviteTo(again, "wang"), { agents: ["fang/codex"] }),
+      (err: Error) => err.message === "只能让自己的 AI 进群",
+    );
+  });
+
+  test("dissolving ends the invites still open, tells those invited, and adds nothing more to the group", () => {
+    const g = start();
+    const heard: string[][] = [];
+    groups.onEvent((e) => heard.push(e.members));
+    groups.dissolve(web("fang"), g.id);
+    assert.ok(heard.at(-1)!.includes("p_wang"), "老王's page hears of it");
+    assert.deepEqual(groups.list(web("wang"), ["wang/codex", "wang/claude"]), []);
+    assert.throws(() => groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] }), /解散/);
+    assert.throws(() => groups.remove(web("fang"), g.id, "fang/codex"), /解散/);
+    const before = groups.detail(web("fang"), g.id).messages.length;
+    groups.leave(web("fang"), g.id, "fang/codex");
+    assert.equal(groups.detail(web("fang"), g.id).messages.length, before);
+  });
+
+  test("one answer settles every @ the AI had to leave before it, so no old line under them still says 不在线", () => {
+    const g = groups.createGroup(computer("fang"), { from: "fang/claude", name: "自己", members: [{ agent: "fang/codex" }] });
+    const ask = (body: string) => groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body, mentions: ["fang/codex"] }).messages.at(-1)!;
+    online.delete("fang/codex");
+    const missed = ask("电脑关着时问的");
+    online.add("fang/codex");
+    const asked = ask("现在问的");
+    groups.postMessage(computer("fang"), g.id, { from: "fang/codex", body: "两条一起答了", replyTo: asked.seq, epoch: 0 });
+    const stateOf = (seq: number) => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts[0].state;
+    assert.deepEqual([stateOf(missed.seq), stateOf(asked.seq)], ["replied", "replied"]);
+  });
+
   test("waiting ends at the group's next change", async () => {
     const g = start();
     const waiting = groups.waitFor(g.id, 5000);

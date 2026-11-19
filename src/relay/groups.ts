@@ -183,7 +183,7 @@ export class GroupService {
     for (const t of targets) {
       if ("agent" in t) {
         const a = this.dir.agent(t.agent);
-        if (!a || a.client === "person" || !a.owner) throw new RelayError(404, `找不到这个 AI：${t.agent}`);
+        if (!a || a.client === "person" || !a.owner) throw new RelayError(404, "找不到这个 AI，可能对方已经移除了它");
         if (a.owner === caller.account) {
           if (!join.includes(a.id)) join.push(a.id);
           continue;
@@ -265,7 +265,10 @@ export class GroupService {
         continue;
       }
       if (answering) continue;
-      throw new RelayError(400, `只能 @ 群里的 AI${from.client === "person" ? "" : "，或者自己的主人"}：${m}`);
+      // Named, never by id: an AI that left the group, or someone who is not an AI.
+      const gone = this.dir.agent(m);
+      if (gone && gone.client !== "person") throw new RelayError(400, cjk(gone.name, "不在群里了，只能 @ 群里的 AI"));
+      throw new RelayError(400, `只能 @ 群里的 AI${from.client === "person" ? "" : "，或者自己的主人"}`);
     }
     return out;
   }
@@ -280,9 +283,11 @@ export class GroupService {
   }
 
   // The AI is done with what woke it, up to `seq`: every @ still waiting on
-  // it there ends the same way, and its session goes on from what it read.
+  // it there ends the same way, those it had to leave while its computer was
+  // off or its 每天次数 ran out too, since this answer read them; and its
+  // session goes on from what it read.
   private settle(groupId: string, agent: string, seq: number, state: ReceiptState, reason: string | null, input: { sessionId?: string; readTo?: number }, now: string): void {
-    for (const r of this.store.receiptsOf(groupId, agent, ["reading"])) {
+    for (const r of this.store.receiptsOf(groupId, agent, ["reading", "offline", "quota"])) {
       if (r.seq <= seq) this.store.setReceipt(groupId, r.seq, agent, state, reason, r.epoch, now);
     }
     this.store.setRead(groupId, agent, input.readTo ?? seq, input.sessionId ?? null);
@@ -318,7 +323,8 @@ export class GroupService {
       this.store.leaveMember(group.id, agent, now);
       // What it was still reading stays unanswered, and the line under it says why.
       for (const r of this.store.receiptsOf(group.id, agent, ["reading"])) this.store.setReceipt(group.id, r.seq, agent, "failed", "不在群里了", r.epoch, now);
-      this.store.addMessage(group.id, { sender: null, kind: "system", body: note }, now);
+      // A dissolved group is only read now: leaving it adds nothing to it.
+      if (group.status !== "dissolved") this.store.addMessage(group.id, { sender: null, kind: "system", body: note }, now);
       const left = this.store.members(group.id);
       if (!left.length) this.store.updateGroup(group.id, { status: "dissolved" }, now);
       else if (!left.some((m) => m.owner === group.owner)) this.store.updateGroup(group.id, { owner: left[0].owner }, now);
@@ -387,6 +393,7 @@ export class GroupService {
     const invite = this.store.invite(inviteId);
     if (!invite || invite.groupId !== groupId || invite.account !== caller.account) throw new RelayError(404, "找不到这个邀请");
     if (invite.answered) throw new RelayError(409, "这个邀请已经处理过了");
+    if (this.requireGroup(groupId).status === "dissolved") throw new RelayError(409, "群已经解散了");
     if (invite.expiresAt <= this.stamp()) throw new RelayError(410, "这个邀请已经过期了，请对方重新拉你进群");
     return invite;
   }
@@ -401,7 +408,7 @@ export class GroupService {
     if (!agents.length) throw new RelayError(400, "选至少一个 AI 进群");
     for (const a of agents) {
       const agent = this.dir.agent(a);
-      if (!agent || agent.owner !== caller.account || agent.client === "person") throw new RelayError(400, `只能让自己的 AI 进群：${a}`);
+      if (!agent || agent.owner !== caller.account || agent.client === "person") throw new RelayError(400, "只能让自己的 AI 进群");
     }
     const quota = this.checkQuota(input.quota);
     const members = this.store.members(groupId);
@@ -618,6 +625,7 @@ export class GroupService {
 
   remove(caller: Caller, groupId: string, agent: string): { ok: true } {
     const group = this.requireMine(caller, groupId);
+    this.requireOpen(group);
     if (group.owner !== caller.account || !caller.approves) throw new RelayError(403, "只有群主可以移出 AI");
     const member = this.store.member(groupId, agent);
     if (!member || member.leftAt) throw new RelayError(404, "这个 AI 不在群里");
@@ -630,12 +638,15 @@ export class GroupService {
     if (group.owner !== caller.account || !caller.approves) throw new RelayError(403, "只有群主可以解散群");
     if (group.status === "dissolved") return this.detail(caller, groupId);
     const now = this.stamp();
+    // Those still invited hear of it once more; their invites end with the group.
+    const invited = this.store.openInvites(groupId, now).map((i) => this.dir.seat(i.account));
     this.store.transaction(() => {
       this.store.updateGroup(groupId, { status: "dissolved" }, now);
       for (const from of ["reading", "offline", "quota"] as const) this.store.moveAll(groupId, from, "stopped", now);
+      this.store.expireInvites(groupId, now);
       this.store.addMessage(groupId, { sender: null, kind: "system", body: "群主解散了群聊" }, now);
     });
-    this.emit("group.updated", groupId);
+    this.emit("group.updated", groupId, {}, invited);
     return this.detail(caller, groupId);
   }
 
