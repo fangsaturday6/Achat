@@ -7,6 +7,7 @@ import { GROUP_LIMITS } from "../src/relay/groups.js";
 import type { RunningRelay } from "../src/relay/server.js";
 import { ALL, GROUP_STATUS_LABELS, RECEIPT_LABELS } from "../src/types.js";
 import * as page from "../web/groups.js";
+import { isOwn } from "../web/text.js";
 import { startTestRelay } from "./helpers.js";
 
 const WEB = join(import.meta.dirname, "..", "web");
@@ -167,11 +168,11 @@ const MEMBERS = [
   { agent: "c/codex", name: "王闯的 Codex", owner: "chuang", canReceive: true, online: true },
 ];
 
-test("the person's own AIs in a group, or of theirs anywhere, are those of their account", () => {
-  assert.equal(page.isMine(MEMBERS[0], "fang"), true);
-  assert.equal(page.isMine(MEMBERS[1], "fang"), false);
-  assert.equal(page.isMine(MEMBERS[1], "wang"), true);
-  assert.equal(page.isMine({ agent: "f/claude", owner: "fang" }, "fang"), true, "an AI from /api/agents, or one picked");
+test("the person's own AIs in a group, or of theirs anywhere, are those of their account (isOwn)", () => {
+  assert.equal(isOwn(MEMBERS[0], "fang"), true);
+  assert.equal(isOwn(MEMBERS[1], "fang"), false);
+  assert.equal(isOwn(MEMBERS[1], "wang"), true);
+  assert.equal(isOwn({ agent: "f/claude", owner: "fang" }, "fang"), true, "an AI from /api/agents, or one picked");
 });
 
 test("the list under @: 所有人, the AIs that are on (the person's own after), those off, and grayed out last those that cannot answer", () => {
@@ -230,6 +231,21 @@ test("whose a message in a group is: the person's seat and their AIs, those that
   assert.equal(mine("x/codex"), false, "a friend's AI that left");
   // Gone from the group and from the person's AIs: its name is all that is left.
   assert.equal(mine("gone"), true);
+});
+
+test("who is behind a sender in a group, for its face: an AI the page knows, one in the group, or a person's seat", () => {
+  const g = {
+    members: [
+      { agent: "f/claude", name: "我的 Claude", owner: "fang" },
+      { agent: "c/codex", name: "王闯的 Codex", owner: "chuang" },
+    ],
+    names: { "f/claude": "我的 Claude", "c/codex": "王闯的 Codex", p_chuang: "王闯", "x/codex": "我爱罗的 Codex", gone: "已移除的 AI" },
+  };
+  const agents = new Map([["x/codex", { id: "x/codex", name: "我爱罗的 Codex", client: "codex", owner: "xia" }]]);
+  assert.equal(page.whoIn("x/codex", g, agents), agents.get("x/codex"), "a friend's AI that left: as /api/agents has it");
+  assert.deepEqual(page.whoIn("c/codex", g, agents), { name: "王闯的 Codex", owner: "chuang" }, "a friend's friend, by the group");
+  assert.deepEqual(page.whoIn("p_chuang", g, agents), { name: "王闯", client: "person", owner: "chuang" }, "a person's seat");
+  assert.equal(page.whoIn("gone", g, agents), null, "known only by its name");
 });
 
 test("what the person writes goes in with its @s, each AI named from nobody's side", () => {
@@ -314,6 +330,21 @@ test("群设置: someone in the group answers an invite for another of their AIs
   assert.deepEqual(tiles.map((t: any) => page.tileActions(t, g, "chuang")), [["leave"], ["join", "decline"], [], []]);
   assert.deepEqual(page.tileActions(tiles[1], { ...g, status: "stopped" }, "chuang"), ["join", "decline"]);
   assert.deepEqual(page.tileActions(tiles[1], { ...g, status: "dissolved" }, "chuang"), []);
+});
+
+test("群设置: each tile's face is its person's: the AI's, or the one invited, by account", () => {
+  const g = {
+    members: [{ agent: "x/claude", name: "我爱罗的 Claude", owner: "xia" }],
+    invites: [
+      { id: "gi_1", account: "chuang", name: "王闯", agent: "c/claude", agentName: "王闯的 Claude" },
+      { id: "gi_2", account: "de", name: "小的", agent: null, agentName: null },
+    ],
+  };
+  assert.deepEqual(page.settingsTiles(g, "fang").map((t: any) => t.who), [
+    { name: "我爱罗的 Claude", owner: "xia" },
+    { name: "王闯", client: "person", owner: "chuang" },
+    { name: "小的", client: "person", owner: "de" },
+  ]);
 });
 
 test("群设置 shows 群主 the name to change and 解散群; everyone in it their 每天次数 and 退出群; a dissolved group only 退出群", () => {

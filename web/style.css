@@ -263,6 +263,8 @@ button.receipts:hover { color: var(--ink); }
 /* The buttons keep their width; on a narrow screen the line beside them wraps instead. */
 .write-row .buttons { margin-left: auto; flex-shrink: 0; }
 .write-row .usage { min-width: 0; }
+/* The buttons a conversation puts before 发送 (停止, 叫停, 继续). */
+.write-extra { display: contents; }
 /* Above the text box, as in WeChat: ＋ sends files or pictures. */
 .main-foot.write-foot:has(> .write-tools) { padding-top: 6px; }
 .write-tools { height: 32px; margin-left: -6px; display: flex; gap: 4px; align-items: center; }
@@ -673,7 +675,6 @@ body.public { background: var(--panel); }
 
 /* The bottom of a group: 每天次数 or 已叫停 on the left, the list under "@" above the box. */
 .group-foot { position: relative; }
-.group-action { display: contents; }
 .quota-link { color: var(--muted); }
 .quota-link:hover { color: var(--ink); }
 .quota-link.full { color: var(--danger); }

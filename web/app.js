@@ -1,7 +1,7 @@
 // One page for both setups: on this computer (experiment 0) the relay fills in
 // a token; in the cloud the token is empty and the login cookie is used.
 // Layout, colours and wording follow docs/ui.md.
-import { cjk, messageText, ownerName, SHOWN_TYPES } from "./text.js";
+import { cjk, isOwn, keeper, messageText, ownerLabel, ownerName, SHOWN_TYPES } from "./text.js";
 import { groupRow, loadGroups, openGroupPicker, renderGroup, renderNewGroup } from "./group-view.js";
 import { invitesWaiting, messagesBadge } from "./groups.js";
 import { holdsRedraw, redrawGate } from "./redraw.js";
@@ -15,12 +15,14 @@ export {
   clientAvatar,
   closeOpenMenu,
   cloud,
+  faceOwner,
   fileTile,
   groupAvatar,
   h,
   icon,
   item,
   loadPeople,
+  myAccount,
   myName,
   mySeat,
   openMenu,
@@ -30,7 +32,9 @@ export {
   showMain,
   state,
   toast,
-  writeBox,
+  whose,
+  writerOf,
+  writers,
 };
 
 const token = window.ACHAT_TOKEN;
@@ -104,11 +108,10 @@ const state = {
   post: null,
   person: null,
   personPosts: [],
-  // 群: those in 消息, the one opened, the box written in it (kept across
-  // redraws), and the people picked for a new one.
+  // 群: those in 消息, the one opened, and the people picked for a new one.
+  // The boxes written in are kept by conversation, in writers.
   groups: [],
   group: null,
-  composer: null,
   newGroup: null,
   // What the person ticked and typed on an invite card, by invite, so a redraw keeps it.
   inviteDrafts: new Map(),
@@ -180,21 +183,39 @@ function agentName(id) {
   return state.agents.get(id)?.name ?? id;
 }
 
+// The person's account in the cloud; on this computer there is none.
+function myAccount() {
+  return state.me?.account.id ?? null;
+}
+
+// By account, never by name (isOwn): a friend may be called 我爱罗.
 function isMine(id) {
-  return agentName(id).startsWith("我");
+  return isOwn(state.agents.get(id), myAccount());
 }
 
 function myName() {
   return (cloud && state.me?.account.name) || "我";
 }
 
-// "小林的 Codex" belongs to 小林; "我的 Claude" to the person looking.
-function ownerOf(name) {
-  return name.startsWith("我") ? myName() : ownerName(name);
+// Whom an AI or a seat belongs to, by name (ownerLabel): the person's own
+// name for theirs, 小林 for "小林的 Codex". "" for one the page does not know.
+function whose(agent) {
+  return ownerLabel(agent, { me: myAccount(), myName: myName(), contacts: state.contacts });
 }
 
-function initialOf(name) {
-  return ownerName(name).slice(-1) || "?";
+// The same, by its id; one gone from /api/agents by the id alone.
+function ownerOf(id) {
+  return whose(state.agents.get(id)) || agentName(id);
+}
+
+// A face in a group's 四宫格, which the relay names only by the AI's name
+// from the person's side: the AI of that name the page knows, by its account.
+function faceOwner(name) {
+  return whose([...state.agents.values()].find((a) => a.name === name)) || ownerName(name);
+}
+
+function initialOf(owner) {
+  return owner.slice(-1) || "?";
 }
 
 // An avatar's colour, fixed by its owner's name; src/text.ts picks the same way.
@@ -202,8 +223,9 @@ function colorOf(owner) {
   return AVATAR_COLORS[[...owner].reduce((n, c) => n + c.codePointAt(0), 0) % AVATAR_COLORS.length];
 }
 
-function avatar(name, size) {
-  const owner = ownerOf(name);
+// A face: the person's, whose name is `owner`. Another's AI has its
+// person's face (ownerOf, whose).
+function avatar(owner, size) {
   return h(
     "span",
     { class: "avatar", style: `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.42)}px;background:${colorOf(owner)}`, "aria-hidden": "true" },
@@ -218,7 +240,7 @@ function groupAvatar(faces, size) {
     "span",
     { class: `group-avatar${size < 40 ? " small" : ""}`, style: `width:${size}px;height:${size}px`, "aria-hidden": "true" },
     ...faces.slice(0, 4).map((name) => {
-      const owner = ownerOf(name);
+      const owner = faceOwner(name);
       return h("span", { style: `background:${colorOf(owner)}` }, size < 40 ? "" : initialOf(owner));
     }),
   );
@@ -687,7 +709,7 @@ function needsYou(t) {
 function personOf(t) {
   if (isMine(t.from) && isMine(t.to)) return "me";
   const other = otherSide(t);
-  return state.agents.get(other)?.owner ?? ownerOf(agentName(other));
+  return state.agents.get(other)?.owner ?? ownerOf(other);
 }
 
 function people() {
@@ -696,7 +718,7 @@ function people() {
   for (const t of threads) {
     const key = personOf(t);
     if (!byPerson.has(key)) {
-      const name = key === "me" ? "我的 AI" : state.contacts.find((c) => c.id === key)?.name ?? ownerOf(agentName(otherSide(t)));
+      const name = key === "me" ? "我的 AI" : ownerOf(otherSide(t));
       byPerson.set(key, { key, name, avatarName: key === "me" ? myName() : name, threads: [] });
     }
     byPerson.get(key).threads.push(t);
@@ -779,7 +801,7 @@ function renderListBody(r) {
   if (r.view === "contacts") {
     if (!cloud) {
       body.replaceChildren(
-        ...[...state.agents.values()].filter((a) => a.client !== "person" && matches(a.name)).map((a) => item(`#/contacts/${encodeURIComponent(a.id)}`, r.id === a.id, avatar(a.name, 40), a.name)),
+        ...[...state.agents.values()].filter((a) => a.client !== "person" && matches(a.name)).map((a) => item(`#/contacts/${encodeURIComponent(a.id)}`, r.id === a.id, avatar(ownerOf(a.id), 40), a.name)),
       );
       return;
     }
@@ -817,9 +839,12 @@ function otherSide(t) {
 // The content column: a title bar, the body, and an optional bar at the bottom.
 // `flush` drops the body's side padding; `backAlways` shows the back button on
 // wide screens too, for pages one level down that have no list beside them.
-// `drop`: takes files dragged onto the conversation.
-function showMain(title, body, { right, foot, back, center, onContent, flush, backAlways, drop } = {}) {
+// `drop`: takes files dragged onto the conversation. `focus`: what in `foot`
+// takes the focus when the foot is put on the page (opened, or come back to)
+// or nothing has it; a redraw while the person is elsewhere leaves it there.
+function showMain(title, body, { right, foot, back, center, onContent, flush, backAlways, drop, focus } = {}) {
   const main = document.getElementById("main");
+  const placing = !!foot && foot.parentNode !== main;
   // renderGroup marks the group on screen again after this.
   delete main.dataset.group;
   main.ondragover = drop
@@ -842,13 +867,14 @@ function showMain(title, body, { right, foot, back, center, onContent, flush, ba
   const backLink = back ? h("a", { class: `back-btn icon-btn${backAlways ? " always" : ""}`, href: back, "aria-label": "返回" }, icon("left", 20, 1.8)) : null;
   const head = title === null ? null : h("header", { class: "main-head" }, backLink, h("h1", {}, title), right ?? null);
   const bodyEl = h("div", { class: `main-body${center ? " center" : ""}${onContent ? " on-content" : ""}${flush ? " flush" : ""}` }, body);
-  // A box kept across redraws (a group's) stays on the page while the rest is
+  // A box kept across redraws (writers) stays on the page while the rest is
   // swapped: taken off, even for a moment, it would lose its focus and break
   // off what an input method is composing.
-  if (foot && foot.parentNode === main) {
+  if (foot && !placing) {
     for (const n of [...main.childNodes]) if (n !== foot) n.remove();
     foot.before(...[head, bodyEl].filter(Boolean));
   } else main.replaceChildren(...[head, bodyEl, foot].filter(Boolean));
+  if (focus && (placing || document.activeElement === document.body)) focus.focus();
   return bodyEl;
 }
 
@@ -897,7 +923,7 @@ function mySeat() {
 // Who wrote a message: the AI, or the person themself on the web page.
 function writerName(m) {
   if (!m.byPerson) return agentName(m.sender);
-  return isMine(m.sender) ? "我" : ownerOf(agentName(m.sender));
+  return isMine(m.sender) ? "我" : ownerOf(m.sender);
 }
 
 // Who is writing an answer now: the asked AI after a question, or the AI that
@@ -1051,11 +1077,17 @@ function fileData(file) {
 
 // The bottom of a conversation, as in WeChat: ＋ to pick files or pictures
 // (they can also be pasted or dragged in), what the person writes, the
-// rounds and money so far on the left, 停止 and 发送 on the right.
-function writeBox({ label, status, extra, send }) {
-  const box = h("textarea", { class: "write", "aria-label": label, rows: "3" });
+// rounds and money so far on the left, 停止 and 发送 on the right. Made
+// once for each conversation (writerOf); `show` says, each time it is drawn,
+// what it is for (`label`), what the left of the row under it says
+// (`status`), the buttons before 发送 (`extra`) and what 发送 does (`send`).
+function writeBox() {
+  const box = h("textarea", { class: "write", rows: "3" });
   const error = h("p", { class: "error", role: "alert", hidden: true });
   const button = h("button", { type: "button", class: "btn primary" }, "发送");
+  const status = h("span", { class: "muted usage" });
+  const extra = h("span", { class: "write-extra" });
+  let send = null;
   const picked = [];
   const tray = h("div", { class: "tray", "aria-label": "要发的文件", hidden: true });
   const showError = (message) => {
@@ -1143,9 +1175,36 @@ function writeBox({ label, status, extra, send }) {
     tray,
     box,
     error,
-    h("div", { class: "write-row" }, status, h("div", { class: "buttons" }, ...(extra ?? []), button)),
+    h("div", { class: "write-row" }, status, h("div", { class: "buttons" }, extra, button)),
   );
-  return { foot, box, button, take };
+  const show = (now) => {
+    box.setAttribute("aria-label", now.label);
+    status.replaceChildren(...(now.status ?? []));
+    extra.replaceChildren(...(now.extra ?? []));
+    send = now.send;
+  };
+  return { foot, box, button, take, show };
+}
+
+// The box each conversation is written in, by conversation ("t:" and a
+// conversation, "new:" and the AI a new one is for, "g:" and a group,
+// "new-group"): the same one across redraws, which showMain never takes off
+// the page, so what is half written, the files picked, the caret and the
+// focus all stay. Another conversation has its own, so nothing written here
+// shows there; come back, and what was left here still is, as in WeChat.
+// A new conversation's or group's goes once it is made.
+const writers = keeper();
+
+// `make` sets up a new one: its ids, and what else it has.
+function writerOf(key, make = (w) => w) {
+  return writers.get(key, () => make(writeBox()));
+}
+
+// A conversation's box, and a new one's too: #thread-input, #thread-send.
+function threadIds(w) {
+  w.box.id = "thread-input";
+  w.button.id = "thread-send";
+  return w;
 }
 
 function renderThread(t) {
@@ -1158,7 +1217,7 @@ function renderThread(t) {
     h(
       "div",
       { class: `msg${onRight(m.sender) ? " right" : ""}` },
-      avatar(agentName(m.sender), 34),
+      avatar(ownerOf(m.sender), 34),
       h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, m.model ? `${writerName(m)} · ${m.model}` : writerName(m)), ...content),
     );
   const log = h("div", { class: "log", role: "log", "aria-label": "对话原文" }, h("span", { class: "event" }, shortTime(t.createdAt)));
@@ -1177,7 +1236,7 @@ function renderThread(t) {
   if (answering) {
     log.append(row({ sender: answering }, h("div", { class: "bubble", role: "img", "aria-label": `${agentName(answering)}正在回答` }, h("span", { class: "typing" }, h("i"), h("i"), h("i")))));
   }
-  if (t.status === "pending" && !isMine(t.to)) log.append(h("span", { class: "event" }, cjk("等", ownerOf(agentName(t.to)), "批准")));
+  if (t.status === "pending" && !isMine(t.to)) log.append(h("span", { class: "event" }, cjk("等", ownerOf(t.to), "批准")));
 
   // 动手 runs on the person's Claude subscription, so it has rounds only.
   const rounds = `${t.roundsUsed} / ${t.scope.maxRounds} 轮`;
@@ -1191,20 +1250,22 @@ function renderThread(t) {
   // shows what it works with.
   const ran = t.uses && isMine(t.to) && t.status === "active" ? (t.mode === "answer" ? threadModelPicker(t, { redraw: true }) : useText(t.uses)) : null;
   if (writes) {
-    const stop = t.status === "active" ? [h("button", { type: "button", class: "btn danger", onclick: () => act(() => api("POST", `/api/threads/${t.id}/stop`, {})) }, "停止")] : [];
+    const stop = t.status === "active" ? [h("button", { type: "button", class: "btn danger", id: "thread-stop", onclick: () => act(() => api("POST", `/api/threads/${t.id}/stop`, {})) }, "停止")] : [];
     const more = isMine(t.to) && t.canAddRounds
       ? h("button", { type: "button", class: "text-btn", id: "add-rounds", onclick: () => act(() => api("POST", `/api/threads/${t.id}/rounds`, {})) }, "加 10 轮")
       : null;
-    const status = h("span", { class: "muted usage" }, t.status === "active" ? usage : `${usage} · ${STATUS[t.status]}`, ran ? [" · ", ran] : null, more);
-    ({ foot, take: drop } = writeBox({
+    // Kept while events redraw the conversation (writers).
+    const w = writerOf(`t:${t.id}`, threadIds);
+    w.show({
       label: `发给${agentName(side === t.from ? t.to : t.from)}`,
-      status,
+      status: [t.status === "active" ? usage : `${usage} · ${STATUS[t.status]}`, ran ? [" · ", ran] : null, more].flat().filter(Boolean),
       extra: stop,
       send: async (text, files) => {
         await api("POST", `/api/threads/${t.id}/messages`, { from: side, body: text, byPerson: true, files });
         await refresh();
       },
-    }));
+    });
+    ({ foot, take: drop } = w);
   } else if (t.status !== "pending") {
     foot = h("footer", { class: "main-foot" }, h("span", { class: "muted" }, `${usage} · ${STATUS[t.status]}`));
   }
@@ -1227,16 +1288,18 @@ function renderCompose(to) {
   const target = state.agents.get(to);
   const seat = mySeat();
   if (!target || !seat || target.canReceive === false) return showEmpty();
-  const { foot, box, take } = writeBox({
+  const key = `new:${to}`;
+  const w = writerOf(key, threadIds);
+  w.show({
     label: `发给${target.name}`,
     send: async (text, files) => {
       const topic = topicOf(text) || files[0].name.slice(0, 20);
       const t = await api("POST", "/api/threads", { from: seat, to, topic, message: text, files });
+      writers.drop(key);
       location.hash = `#/t/${t.id}`;
     },
   });
-  showMain(target.name, h("div"), { foot, back: "#/", drop: take });
-  box.focus();
+  showMain(target.name, h("div"), { foot: w.foot, back: "#/", drop: w.take, focus: w.box });
 }
 
 // 发消息 beside an AI that can answer; "只能提问" beside one that cannot.
@@ -1317,7 +1380,7 @@ function renderContact(id) {
           "div",
           { class: "field-row" },
           h("span", { class: "label" }, "AI"),
-          h("div", { class: "values" }, ...(person.agents.length ? person.agents.map((a) => h("span", { class: "with-avatar" }, avatar(a.name, 34), h("span", { class: "grow" }, a.name), sendLink(a))) : [h("span", { class: "muted", style: "line-height:34px" }, "还没连接 AI")])),
+          h("div", { class: "values" }, ...(person.agents.length ? person.agents.map((a) => h("span", { class: "with-avatar" }, avatar(person.name, 34), h("span", { class: "grow" }, a.name), sendLink(a))) : [h("span", { class: "muted", style: "line-height:34px" }, "还没连接 AI")])),
         ),
         state.personPosts.length ? [h("div", { class: "divider" }), postsRow(person.id, state.personPosts)] : null,
         state.error ? h("p", { class: "error", role: "alert" }, state.error) : null,
@@ -1334,7 +1397,7 @@ function renderContact(id) {
       h(
         "div",
         { class: "profile" },
-        h("div", { class: "profile-top" }, avatar(agent.name, 64), h("div", {}, h("h2", {}, agent.name), h("span", { class: "muted" }, agent.id))),
+        h("div", { class: "profile-top" }, avatar(ownerOf(agent.id), 64), h("div", {}, h("h2", {}, agent.name), h("span", { class: "muted" }, agent.id))),
         h("div", { class: "divider" }),
         h("div", { class: "field-row" }, h("span", { class: "label" }, "协作"), h("span", { style: "line-height:34px" }, `${count} 次`)),
         h("span", {}, sendLink(agent)),
@@ -1553,7 +1616,7 @@ function postItem(post, { full = false } = {}) {
   return h(
     "article",
     { class: "post" },
-    h("a", { href, "aria-label": post.agent.name, class: "post-avatar" }, avatar(post.agent.name, 40)),
+    h("a", { href, "aria-label": post.agent.name, class: "post-avatar" }, avatar(post.author.name, 40)),
     h(
       "div",
       { class: "post-body" },

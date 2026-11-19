@@ -12,12 +12,14 @@ import {
   clientAvatar,
   closeOpenMenu,
   cloud,
+  faceOwner,
   fileTile,
   groupAvatar,
   h,
   icon,
   item,
   loadPeople,
+  myAccount,
   myName,
   mySeat,
   openMenu,
@@ -27,7 +29,9 @@ import {
   showMain,
   state,
   toast,
-  writeBox,
+  whose,
+  writerOf,
+  writers,
 } from "./app.js";
 import {
   ALL,
@@ -39,7 +43,6 @@ import {
   inviteChoices,
   inviteEmpty,
   isAnswering,
-  isMine,
   isPicked,
   leaveNote,
   loadedGroups,
@@ -63,8 +66,9 @@ import {
   tileActions,
   timeBreaks,
   togglePick,
+  whoIn,
 } from "./groups.js";
-import { cjk } from "./text.js";
+import { cjk, isOwn, ownerName } from "./text.js";
 
 // Wide enough for 群设置 beside the group, not over it (style.css says the same).
 const BESIDE = matchMedia("(min-width: 1080px)");
@@ -123,7 +127,9 @@ export function renderGroup(g, r) {
   // unless they were at the bottom, where the newest stays in view, or have
   // just sent something, which they see as in WeChat.
   const old = main.dataset.group === g.id ? main.querySelector(".main-body") : null;
-  const sent = state.composer?.groupId === g.id && state.composer.sent;
+  // The box is the same one across redraws (writers); a dissolved group is only read.
+  const writer = groupWriter(g);
+  const sent = !!writer?.sent;
   const stick = !old || sent || old.scrollHeight - old.scrollTop - old.clientHeight < 80;
   const keep = old?.scrollTop ?? 0;
   // 群设置 stays where it was scrolled to, as well, and what had the focus in it keeps it.
@@ -141,12 +147,10 @@ export function renderGroup(g, r) {
     },
     icon("more", 20),
   );
-  // The box is the same one across redraws and never leaves the page, so
-  // what is half written, the caret and the focus all stay (see showMain).
-  const foot = groupFoot(g);
-  const body = showMain(`${g.name}（${g.members.length}）`, groupLog(g, !r.settings), { right: more, foot, back: "#/", drop: state.composer?.take });
+  const foot = writer?.foot ?? h("footer", { class: "main-foot" }, h("span", { class: "muted" }, GROUP_STATUS_LABELS.dissolved));
+  const body = showMain(`${g.name}（${g.members.length}）`, groupLog(g, !r.settings), { right: more, foot, back: "#/", drop: writer?.take });
   main.dataset.group = g.id;
-  if (state.composer) state.composer.sent = false;
+  if (writer) writer.sent = false;
   foot.classList.toggle("beside-drawer", r.settings);
   if (r.settings) {
     body.classList.add("beside-drawer");
@@ -184,6 +188,14 @@ function groupLog(g, withError = true) {
   return log;
 }
 
+// Whom an AI or a seat in a group belongs to, by name, for its face: the
+// person's own name for what shows on the right (sentByMe), else as whoIn
+// finds it; one known only by its name (`name`), by that.
+function groupOwnerOf(g, id, name = g.names[id] ?? "") {
+  if (sentByMe(id, g, myAccount(), state.agents)) return myName();
+  return whose(whoIn(id, g, state.agents)) || ownerName(name);
+}
+
 // One message: who said it (the person's own on the right), the words, its
 // files, and under it who did not reply.
 function groupMessage(g, m) {
@@ -193,15 +205,15 @@ function groupMessage(g, m) {
   return h(
     "div",
     { class: `msg${sentByMe(m.sender, g, state.me.account.id, state.agents) ? " right" : ""}`, "data-seq": String(m.seq) },
-    avatar(name, 34),
-    h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, name), said, ...m.files.map(fileTile), receiptsUnder(m, g.names)),
+    avatar(groupOwnerOf(g, m.sender), 34),
+    h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, name), said, ...m.files.map(fileTile), receiptsUnder(g, m)),
   );
 }
 
 // The gray line under a message; when there is more to say, a click shows
 // each AI's state and why, until a click elsewhere or Esc.
-function receiptsUnder(m, names) {
-  const line = receiptLine(m.receipts, names);
+function receiptsUnder(g, m) {
+  const line = receiptLine(m.receipts, g.names);
   if (!line) return null;
   const spin = line.reading ? h("span", { class: "spinner small", "aria-hidden": "true" }) : null;
   if (!line.open) return h("span", { class: "receipts" }, spin, line.text);
@@ -213,7 +225,7 @@ function receiptsUnder(m, names) {
       h(
         "div",
         { class: "receipt-row", "data-agent": i.agent },
-        avatar(i.name, 28),
+        avatar(groupOwnerOf(g, i.agent, i.name), 28),
         h(
           "span",
           { class: "item-text" },
@@ -232,55 +244,42 @@ function facesOf(g) {
   return state.groups.find((x) => x.id === g.id)?.faces ?? [];
 }
 
-// The bottom of a group: the box to write in, the person's 每天次数 on the
-// left, 叫停 or 继续 on the right. It stays the same box while the group
-// redraws, so what is half written stays. A dissolved group is only read.
-function groupFoot(g) {
+// The bottom of a group: the box to write in (writers), the person's 每天次数
+// on the left, 叫停 or 继续 on the right, and the list under "@". Null once
+// dissolved: the group is only read, and its box goes.
+function groupWriter(g) {
+  const key = `g:${g.id}`;
   if (g.status === "dissolved") {
-    state.composer = null;
-    return h("footer", { class: "main-foot" }, h("span", { class: "muted" }, GROUP_STATUS_LABELS.dissolved));
+    writers.drop(key);
+    return null;
   }
-  if (state.composer?.groupId !== g.id) state.composer = groupComposer(g);
-  state.composer.update(g);
-  return state.composer.foot;
+  const w = writerOf(key, groupComposer);
+  w.update(g);
+  return w;
 }
 
-function groupComposer(first) {
-  let g = first;
-  const status = h("span", { class: "muted usage" });
-  const action = h("span", { class: "group-action" });
-  const { foot, box, button, take } = writeBox({
-    label: `发到${first.name}`,
-    status,
-    extra: [action],
-    send: async (text, files) => {
-      const { body, mentions } = composeMessage(text, g.members, myName());
-      await api("POST", groupPath(g.id, "messages"), { from: mySeat(), body, mentions, files });
-      composer.sent = true;
-      await refresh();
-    },
-  });
-  box.id = "group-input";
-  button.id = "group-send";
-  foot.classList.add("group-foot");
-  const picker = mentionPicker(box, () => g);
-  foot.append(picker.el);
-  const composer = {
-    groupId: first.id,
-    foot,
-    box,
-    take,
+function groupComposer(w) {
+  let g = null;
+  w.box.id = "group-input";
+  w.button.id = "group-send";
+  w.foot.classList.add("group-foot");
+  const picker = mentionPicker(w.box, () => g);
+  w.foot.append(picker.el);
+  const send = async (text, files) => {
+    const { body, mentions } = composeMessage(text, g.members, myName());
+    await api("POST", groupPath(g.id, "messages"), { from: mySeat(), body, mentions, files });
+    w.sent = true;
+    await refresh();
+  };
+  return Object.assign(w, {
     // Just sent: the next redraw goes to the bottom (renderGroup).
     sent: false,
     update(next) {
       g = next;
-      box.setAttribute("aria-label", `发到${g.name}`);
-      status.replaceChildren(...groupStatus(g));
-      action.replaceChildren(...groupAction(g));
+      w.show({ label: `发到${g.name}`, status: groupStatus(g), extra: groupAction(g), send });
       picker.refresh();
     },
-  };
-  return composer;
+  });
 }
 
 // The list under "@", typed in the box: 所有人 and the AIs in the group.
@@ -313,7 +312,7 @@ function mentionPicker(box, groupOf) {
         const row = h(
           "div",
           { class: `mention-option${on ? " on" : ""}`, role: "option", id: `mention-${i}`, "data-agent": o.id, "aria-selected": String(on), "aria-disabled": o.disabled ? "true" : null },
-          o.id === ALL ? groupAvatar(facesOf(groupOf()), 28) : avatar(o.name, 28),
+          o.id === ALL ? groupAvatar(facesOf(groupOf()), 28) : avatar(groupOwnerOf(groupOf(), o.id, o.name), 28),
           h("span", { class: "grow" }, o.name),
           o.note ? h("span", { class: "muted" }, o.note) : null,
         );
@@ -452,7 +451,7 @@ function groupSettings(g) {
 // 等加入): its face and name; a click offers what the person may do with it.
 function memberTile(g, t) {
   const label = [
-    h("span", { class: `member-face${t.waiting ? " waiting" : ""}` }, avatar(t.name, 44)),
+    h("span", { class: `member-face${t.waiting ? " waiting" : ""}` }, avatar(whose(t.who), 44)),
     h("span", { class: "member-name" }, t.name),
     t.waiting ? h("span", { class: "muted" }, "等加入") : null,
   ];
@@ -597,7 +596,8 @@ export async function openGroupPicker({ group } = {}) {
   let picked = draft?.picked ?? (first ? [first] : []);
   let query = "";
   const opened = new Set();
-  const face = (p) => (!p.person && isMine(p, me) ? clientAvatar(p.client, 28) : avatar(p.name, 28));
+  // A friend has their face; an AI its person's, the person's own its mark.
+  const face = (p) => (p.person ? avatar(p.name, 28) : isOwn(p, me) ? clientAvatar(p.client, 28) : avatar(whose(p), 28));
   const list = h("div", { class: "picker-list" });
   const chosen = h("div", { class: "picker-picked" });
   const count = h("span", { class: "muted picker-count" });
@@ -679,7 +679,7 @@ export async function openGroupPicker({ group } = {}) {
       if (problem) return void (error.textContent = problem);
       if (!group) {
         // The group is made with its first words: see renderNewGroup. What is
-        // half written there stays (the writer goes along).
+        // half written there stays (its box is kept in writers).
         state.newGroup = { ...state.newGroup, picked, targets: targetsOf(picked), members: picked.filter((p) => p.agent), title: picked.map((p) => p.name).join("、") };
         close();
         if (location.hash === "#/new-group") await refresh();
@@ -764,7 +764,7 @@ function renderInvite(g) {
     h("h2", {}, `邀请你加入「${g.name}」`),
     opener?.body ? h("p", {}, ...withAts(opener.body, opener.mentions, g.names)) : null,
     opener?.files.length ? h("div", { class: "card-files" }, ...opener.files.map(fileTile)) : null,
-    h("span", { class: "with-avatar faces" }, ...facesOf(g).slice(0, 3).map((name) => avatar(name, 20)), h("span", { class: "muted" }, `群里有 ${g.members.length} 个 AI`)),
+    h("span", { class: "with-avatar faces" }, ...facesOf(g).slice(0, 3).map((name) => avatar(faceOwner(name), 20)), h("span", { class: "muted" }, `群里有 ${g.members.length} 个 AI`)),
     h("div", { class: "invite-pick" }, ...picks, why),
     choices.length ? h("label", { class: "muted quota-label", for: quota.id }, "查对话记录 · 每天", quota, "次") : null,
     error,
@@ -774,9 +774,8 @@ function renderInvite(g) {
     "div",
     { class: "log", role: "log", "aria-label": "进群邀请" },
     h("span", { class: "event" }, shortTime(opener?.createdAt ?? g.createdAt)),
-    h("div", { class: "msg" }, avatar(invite.invitedByName, 34), h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, invite.invitedByName), card)),
+    h("div", { class: "msg" }, avatar(groupOwnerOf(g, invite.invitedBy, invite.invitedByName), 34), h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, invite.invitedByName), card)),
   );
-  state.composer = null;
   showMain(g.name, log, { back: "#/" });
   if (focused) document.getElementById(focused)?.focus({ preventScroll: true });
 }
@@ -791,9 +790,14 @@ export function renderNewGroup() {
   const draft = state.newGroup;
   const seat = mySeat();
   if (!draft || !seat) return void location.replace("#/");
-  // The same box while the page redraws, so what is half written stays.
-  const first = !draft.writer;
-  draft.writer ??= writeBox({
+  // The same box while the page redraws, or the person picks again (writers).
+  const w = writerOf("new-group", (made) => {
+    made.box.id = "group-input";
+    made.button.id = "group-send";
+    made.box.value = "@所有人 ";
+    return made;
+  });
+  w.show({
     label: "发到新群聊",
     send: async (text, files) => {
       const problem = openingProblem(text, files.length);
@@ -803,20 +807,9 @@ export function renderNewGroup() {
       const { body } = composeMessage(text, members, myName());
       const g = await api("POST", groupPath(), { from: seat, members: targets, message: body, files });
       state.newGroup = null;
+      writers.drop("new-group");
       location.replace(`#/g/${encodeURIComponent(g.id)}`);
     },
   });
-  const { foot, box, button, take } = draft.writer;
-  if (first) {
-    box.id = "group-input";
-    button.id = "group-send";
-    box.value = "@所有人 ";
-  }
-  // Redrawn, the box stays on the page with its focus and caret (see showMain).
-  // Put back on it (come back to, or picked again), it has the focus again.
-  const refocus = foot.parentNode !== document.getElementById("main") || document.activeElement === document.body;
-  showMain(draft.title, h("div"), { foot, back: "#/", drop: take });
-  if (!refocus) return;
-  box.focus();
-  if (first) box.setSelectionRange(box.value.length, box.value.length);
+  showMain(draft.title, h("div"), { foot: w.foot, back: "#/", drop: w.take, focus: w.box });
 }

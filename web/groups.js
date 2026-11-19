@@ -2,7 +2,7 @@
 // draws it, and test/web-groups.test.ts checks it in Node. Words and numbers
 // that come from the relay are written here once; the tests keep them the
 // same as src/types.ts and src/relay/groups.ts.
-import { cjk, messageText, ownerName } from "./text.js";
+import { cjk, isOwn, messageText, ownerName } from "./text.js";
 
 // "@所有人" in a message's mentions (ALL in src/types.ts), and as it is written.
 export const ALL = "all";
@@ -66,13 +66,6 @@ export function loadedGroups(before, wanted, list, one) {
   if (one.status === "fulfilled") return { groups, group: one.value, gone: false };
   const gone = one.reason?.status === 404;
   return { groups, group: !gone && before.group?.id === wanted ? before.group : null, gone };
-}
-
-// One of the person's own AIs: a member of a group, one in /api/agents, or
-// one picked, all carry their account as `owner`. (The relay sends 每天次数
-// with the person's own members alone.)
-export function isMine(m, me) {
-  return m.owner === me;
 }
 
 // A name as written in the group, from nobody's side, as the AIs read and
@@ -158,7 +151,7 @@ export function receiptLine(receipts, names) {
 // computer is off, and last, grayed out, those that cannot answer yet.
 // `me`: the person's account; `query`: what was typed after the @.
 export function pickerOptions(members, me, query = "") {
-  const rank = (m) => (!m.canReceive ? 3 : !m.online ? 2 : isMine(m, me) ? 1 : 0);
+  const rank = (m) => (!m.canReceive ? 3 : !m.online ? 2 : isOwn(m, me) ? 1 : 0);
   const ais = members
     .map((m, i) => ({ m, i }))
     .filter(({ m }) => fits(m.name, query))
@@ -228,7 +221,7 @@ export function composeMessage(text, members, myName) {
 // Claude 今天 12 / 30 次". Nearest is the fewest times left; of those, the
 // one with more of its share used. `full` once it is used up. Null without one.
 export function quotaLine(members, me) {
-  const mine = members.filter((m) => isMine(m, me));
+  const mine = members.filter((m) => isOwn(m, me));
   if (!mine.length) return null;
   const left = (m) => m.quota - m.usedToday;
   const nearer = (a, b) => left(b) < left(a) || (left(b) === left(a) && b.usedToday / b.quota > a.usedToday / a.quota);
@@ -236,15 +229,27 @@ export function quotaLine(members, me) {
   return { agent: m.agent, text: `${m.name} 今天 ${m.usedToday} / ${m.quota} 次`, full: m.usedToday >= m.quota };
 }
 
+// The AI or the person's seat behind a sender in a group, with the account it
+// belongs to, as ownerLabel and isOwn in web/text.js take it: as `agents`
+// (/api/agents: the person's and their friends') has it, else as the group
+// does, an AI in it, or a person's seat ("p_" and their account). Null for one
+// gone from both, known only by its name.
+export function whoIn(id, g, agents) {
+  const known = agents.get(id);
+  if (known) return known;
+  const member = g.members.find((m) => m.agent === id);
+  if (member) return { name: member.name, owner: member.owner };
+  if (id?.startsWith("p_")) return { name: g.names[id] ?? "", client: "person", owner: id.slice(2) };
+  return null;
+}
+
 // Whether a message in the group is the person's own, shown on the right:
-// from their seat, or from one of their AIs. An AI that left the group is
-// found in `agents` (the person's and their friends', from /api/agents), and
-// one gone from there too by its name from the person's side, "我的 Claude",
-// the one trace of it left.
+// from their seat, or from one of their AIs, by account (whoIn). One gone
+// from the group and from /api/agents too goes by its name from the person's
+// side, "我的 Claude", the one trace of it left.
 export function sentByMe(sender, g, me, agents) {
-  if (sender === `p_${me}`) return true;
-  const known = g.members.find((m) => m.agent === sender) ?? agents.get(sender);
-  if (known?.owner !== undefined) return isMine(known, me);
+  const who = whoIn(sender, g, agents);
+  if (who) return isOwn(who, me);
   return (g.names[sender] ?? "").startsWith("我的");
 }
 
@@ -259,17 +264,27 @@ export function isAnswering(g) {
 export function settingsView(g, me) {
   const open = g.status !== "dissolved";
   const owner = g.owner === me;
-  const mine = g.members.filter((m) => isMine(m, me));
+  const mine = g.members.filter((m) => isOwn(m, me));
   return { rename: owner && open, invite: open, quotas: open ? mine : [], mine, leave: mine.length > 0, dissolve: owner && open };
 }
 
 // The members in 群设置: the AIs in the group (the person `me`'s own marked
 // `mine`), then those invited, who show as 等加入. `id`: the AI, or the
-// invite, with whom it is for and the AI it asks for by name, if one.
+// invite, with whom it is for and the AI it asks for by name, if one. `who`:
+// whose face it has (ownerLabel in web/text.js), the AI's person or the one
+// invited.
 export function settingsTiles(g, me) {
   return [
-    ...g.members.map((m) => ({ id: m.agent, name: m.name, waiting: false, mine: isMine(m, me) })),
-    ...g.invites.map((i) => ({ id: i.id, name: i.agentName ?? i.name, waiting: true, mine: false, account: i.account, agent: i.agent })),
+    ...g.members.map((m) => ({ id: m.agent, name: m.name, waiting: false, mine: isOwn(m, me), who: { name: m.name, owner: m.owner } })),
+    ...g.invites.map((i) => ({
+      id: i.id,
+      name: i.agentName ?? i.name,
+      waiting: true,
+      mine: false,
+      account: i.account,
+      agent: i.agent,
+      who: { name: i.name, client: "person", owner: i.account },
+    })),
   ];
 }
 
@@ -291,7 +306,7 @@ export function tileActions(tile, g, me) {
 export function leaveNote(g, me, agents) {
   if (g.status === "dissolved") return "退出后你就看不到这个群了。";
   const rest = g.members.filter((m) => !agents.includes(m.agent));
-  if (rest.some((m) => isMine(m, me))) return cjk(g.members.find((m) => m.agent === agents[0]).name, "退出后不会再被叫醒。");
+  if (rest.some((m) => isOwn(m, me))) return cjk(g.members.find((m) => m.agent === agents[0]).name, "退出后不会再被叫醒。");
   if (!rest.length) return "群里只剩你的 AI，退出后群会解散。";
   if (g.owner === me) return `退出后群主交给${ownerName(rest[0].name)}，你也看不到这个群了。`;
   return "退出后你的 AI 不会再被叫醒，你也看不到这个群了。";
@@ -332,7 +347,7 @@ export function togglePick(picked, item) {
 // What stops 完成: a new group needs one of the person's own AIs (as
 // createGroup in src/relay/groups.ts checks); an invite (`group`) does not.
 export function pickProblem(picked, me, group) {
-  return !group && !picked.some((p) => isMine(p, me)) ? "群里至少要有你自己的一个 AI" : null;
+  return !group && !picked.some((p) => isOwn(p, me)) ? "群里至少要有你自己的一个 AI" : null;
 }
 
 // The rows of 发起群聊 and 邀请: a heading, the person's own AIs, a heading,
@@ -356,7 +371,7 @@ export function pickerRows({ me, agents, contacts, group = null, query = "", ope
     waiting,
     indent,
   });
-  const own = agents.filter((a) => isMine(a, me) && a.client !== "person" && !inGroup.has(a.id) && fits(a.name)).map((a) => ai(a, me, asked(me, a), false));
+  const own = agents.filter((a) => isOwn(a, me) && a.client !== "person" && !inGroup.has(a.id) && fits(a.name)).map((a) => ai(a, me, asked(me, a), false));
   const friends = contacts.flatMap((f) => {
     const out = f.agents.filter((a) => !inGroup.has(a.id));
     const isIn = (group?.members ?? []).some((m) => m.owner === f.id);
@@ -397,7 +412,7 @@ export function targetsOf(picked) {
 // already says so, as with two Claudes: "我的 Claude（MacBook）".
 export function inviteChoices(invites, agents, me, devices = []) {
   const named = invites.every((i) => i.agent) ? invites.map((i) => i.agent) : null;
-  const mine = agents.filter((a) => isMine(a, me) && a.client !== "person");
+  const mine = agents.filter((a) => isOwn(a, me) && a.client !== "person");
   const shown = named ? mine.filter((a) => named.includes(a.id)) : mine;
   return shown.map((a) => {
     const device = devices.find((d) => d.agents?.some((x) => x.id === a.id))?.name ?? null;
