@@ -327,11 +327,15 @@ export class GroupStore {
     return r ? toInvite(r) : null;
   }
 
-  // Invites nobody answered that have not run out, oldest first.
+  // Invites nobody answered that have not run out, oldest first. A dissolved
+  // group has none: its invites end with it, however it ended.
   openInvites(groupId: string, now: string): InviteRow[] {
     return (
       this.db
-        .prepare("SELECT * FROM group_invites WHERE group_id = ? AND answered IS NULL AND expires_at > ? ORDER BY created_at, rowid")
+        .prepare(
+          `SELECT i.* FROM group_invites i JOIN chat_groups g ON g.id = i.group_id
+           WHERE i.group_id = ? AND i.answered IS NULL AND i.expires_at > ? AND g.status != 'dissolved' ORDER BY i.created_at, i.rowid`,
+        )
         .all(groupId, now) as Row[]
     ).map(toInvite);
   }
@@ -339,7 +343,10 @@ export class GroupStore {
   invitesFor(account: string, now: string): InviteRow[] {
     return (
       this.db
-        .prepare("SELECT * FROM group_invites WHERE account = ? AND answered IS NULL AND expires_at > ? ORDER BY created_at, rowid")
+        .prepare(
+          `SELECT i.* FROM group_invites i JOIN chat_groups g ON g.id = i.group_id
+           WHERE i.account = ? AND i.answered IS NULL AND i.expires_at > ? AND g.status != 'dissolved' ORDER BY i.created_at, i.rowid`,
+        )
         .all(account, now) as Row[]
     ).map(toInvite);
   }
@@ -350,11 +357,6 @@ export class GroupStore {
 
   renewInvite(id: string, expiresAt: string): void {
     this.db.prepare("UPDATE group_invites SET expires_at = ? WHERE id = ?").run(expiresAt, id);
-  }
-
-  // Open invites end with their group: none can be taken up once it is dissolved.
-  expireInvites(groupId: string, now: string): void {
-    this.db.prepare("UPDATE group_invites SET expires_at = ? WHERE group_id = ? AND answered IS NULL AND expires_at > ?").run(now, groupId, now);
   }
 
   lastSeq(groupId: string): number {

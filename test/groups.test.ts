@@ -22,9 +22,12 @@ const FRIENDS = new Set(["fang:wang", "fang:lin", "wang:chuang"]);
 function directory(online: Set<string>): GroupDirectory {
   const seat = (account: string): AgentConfig => ({ id: `p_${account}`, name: PEOPLE[account], client: "person", canReceive: false, owner: account });
   const find = (id: string): AgentConfig | undefined => AIS.find((a) => a.id === id) ?? (id.startsWith("p_") && PEOPLE[id.slice(2)] ? seat(id.slice(2)) : undefined);
+  // Named from the viewer's side: their own AIs are "我的 ...".
+  const named = (a: AgentConfig | undefined, viewer?: string): AgentConfig | undefined =>
+    a && viewer && a.client !== "person" && a.owner === viewer ? { ...a, name: a.name.replace(PEOPLE[viewer], "我") } : a;
   return {
-    agent: (id) => find(id),
-    name: (id) => find(id)?.name ?? id,
+    agent: (id, viewer) => named(find(id), viewer),
+    name: (id, viewer) => named(find(id), viewer)?.name ?? id,
     friends: (a, b) => a === b || FRIENDS.has(`${a}:${b}`) || FRIENDS.has(`${b}:${a}`),
     online: (id) => online.has(id),
     seat: (account) => `p_${account}`,
@@ -328,7 +331,12 @@ describe("groups", () => {
     groups.leave(web("wang"), g.id, "wang/codex");
     assert.throws(
       () => groups.postMessage(web("fang"), g.id, { from: "p_fang", body: "还在吗", mentions: ["wang/codex"] }),
-      (err: Error) => err.message === "老王的 Codex 不在群里了，只能 @ 群里的 AI",
+      (err: Error) => err.message === "老王的 Codex 不在群里，只能 @ 群里的 AI",
+    );
+    groups.leave(web("fang"), g.id, "fang/codex");
+    assert.throws(
+      () => groups.postMessage(web("fang"), g.id, { from: "p_fang", body: "还在吗", mentions: ["fang/codex"] }),
+      (err: Error) => err.message === "我的 Codex 不在群里，只能 @ 群里的 AI",
     );
     const again = groups.invite(computer("fang"), g.id, { from: "fang/claude", members: [{ account: "wang" }] });
     assert.throws(
@@ -361,6 +369,58 @@ describe("groups", () => {
     groups.postMessage(computer("fang"), g.id, { from: "fang/codex", body: "两条一起答了", replyTo: asked.seq, epoch: 0 });
     const stateOf = (seq: number) => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts[0].state;
     assert.deepEqual([stateOf(missed.seq), stateOf(asked.seq)], ["replied", "replied"]);
+  });
+
+  test("the last AI leaving dissolves the group and its open invites end with it", () => {
+    const g = groups.createGroup(computer("fang"), { from: "fang/claude", name: "独行", members: [{ account: "wang" }], message: "开场白" });
+    const heard: string[][] = [];
+    groups.onEvent((e) => heard.push(e.members));
+    const opener = groups.store.message(g.id, g.openerSeq!)!;
+    assert.equal(groups.readable("wang", g.id, opener.id), true);
+    groups.leave(web("fang"), g.id, "fang/claude");
+    assert.equal(groups.store.group(g.id)!.status, "dissolved");
+    assert.ok(heard.at(-1)!.includes("p_wang"), "老王's page hears of it");
+    assert.deepEqual(groups.list(web("wang"), ["wang/codex", "wang/claude"]), []);
+    assert.equal(groups.readable("wang", g.id, opener.id), false);
+  });
+
+  test("an answer settles an @ left for 不在线 or 每天次数 only within the day, and a reason stays with the @ it answers", () => {
+    const g = groups.createGroup(computer("fang"), { from: "fang/claude", name: "自己", members: [{ agent: "fang/codex" }] });
+    const ask = (body: string) => groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body, mentions: ["fang/codex"] }).messages.at(-1)!;
+    const receipt = (seq: number) => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts[0];
+    online.delete("fang/codex");
+    const old = ask("很久以前问的");
+    now = new Date(now.getTime() + 25 * 3600_000);
+    const recent = ask("不久前问的");
+    online.add("fang/codex");
+    const asked = ask("现在问的");
+    groups.pass(computer("fang"), g.id, { agent: "fang/codex", seq: asked.seq, epoch: 0, reason: "与我无关\n第二行" });
+    assert.equal(receipt(old.seq).state, "offline", "over a day old: still 不在线");
+    assert.deepEqual([receipt(recent.seq).state, receipt(recent.seq).reason], ["passed", null]);
+    assert.deepEqual([receipt(asked.seq).state, receipt(asked.seq).reason], ["passed", "与我无关"]);
+  });
+
+  test("leaving a dissolved group changes neither 群主 nor its time", () => {
+    const g = groups.createGroup(computer("fang"), { from: "fang/claude", name: "散了", members: [{ agent: "fang/codex" }] });
+    groups.dissolve(web("fang"), g.id);
+    const before = groups.store.group(g.id)!;
+    now = new Date(now.getTime() + 60_000);
+    groups.leave(web("fang"), g.id, "fang/claude");
+    groups.leave(web("fang"), g.id, "fang/codex");
+    const after = groups.store.group(g.id)!;
+    assert.deepEqual([after.owner, after.updatedAt], [before.owner, before.updatedAt]);
+  });
+
+  test("someone invited keeps the invite's time and place in the list, however much is said where they cannot see", () => {
+    const a = groups.createGroup(computer("fang"), { from: "fang/claude", name: "甲", members: [{ account: "wang" }] });
+    const invitedAt = now.toISOString();
+    now = new Date(now.getTime() + 60_000);
+    groups.createGroup(computer("fang"), { from: "fang/claude", name: "乙", members: [{ account: "wang" }] });
+    now = new Date(now.getTime() + 60_000);
+    groups.postMessage(web("fang"), a.id, { from: "p_fang", body: "甲群有新话" });
+    const list = groups.list(web("wang"), ["wang/codex"]);
+    assert.deepEqual(list.map((g) => g.name), ["乙", "甲"]);
+    assert.equal(list[1].updatedAt, invitedAt);
   });
 
   test("waiting ends at the group's next change", async () => {

@@ -318,6 +318,17 @@ describe("群 over the API", () => {
     assert.deepEqual(joined.faces, ["老方的 Claude", "我的 Codex", "老方的 Codex"]);
   });
 
+  test("when the last AI leaves, the invite's opening files can no longer be opened", async () => {
+    const claude = fangMac.agent("claude");
+    const file = (name: string, text: string) => ({ name, type: "text/plain", data: Buffer.from(text).toString("base64") });
+    const g = await fangMac.client.createGroup({ from: claude, name: "走光了", members: [{ account: wangId }], message: "@所有人 看看", files: [file("单.txt", "内容")] });
+    const opener = (await wang.call("GET", `/api/groups/${g.id}`)).messages[0].files[0].id;
+    assert.equal((await download(wang, opener)).status, 200);
+    await fang.call("POST", `/api/groups/${g.id}/leave`, { agent: claude });
+    assert.equal((await download(wang, opener)).status, 404);
+    assert.equal((await wang.call("GET", "/api/groups")).some((x: any) => x.id === g.id), false);
+  });
+
 });
 
 test("on this computer alone there are no groups", async () => {

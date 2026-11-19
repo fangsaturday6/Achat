@@ -122,8 +122,9 @@ export class GroupService {
     return this.now().toISOString();
   }
 
-  private name(id: string): string {
-    return this.dir.agent(id)?.name ?? this.dir.name(id);
+  // An AI or a person's seat, named from `viewer`'s side (from nobody's by default).
+  private nameFor(id: string, viewer = ""): string {
+    return this.dir.agent(id, viewer)?.name ?? this.dir.name(id, viewer);
   }
 
   private requireGroup(id: string): Group {
@@ -265,9 +266,9 @@ export class GroupService {
         continue;
       }
       if (answering) continue;
-      // Named, never by id: an AI that left the group, or someone who is not an AI.
-      const gone = this.dir.agent(m);
-      if (gone && gone.client !== "person") throw new RelayError(400, cjk(gone.name, "不在群里了，只能 @ 群里的 AI"));
+      // Named from the sender's owner's side, never by id: an AI not in the group, or someone who is not an AI.
+      const other = this.dir.agent(m, from.owner ?? "");
+      if (other && other.client !== "person") throw new RelayError(400, cjk(other.name, "不在群里，只能 @ 群里的 AI"));
       throw new RelayError(400, `只能 @ 群里的 AI${from.client === "person" ? "" : "，或者自己的主人"}`);
     }
     return out;
@@ -284,11 +285,15 @@ export class GroupService {
 
   // The AI is done with what woke it, up to `seq`: every @ still waiting on
   // it there ends the same way, those it had to leave while its computer was
-  // off or its 每天次数 ran out too, since this answer read them; and its
+  // off or its 每天次数 ran out too (within a day), since this answer read
+  // them, the reason only under the one it answers; and its
   // session goes on from what it read.
   private settle(groupId: string, agent: string, seq: number, state: ReceiptState, reason: string | null, input: { sessionId?: string; readTo?: number }, now: string): void {
+    const since = this.now().getTime() - this.limits.catchUpMs;
     for (const r of this.store.receiptsOf(groupId, agent, ["reading", "offline", "quota"])) {
-      if (r.seq <= seq) this.store.setReceipt(groupId, r.seq, agent, state, reason, r.epoch, now);
+      // What was left over a day ago was never going to be taken up (更早的不补): still 不在线.
+      if (r.seq > seq || (r.state !== "reading" && Date.parse(r.updatedAt) < since)) continue;
+      this.store.setReceipt(groupId, r.seq, agent, state, r.seq === seq ? reason : null, r.epoch, now);
     }
     this.store.setRead(groupId, agent, input.readTo ?? seq, input.sessionId ?? null);
   }
@@ -309,7 +314,7 @@ export class GroupService {
     if (!agents.length) return [];
     const joinedSeq = this.store.lastSeq(group.id);
     for (const agent of agents) this.store.addMember({ groupId: group.id, agent, owner, quota, joinedSeq }, now);
-    this.store.addMessage(group.id, { sender: null, kind: "system", body: cjk(agents.map((a) => this.name(a)).join("、"), "加入了群聊") }, now);
+    this.store.addMessage(group.id, { sender: null, kind: "system", body: cjk(agents.map((a) => this.nameFor(a)).join("、"), "加入了群聊") }, now);
     const opener = group.openerSeq ? this.store.message(group.id, group.openerSeq) : null;
     if (!opener || this.now().getTime() - Date.parse(opener.createdAt) > this.limits.catchUpMs) return [];
     return this.wakeAgents(this.store.group(group.id)!, opener.seq, agents.filter((a) => a !== opener.sender), now);
@@ -319,22 +324,27 @@ export class GroupService {
   // passes 群主 to its person; when nobody is left, the group ends.
   private drop(group: Group, agent: string, note: string): void {
     const now = this.stamp();
+    let invited: string[] = [];
     this.store.transaction(() => {
       this.store.leaveMember(group.id, agent, now);
       // What it was still reading stays unanswered, and the line under it says why.
       for (const r of this.store.receiptsOf(group.id, agent, ["reading"])) this.store.setReceipt(group.id, r.seq, agent, "failed", "不在群里了", r.epoch, now);
-      // A dissolved group is only read now: leaving it adds nothing to it.
-      if (group.status !== "dissolved") this.store.addMessage(group.id, { sender: null, kind: "system", body: note }, now);
+      // A dissolved group is only read now: leaving it changes nothing in it.
+      if (group.status === "dissolved") return;
+      this.store.addMessage(group.id, { sender: null, kind: "system", body: note }, now);
       const left = this.store.members(group.id);
-      if (!left.length) this.store.updateGroup(group.id, { status: "dissolved" }, now);
-      else if (!left.some((m) => m.owner === group.owner)) this.store.updateGroup(group.id, { owner: left[0].owner }, now);
+      if (!left.length) {
+        // Those still invited hear of it once more; their invites end with the group.
+        invited = this.store.openInvites(group.id, now).map((i) => this.dir.seat(i.account));
+        this.store.updateGroup(group.id, { status: "dissolved" }, now);
+      } else if (!left.some((m) => m.owner === group.owner)) this.store.updateGroup(group.id, { owner: left[0].owner }, now);
     });
-    this.emit("group.updated", group.id, {}, [agent]);
+    this.emit("group.updated", group.id, {}, [agent, ...invited]);
   }
 
   // The person, or their AI when it acted on the person's word.
   private who(caller: Caller, by?: string): string {
-    if (by && caller.actsAs(by)) return this.name(by);
+    if (by && caller.actsAs(by)) return this.nameFor(by);
     return this.dir.person(caller.account, "");
   }
 
@@ -606,7 +616,7 @@ export class GroupService {
       wake: this.store.message(groupId, reading.seq)!,
       messages,
       session: goesOn ? member.session : null,
-      members: members.map((m) => ({ agent: m.agent, name: this.dir.agent(m.agent, plain)?.name ?? this.dir.name(m.agent, plain) })),
+      members: members.map((m) => ({ agent: m.agent, name: this.nameFor(m.agent, plain) })),
       names: this.names(messages, members, plain),
       owner: { seat: this.dir.seat(owner), name: this.dir.person(owner, "") },
     };
@@ -619,7 +629,7 @@ export class GroupService {
     const member = this.store.member(groupId, agent);
     if (!member || member.leftAt || member.owner !== caller.account) throw new RelayError(404, "这个 AI 不在群里");
     if (!caller.approves && !caller.actsAs(agent)) throw new RelayError(403, "只能让自己的 AI 退群");
-    this.drop(group, agent, cjk(this.name(agent), "退出了群聊"));
+    this.drop(group, agent, cjk(this.nameFor(agent), "退出了群聊"));
     return { ok: true };
   }
 
@@ -629,7 +639,7 @@ export class GroupService {
     if (group.owner !== caller.account || !caller.approves) throw new RelayError(403, "只有群主可以移出 AI");
     const member = this.store.member(groupId, agent);
     if (!member || member.leftAt) throw new RelayError(404, "这个 AI 不在群里");
-    this.drop(group, agent, cjk(this.name(agent), "被移出了群聊"));
+    this.drop(group, agent, cjk(this.nameFor(agent), "被移出了群聊"));
     return { ok: true };
   }
 
@@ -638,12 +648,11 @@ export class GroupService {
     if (group.owner !== caller.account || !caller.approves) throw new RelayError(403, "只有群主可以解散群");
     if (group.status === "dissolved") return this.detail(caller, groupId);
     const now = this.stamp();
-    // Those still invited hear of it once more; their invites end with the group.
+    // Those still invited hear of it once more.
     const invited = this.store.openInvites(groupId, now).map((i) => this.dir.seat(i.account));
     this.store.transaction(() => {
       this.store.updateGroup(groupId, { status: "dissolved" }, now);
       for (const from of ["reading", "offline", "quota"] as const) this.store.moveAll(groupId, from, "stopped", now);
-      this.store.expireInvites(groupId, now);
       this.store.addMessage(groupId, { sender: null, kind: "system", body: "群主解散了群聊" }, now);
     });
     this.emit("group.updated", groupId, {}, invited);
@@ -666,11 +675,6 @@ export class GroupService {
   }
 
   // --- reading
-
-  // An AI or a person's seat, named from `viewer`'s side.
-  private nameFor(id: string, viewer: string): string {
-    return this.dir.agent(id, viewer)?.name ?? this.dir.name(id, viewer);
-  }
 
   private names(messages: GroupMessage[], members: MemberRow[], viewer: string): Record<string, string> {
     const ids = new Set<string>(members.map((m) => m.agent));
@@ -746,13 +750,16 @@ export class GroupService {
   private summary(caller: Caller, g: Group, invite: InviteRow | null): GroupSummary {
     const viewer = caller.account;
     const last = invite ? null : (this.store.messages(g.id, 0, 1)[0] ?? null);
+    const rows = this.store.members(g.id);
     return {
       ...g,
+      // Someone invited sees nothing of the group but its invite: the invite's time.
+      ...(invite ? { updatedAt: invite.createdAt } : {}),
       role: invite ? "invited" : "member",
-      memberCount: this.store.members(g.id).length,
+      memberCount: rows.length,
       lastMessage: last,
       lastSender: last?.sender ? this.nameFor(last.sender, viewer) : null,
-      faces: this.faces(g.id, viewer),
+      faces: this.faces(rows, viewer),
       unread: invite ? true : this.unread(caller, g.id),
       myInvite: invite ? this.inviteView(invite, viewer) : null,
     };
@@ -760,8 +767,7 @@ export class GroupService {
 
   // The 四宫格: one AI per person first, in the order they joined, then the
   // rest, four at most.
-  private faces(groupId: string, viewer: string): string[] {
-    const rows = this.store.members(groupId);
+  private faces(rows: MemberRow[], viewer: string): string[] {
     const first = rows.filter((m, i) => rows.findIndex((x) => x.owner === m.owner) === i);
     return [...first, ...rows.filter((m) => !first.includes(m))].slice(0, 4).map((m) => this.nameFor(m.agent, viewer));
   }
@@ -782,11 +788,11 @@ export class GroupService {
   // Whether an account may read a group's files: a member all of them; someone
   // invited, while the invite is open, those of the opening message, which
   // the invite card shows.
-  readable(account: string, groupId: string, messageId?: number): boolean {
+  readable(account: string, groupId: string, messageId: number): boolean {
     const group = this.store.group(groupId);
     if (!group) return false;
     if (this.store.members(groupId).some((m) => m.owner === account)) return true;
-    if (messageId === undefined || !group.openerSeq) return false;
+    if (!group.openerSeq) return false;
     const invited = this.store.invitesFor(account, this.stamp()).some((i) => i.groupId === groupId);
     return invited && this.store.message(groupId, group.openerSeq)?.id === messageId;
   }
