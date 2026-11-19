@@ -442,6 +442,11 @@ export class RelayClient {
     return this.call("POST", `/api/groups/${encodeURIComponent(id)}/quota`, { agent, perDay });
   }
 
+  // 加一份: another day's 每天次数 for today only, from the dialog when it is nearly used up.
+  addGroupExtra(id: string, agent: string): Promise<GroupDetail> {
+    return this.call("POST", `/api/groups/${encodeURIComponent(id)}/extra`, { agent });
+  }
+
   leaveGroup(id: string, agent: string): Promise<{ ok: boolean }> {
     return this.call("POST", `/api/groups/${encodeURIComponent(id)}/leave`, { agent });
   }

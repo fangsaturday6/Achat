@@ -146,6 +146,8 @@ const opener = settled.messages.find((m: any) => m.mentions.includes(ALL));
 console.log(`支付对接里 @所有人 那条：${opener.receipts.map((r: any) => `${settled.names[r.agent]} ${RECEIPT_LABELS[r.state as ReceiptState]}`).join("、")}`);
 // 老方看过支付对接：消息列表里只有周会纪要亮红点。
 await fang.call("POST", `/api/groups/${pay.id}/read`, {});
+// 老方在电脑上给支付对接里的 Claude 加了一份：底部和群设置写的是今天的总数。
+await fangMac.client.addGroupExtra(pay.id, fangClaude);
 
 // 私聊照旧：老王的 Codex 问老方的 Claude，等老方批准（消息列表里的人、红字和数字）。
 await wangLaptop.client.createRequest({ from: wangCodex, to: fangClaude, topic: "退款接口", message: "退款接口你们那边是同步返回结果，还是走回调？" });

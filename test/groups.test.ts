@@ -3,7 +3,7 @@ import { beforeEach, describe, test } from "node:test";
 import type { AgentConfig } from "../src/config.js";
 import { GroupService, type Caller, type GroupDirectory } from "../src/relay/groups.js";
 import { Store } from "../src/relay/store.js";
-import { ALL } from "../src/types.js";
+import { ALL, type GroupEvent } from "../src/types.js";
 
 // 老方 has Claude and Codex; 老王 has Codex and Claude; 小林 has Claude,
 // 豆包 and Codex; 王闯 has Codex. 老方 is friends with 老王 and 小林; 王闯 only with 老王.
@@ -562,6 +562,66 @@ describe("groups", () => {
     const refused = (err: Error & { status?: number }) => err.status === 400 && err.message === "一次最多 9 个文件";
     assert.throws(() => groups.postMessage(web("fang"), g.id, { from: "p_fang", body: "看看", files: ten }), refused);
     assert.throws(() => groups.createGroup(web("fang"), { from: "p_fang", members: [{ agent: "fang/claude" }], message: "看看", files: ten }), refused);
+  });
+
+  test("an AI near its 每天次数 is told of once a 北京 day: at 5 left, or at 1 left when it is under 10 a day", () => {
+    const g = groups.createGroup(computer("fang"), { from: "fang/claude", name: "自己", members: [{ agent: "fang/codex" }] });
+    const low: GroupEvent[] = [];
+    groups.onEvent((e) => e.type === "group.quotaLow" && low.push(e));
+    const ask = (times: number) => {
+      for (let i = 0; i < times; i++) groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "@老方的 Codex 看看", mentions: ["fang/codex"] });
+    };
+    ask(24);
+    assert.deepEqual(low, []);
+    ask(1);
+    assert.deepEqual(low, [{ type: "group.quotaLow", groupId: g.id, members: ["fang/codex"] }], "25 of 30: 5 left; the event tells that AI alone");
+    ask(10);
+    assert.equal(low.length, 1, "not again that day, used up or not");
+    now = new Date("2026-11-18T16:00:00Z");
+    ask(25);
+    assert.equal(low.length, 2, "again the next day");
+
+    const small = groups.createGroup(computer("fang"), { from: "fang/claude", name: "少", members: [{ agent: "fang/codex" }] });
+    groups.setQuota(web("fang"), small.id, { agent: "fang/codex", perDay: 5 });
+    const askSmall = () => groups.postMessage(computer("fang"), small.id, { from: "fang/claude", body: "@老方的 Codex 看看", mentions: ["fang/codex"] });
+    for (let i = 0; i < 3; i++) askSmall();
+    assert.equal(low.length, 2);
+    askSmall();
+    assert.deepEqual(low.at(-1), { type: "group.quotaLow", groupId: small.id, members: ["fang/codex"] }, "4 of 5: 1 left");
+    askSmall();
+    assert.equal(low.length, 3, "used up is not told again");
+  });
+
+  test("加一份 lets an AI be woken another day's 每天次数 today only, and takes up the latest @ kept for it; only its person adds it", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    groups.setQuota(web("fang"), g.id, { agent: "fang/codex", perDay: 2 });
+    const ask = (body: string) => groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body, mentions: ["fang/codex"] }).messages.at(-1)!;
+    ask("一");
+    ask("二");
+    const kept = ask("三");
+    assert.equal(kept.receipts[0].state, "quota");
+    assert.throws(() => groups.addToday(web("wang"), g.id, { agent: "fang/codex" }), /只能改自己的 AI/);
+
+    const heard: GroupEvent[] = [];
+    groups.onEvent((e) => heard.push(e));
+    const before = groups.detail(web("fang"), g.id).messages.length;
+    const added = groups.addToday(web("fang"), g.id, { agent: "fang/codex" });
+    const codex = () => groups.detail(web("fang"), g.id).members.find((m) => m.agent === "fang/codex")!;
+    assert.deepEqual([codex().quota, codex().extraToday, codex().usedToday], [2, 2, 3]);
+    assert.equal(added.messages.find((m) => m.seq === kept.seq)!.receipts[0].state, "reading");
+    assert.equal(added.messages.length, before, "nothing is written in the group");
+    assert.deepEqual(heard.map((e) => [e.type, e.wake]), [["group.updated", ["fang/codex"]]]);
+    assert.equal(groups.detail(web("wang"), g.id).members.find((m) => m.agent === "fang/codex")!.extraToday, undefined, "only its person sees it");
+
+    // Today it may be woken quota + what was added.
+    assert.equal(ask("四").receipts[0].state, "reading");
+    assert.equal(ask("五").receipts[0].state, "quota");
+    // The next day in 北京 it is its 每天次数 again.
+    now = new Date("2026-11-18T16:00:00Z");
+    assert.deepEqual([codex().extraToday, codex().usedToday], [0, 0]);
+    groups.dissolve(web("fang"), g.id);
+    assert.throws(() => groups.addToday(web("fang"), g.id, { agent: "fang/codex" }), /解散/);
   });
 
   test("waiting ends at the group's next change", async () => {

@@ -139,6 +139,8 @@ export async function groupsApi(req: IncomingMessage, res: ServerResponse, url: 
       return ok(200, groups.resume(caller, id, optStr(body, "by")));
     case "quota":
       return ok(200, groups.setQuota(caller, id, { agent: str(body, "agent"), perDay: num(body, "perDay") }));
+    case "extra":
+      return ok(200, groups.addToday(caller, id, { agent: str(body, "agent") }));
     case "leave":
       return ok(200, groups.leave(caller, id, str(body, "agent")));
     case "remove":

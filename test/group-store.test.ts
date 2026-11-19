@@ -41,3 +41,20 @@ test("a group keeps its members, messages with receipts and files, invites and d
   groups.setRead("g_1", "b", 1, "s1");
   assert.deepEqual([groups.member("g_1", "b")!.readSeq, groups.member("g_1", "b")!.session], [1, "s1"]);
 });
+
+test("a database from before 加一份 keeps each day's count, with nothing added or told", () => {
+  const store = new Store(":memory:");
+  store.db.exec(`
+    CREATE TABLE group_usage (group_id TEXT NOT NULL, agent TEXT NOT NULL, day TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (group_id, agent, day));
+    INSERT INTO group_usage VALUES ('g_1', 'b', '2026-11-18', 3);
+  `);
+  const groups = new GroupStore(store);
+  assert.deepEqual([groups.used("g_1", "b", "2026-11-18"), groups.extra("g_1", "b", "2026-11-18")], [3, 0]);
+  groups.addExtra("g_1", "b", "2026-11-18", 30);
+  groups.addExtra("g_1", "b", "2026-11-18", 30);
+  groups.addExtra("g_1", "b", "2026-11-19", 5);
+  assert.deepEqual([groups.extra("g_1", "b", "2026-11-18"), groups.extra("g_1", "b", "2026-11-19"), groups.used("g_1", "b", "2026-11-19")], [60, 5, 0]);
+  assert.deepEqual([groups.warn("g_1", "b", "2026-11-18"), groups.warn("g_1", "b", "2026-11-18"), groups.warn("g_1", "b", "2026-11-20")], [true, false, true]);
+  new GroupStore(store); // opening again changes nothing
+  assert.equal(groups.extra("g_1", "b", "2026-11-18"), 60);
+});

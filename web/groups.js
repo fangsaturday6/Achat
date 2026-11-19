@@ -217,16 +217,28 @@ export function composeMessage(text, members, myName) {
   return { body, mentions: all ? [ALL, ...ais] : ais };
 }
 
-// The person's AI nearest its 每天次数, for the bottom of the group: "我的
+// How many times one of the person's AIs may be woken today: its 每天次数,
+// and what they added for today on their computer (加一份).
+export function todayTotal(m) {
+  return m.quota + (m.extraToday ?? 0);
+}
+
+// Under an AI's 每天次数 in 群设置: today so far, and of how many once some
+// were added for today, since the 每天次数 above no longer says it.
+export function usedText(m) {
+  return m.extraToday ? `今天用了 ${m.usedToday} / ${todayTotal(m)} 次` : `今天用了 ${m.usedToday} 次`;
+}
+
+// The person's AI nearest today's total, for the bottom of the group: "我的
 // Claude 今天 12 / 30 次". Nearest is the fewest times left; of those, the
 // one with more of its share used. `full` once it is used up. Null without one.
 export function quotaLine(members, me) {
   const mine = members.filter((m) => isOwn(m, me));
   if (!mine.length) return null;
-  const left = (m) => m.quota - m.usedToday;
-  const nearer = (a, b) => left(b) < left(a) || (left(b) === left(a) && b.usedToday / b.quota > a.usedToday / a.quota);
+  const left = (m) => todayTotal(m) - m.usedToday;
+  const nearer = (a, b) => left(b) < left(a) || (left(b) === left(a) && b.usedToday / todayTotal(b) > a.usedToday / todayTotal(a));
   const m = mine.reduce((a, b) => (nearer(a, b) ? b : a));
-  return { agent: m.agent, text: `${m.name} 今天 ${m.usedToday} / ${m.quota} 次`, full: m.usedToday >= m.quota };
+  return { agent: m.agent, text: `${m.name} 今天 ${m.usedToday} / ${todayTotal(m)} 次`, full: m.usedToday >= todayTotal(m) };
 }
 
 // The AI or the person's seat behind a sender in a group, with the account it

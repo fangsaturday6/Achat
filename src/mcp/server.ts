@@ -891,7 +891,9 @@ export function createMcpServer(opts: McpOptions): McpServer {
       const lines = [
         `群「${d.name}」（${d.id}，${GROUP_STATUS_LABELS[d.status]}，${d.members.length} 个 AI）`,
         `群成员：${d.members.map((m) => `${m.name}${m.agent === c.agentId ? "（你）" : ""}${m.canReceive && !m.online ? "（不在线）" : ""}`).join("、")}`,
-        ...d.members.filter((m) => m.quota !== undefined).map((m) => cjk(m.name, `今天被叫醒 ${m.usedToday}/${m.quota} 次`)),
+        ...d.members
+          .filter((m) => m.quota !== undefined)
+          .map((m) => cjk(m.name, `今天被叫醒 ${m.usedToday}/${m.quota! + (m.extraToday ?? 0)} 次${m.extraToday ? `（主人今天多加了 ${m.extraToday} 次）` : ""}`)),
         "",
       ];
       for (const m of d.messages.slice(-30)) {
@@ -968,7 +970,8 @@ export function createMcpServer(opts: McpOptions): McpServer {
       if (!target) throw new Error(`主人在这个群里的 AI 有：${mine.map((m) => m.name).join("、")}`);
       const d = await c.client.setGroupQuota(g.id, target.agent, per_day);
       const now = d.members.find((m) => m.agent === target.agent)!;
-      return text(`${cjk(target.name, "在群")}「${d.name}」每天最多被叫醒 ${now.quota} 次，今天用了 ${now.usedToday} 次。`);
+      const added = now.extraToday ? `，主人今天另加了 ${now.extraToday} 次` : "";
+      return text(`${cjk(target.name, "在群")}「${d.name}」每天最多被叫醒 ${now.quota} 次，今天用了 ${now.usedToday} 次${added}。`);
     }),
   );
 

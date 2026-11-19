@@ -318,6 +318,39 @@ describe("群 over the API", () => {
     assert.deepEqual(joined.faces, ["老方的 Claude", "我的 Codex", "老方的 Codex"]);
   });
 
+  test("an AI near its 每天次数 is told to its own person's streams alone, and 加一份 is theirs to add", async () => {
+    const claude = fangMac.agent("claude");
+    const codex = fangMac.agent("codex");
+    const wangCodex = wangLaptop.agent("codex");
+    const g = await fangMac.client.createGroup({ from: claude, name: "快用完", members: [{ agent: codex }, { account: wangId }] });
+    const invite = (await wang.call("GET", "/api/groups")).find((x: any) => x.id === g.id).myInvite;
+    await wang.call("POST", `/api/groups/${g.id}/invites/${invite.id}/accept`, { agents: [wangCodex] });
+    await fang.call("POST", `/api/groups/${g.id}/quota`, { agent: codex, perDay: 5 });
+    const onFang = await watch(fang);
+    const onWang = await watch(wang);
+    let open!: () => void;
+    const streaming = new Promise<void>((r) => (open = r));
+    const off = fangMac.client.subscribe(undefined, () => {}, () => open());
+    try {
+      await streaming;
+      await fangMac.client.beat();
+      for (let i = 1; i <= 4; i++) await fang.call("POST", `/api/groups/${g.id}/messages`, { from: fangSeat, body: `@我的 Codex 第 ${i} 个`, mentions: [codex] });
+      const low = await until(async () => onFang.events.find((e) => e.groupId === g.id && e.type === "group.quotaLow"));
+      assert.deepEqual(low, { type: "group.quotaLow", groupId: g.id, members: [codex] });
+      await quiet();
+      assert.ok(!onWang.events.some((e) => e.type === "group.quotaLow"), "老王 hears nothing of it");
+
+      await assert.rejects(wang.call("POST", `/api/groups/${g.id}/extra`, { agent: codex }), /只能改自己的 AI/);
+      const added = await fangMac.client.addGroupExtra(g.id, codex);
+      const mine = added.members.find((m) => m.agent === codex)!;
+      assert.deepEqual([mine.quota, mine.extraToday, mine.usedToday], [5, 5, 4]);
+    } finally {
+      off();
+      onFang.stop();
+      onWang.stop();
+    }
+  });
+
   test("when the last AI leaves, the invite's opening files can no longer be opened", async () => {
     const claude = fangMac.agent("claude");
     const file = (name: string, text: string) => ({ name, type: "text/plain", data: Buffer.from(text).toString("base64") });

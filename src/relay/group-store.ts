@@ -74,12 +74,16 @@ CREATE TABLE IF NOT EXISTS group_receipts (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (group_id, seq, agent)
 );
--- How many times each AI was woken in a group, per day in 北京时间.
+-- How many times each AI was woken in a group, per day in 北京时间; how many
+-- more its person let it be that day (加一份), and whether they were told it
+-- was nearly used up.
 CREATE TABLE IF NOT EXISTS group_usage (
   group_id TEXT NOT NULL,
   agent TEXT NOT NULL,
   day TEXT NOT NULL,
   used INTEGER NOT NULL DEFAULT 0,
+  extra INTEGER NOT NULL DEFAULT 0,
+  warned INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (group_id, agent, day)
 );
 CREATE TABLE IF NOT EXISTS group_reads (
@@ -221,6 +225,14 @@ export class GroupStore {
   constructor(private store: Store) {
     this.db = store.db;
     this.db.exec(SCHEMA);
+    // Columns added later; older rows take the defaults (nothing added, nobody told).
+    this.addColumn("group_usage", "extra", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumn("group_usage", "warned", "INTEGER NOT NULL DEFAULT 0");
+  }
+
+  private addColumn(table: string, column: string, ddl: string): void {
+    const have = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!have.some((c) => c.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
   }
 
   transaction<T>(fn: () => T): T {
@@ -476,6 +488,27 @@ export class GroupStore {
     this.db
       .prepare("INSERT INTO group_usage (group_id, agent, day, used) VALUES (?, ?, ?, 1) ON CONFLICT (group_id, agent, day) DO UPDATE SET used = used + 1")
       .run(groupId, agent, day);
+  }
+
+  // How many more times than its 每天次数 an AI may be woken on `day` (加一份).
+  extra(groupId: string, agent: string, day: string): number {
+    const r = this.db.prepare("SELECT extra FROM group_usage WHERE group_id = ? AND agent = ? AND day = ?").get(groupId, agent, day) as { extra: number } | undefined;
+    return r?.extra ?? 0;
+  }
+
+  addExtra(groupId: string, agent: string, day: string, n: number): void {
+    this.db
+      .prepare("INSERT INTO group_usage (group_id, agent, day, extra) VALUES (?, ?, ?, ?) ON CONFLICT (group_id, agent, day) DO UPDATE SET extra = extra + excluded.extra")
+      .run(groupId, agent, day, n);
+  }
+
+  // Marks that an AI's person was told its 每天次数 for `day` is nearly used
+  // up: true the first time, so they are told once a day.
+  warn(groupId: string, agent: string, day: string): boolean {
+    const r = this.db
+      .prepare("INSERT INTO group_usage (group_id, agent, day, warned) VALUES (?, ?, ?, 1) ON CONFLICT (group_id, agent, day) DO UPDATE SET warned = 1 WHERE warned = 0")
+      .run(groupId, agent, day);
+    return Number(r.changes) > 0;
   }
 
   readSeq(reader: string, groupId: string): number {

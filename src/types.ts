@@ -262,9 +262,12 @@ export interface GroupMember {
   canReceive: boolean;
   online: boolean;
   joinedAt: string;
-  // The caller's own AIs only: times a day it may be woken here, and today so far.
+  // The caller's own AIs only: times a day it may be woken here, today so
+  // far, and those its person added for today alone (加一份; 0 most days).
+  // Today it may be woken quota + extraToday times.
   quota?: number;
   usedToday?: number;
+  extraToday?: number;
 }
 
 export interface GroupInvite {
@@ -338,10 +341,11 @@ export interface GroupWork {
 }
 
 // Sent on the same event stream as threads. `members`: every AI in the group
-// and the seats of people invited, so each account hears of its own groups.
-// `wake`: the AIs just woken.
+// and the seats of people invited, so each account hears of its own groups;
+// for group.quotaLow only the AI a wake brought near today's 每天次数, so its
+// own person alone hears of it. `wake`: the AIs just woken.
 export interface GroupEvent {
-  type: "group.updated" | "group.message";
+  type: "group.updated" | "group.message" | "group.quotaLow";
   groupId: string;
   seq?: number;
   wake?: string[];

@@ -65,7 +65,9 @@ import {
   targetsOf,
   tileActions,
   timeBreaks,
+  todayTotal,
   togglePick,
+  usedText,
   whoIn,
 } from "./groups.js";
 import { cjk, isOwn, ownerName } from "./text.js";
@@ -539,7 +541,8 @@ function quotaRow(g, m) {
     document.getElementById("group-settings-error")?.remove();
   });
   input.addEventListener("keydown", (e) => e.key === "Enter" && !e.isComposing && input.blur());
-  const used = Math.min(100, Math.round((m.usedToday / m.quota) * 100));
+  const total = todayTotal(m);
+  const used = Math.min(100, Math.round((m.usedToday / total) * 100));
   return h(
     "div",
     { class: "quota-row", "data-agent": m.agent },
@@ -552,10 +555,10 @@ function quotaRow(g, m) {
     ),
     h(
       "div",
-      { class: `progress${m.usedToday >= m.quota ? " full" : ""}`, role: "progressbar", "aria-label": cjk(m.name, `今天用了 ${m.usedToday} 次`), "aria-valuemin": "0", "aria-valuemax": String(m.quota), "aria-valuenow": String(m.usedToday) },
+      { class: `progress${m.usedToday >= total ? " full" : ""}`, role: "progressbar", "aria-label": cjk(m.name, usedText(m)), "aria-valuemin": "0", "aria-valuemax": String(total), "aria-valuenow": String(m.usedToday) },
       h("span", { style: `width:${used}%` }),
     ),
-    h("span", { class: "muted" }, `今天用了 ${m.usedToday} 次`),
+    h("span", { class: "muted" }, usedText(m)),
   );
 }
 

@@ -91,6 +91,8 @@ export interface GroupPostInput {
 export class GroupService {
   readonly store: GroupStore;
   private events = new EventEmitter();
+  // AIs a wake just brought near today's 每天次数, told of by the next emit.
+  private low: { groupId: string; agent: string }[] = [];
 
   constructor(
     store: Store,
@@ -107,14 +109,22 @@ export class GroupService {
     return () => this.events.off("event", listener);
   }
 
-  // `also`: AIs or seats that just left its audience, who hear this one too.
+  // An event for everyone in the group and those invited. `also`: AIs or
+  // seats that just left its audience, who hear this one too. The AIs a wake
+  // before it brought near today's 每天次数 are told of after it.
   private emit(type: GroupEvent["type"], groupId: string, extra: { seq?: number; wake?: string[] } = {}, also: string[] = []): void {
     const members = new Set([
       ...this.store.members(groupId).map((m) => m.agent),
       ...this.store.openInvites(groupId, this.stamp()).map((i) => this.dir.seat(i.account)),
       ...also,
     ]);
-    const event: GroupEvent = { type, groupId, members: [...members], ...(extra.seq !== undefined ? { seq: extra.seq } : {}), ...(extra.wake?.length ? { wake: extra.wake } : {}) };
+    this.tell(type, groupId, [...members], extra);
+    for (const low of this.low.splice(0)) this.tell("group.quotaLow", low.groupId, [low.agent]);
+  }
+
+  // An event for `members` alone, such as the one AI near its 每天次数.
+  private tell(type: GroupEvent["type"], groupId: string, members: string[], extra: { seq?: number; wake?: string[] } = {}): void {
+    const event: GroupEvent = { type, groupId, members, ...(extra.seq !== undefined ? { seq: extra.seq } : {}), ...(extra.wake?.length ? { wake: extra.wake } : {}) };
     this.events.emit("event", event);
   }
 
@@ -213,13 +223,14 @@ export class GroupService {
     if (group.status !== "open") return "stopped";
     const agent = this.dir.agent(member.agent);
     if (!agent || agent.canReceive === false) return "cannot";
-    if (this.store.used(group.id, member.agent, day) >= member.quota) return "quota";
+    if (this.store.used(group.id, member.agent, day) >= member.quota + this.store.extra(group.id, member.agent, day)) return "quota";
     if (!this.dir.online(member.agent)) return "offline";
     return "reading";
   }
 
   // Records what became of each of `agents` for message `seq`; a wake uses
-  // one of its 每天次数. Returns the AIs woken.
+  // one of its 每天次数. One that leaves it 5 or fewer (1 when it is under
+  // 10 a day) has its person told, once a day (see emit). Returns the AIs woken.
   private wakeAgents(group: Group, seq: number, agents: string[], now: string): string[] {
     const day = beijingDay(this.now());
     const woken: string[] = [];
@@ -231,6 +242,8 @@ export class GroupService {
       if (state !== "reading") continue;
       this.store.use(group.id, agent, day);
       woken.push(agent);
+      const left = member.quota + this.store.extra(group.id, agent, day) - this.store.used(group.id, agent, day);
+      if (left > 0 && left <= (member.quota < 10 ? 1 : 5) && this.store.warn(group.id, agent, day)) this.low.push({ groupId: group.id, agent });
     }
     return woken;
   }
@@ -567,18 +580,40 @@ export class GroupService {
     return this.detail(caller, groupId);
   }
 
+  // One of the caller's AIs in a group still open, whose times here its
+  // person, or that AI on their word, may change.
+  private requireOwnMember(caller: Caller, groupId: string, agent: string): MemberRow {
+    this.requireOpen(this.requireMine(caller, groupId));
+    const member = this.store.member(groupId, agent);
+    if (!member || member.leftAt || member.owner !== caller.account) throw new RelayError(404, "只能改自己的 AI 在这个群里的次数");
+    if (!caller.approves && !caller.actsAs(agent)) throw new RelayError(403, "只能改自己的次数");
+    return member;
+  }
+
   // Its person, or their AI on their word, changes how many times a day one
   // of their AIs may be woken here. Raised past what it used, it takes up the
   // latest @ it had to leave, without being @ed again.
   setQuota(caller: Caller, groupId: string, input: { agent: string; perDay: number }): GroupDetail {
-    this.requireOpen(this.requireMine(caller, groupId));
-    const member = this.store.member(groupId, input.agent);
-    if (!member || member.leftAt || member.owner !== caller.account) throw new RelayError(404, "只能改自己的 AI 在这个群里的次数");
-    if (!caller.approves && !caller.actsAs(input.agent)) throw new RelayError(403, "只能改自己的次数");
+    this.requireOwnMember(caller, groupId, input.agent);
     const perDay = this.checkQuota(input.perDay);
     const now = this.stamp();
     const wake = this.store.transaction(() => {
       this.store.setQuota(groupId, input.agent, perDay);
+      return this.takeUp(this.store.group(groupId)!, input.agent, ["quota"], now);
+    });
+    this.emit("group.updated", groupId, { wake });
+    return this.detail(caller, groupId);
+  }
+
+  // 加一份: its person, asked on their computer as it was nearly used up,
+  // lets one of their AIs be woken another day's 每天次数 today only. Like
+  // raising them, it takes up the latest @ it had to leave; nothing is
+  // written in the group.
+  addToday(caller: Caller, groupId: string, input: { agent: string }): GroupDetail {
+    const member = this.requireOwnMember(caller, groupId, input.agent);
+    const now = this.stamp();
+    const wake = this.store.transaction(() => {
+      this.store.addExtra(groupId, input.agent, beijingDay(this.now()), member.quota);
       return this.takeUp(this.store.group(groupId)!, input.agent, ["quota"], now);
     });
     this.emit("group.updated", groupId, { wake });
@@ -737,7 +772,7 @@ export class GroupService {
         canReceive: !!agent && agent.canReceive !== false,
         online: this.dir.online(m.agent),
         joinedAt: m.joinedAt,
-        ...(m.owner === viewer ? { quota: m.quota, usedToday: this.store.used(groupId, m.agent, day) } : {}),
+        ...(m.owner === viewer ? { quota: m.quota, usedToday: this.store.used(groupId, m.agent, day), extraToday: this.store.extra(groupId, m.agent, day) } : {}),
       };
     });
     const messages = mine.length

@@ -287,6 +287,19 @@ test("the bottom names the person's AI nearest its 每天次数, red once used u
   assert.equal(page.isAnswering({ status: "stopped", messages: [msg("reading")] }), false);
 });
 
+test("what was added for today counts: the bottom and 群设置 say what is used of today's total", () => {
+  const added = { agent: "f/claude", name: "我的 Claude", owner: "fang", canReceive: true, online: true, quota: 30, usedToday: 32, extraToday: 30 };
+  assert.equal(page.todayTotal(added), 60);
+  assert.equal(page.todayTotal({ ...added, extraToday: undefined }), 30);
+  assert.deepEqual(page.quotaLine([added], "fang"), { agent: "f/claude", text: "我的 Claude 今天 32 / 60 次", full: false });
+  assert.equal(page.quotaLine([{ ...added, usedToday: 60 }], "fang").full, true);
+  // Nearest is still the fewest times left today.
+  const other = { ...added, agent: "f/codex", name: "我的 Codex", usedToday: 26, extraToday: 0 };
+  assert.equal(page.quotaLine([added, other], "fang").agent, "f/codex");
+  assert.equal(page.usedText(added), "今天用了 32 / 60 次");
+  assert.equal(page.usedText({ ...added, usedToday: 12, extraToday: 0 }), "今天用了 12 次");
+});
+
 test("群设置 lists the members, then those invited as 等加入; a click on each offers what the person may do", () => {
   const g = {
     owner: "fang",

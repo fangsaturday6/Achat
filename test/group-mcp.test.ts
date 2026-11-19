@@ -67,6 +67,11 @@ test("an AI makes a group, talks in it, reads it, sets its 每天次数 and 叫�
     assert.match(textOf(await ai.callTool({ name: "check_group", arguments: {} })), /支付对接/);
     assert.match(textOf(await ai.callTool({ name: "list_contacts", arguments: {} })), /支付对接/);
     assert.match(textOf(await ai.callTool({ name: "set_group_quota", arguments: { group: "支付对接", per_day: 50, agent: "我的 Codex" } })), /每天最多被叫醒 50 次/);
+    // 加一份 from the dialog on 老方's computer: today's total is the 每天次数 and what was added.
+    const pay = (await fangMac.client.groups()).find((x) => x.name === "支付对接")!;
+    await fangMac.client.addGroupExtra(pay.id, fangMac.agent("codex"));
+    assert.match(textOf(await ai.callTool({ name: "check_group", arguments: { group: "支付对接" } })), /我的 Codex 今天被叫醒 0\/100 次（主人今天多加了 50 次）/);
+    assert.match(textOf(await ai.callTool({ name: "set_group_quota", arguments: { group: "支付对接", per_day: 50, agent: "我的 Codex" } })), /每天最多被叫醒 50 次，今天用了 0 次，主人今天另加了 50 次。/);
     assert.match(textOf(await ai.callTool({ name: "stop_group", arguments: { group: "支付对接" } })), /已叫停/);
     assert.match(textOf(await ai.callTool({ name: "stop_group", arguments: { group: "支付对接", resume: true } })), /接着聊/);
   } finally {
