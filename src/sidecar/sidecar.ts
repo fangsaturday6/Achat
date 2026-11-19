@@ -369,7 +369,8 @@ export class Sidecar {
   private again = new Set<string>();
   private unsubscribe: (() => void) | null = null;
   private log: (line: string) => void;
-  // Requests waiting for their dialog, and the one on screen.
+  // Requests waiting for their dialog, one on screen at a time: a thread's
+  // by its id, 动手 in a group by its act's (askActs says where).
   private queue: string[] = [];
   private showing: { id: string; asking: Asking | null } | null = null;
   // Shown once already, up to which message; "稍后" means the web page, not
@@ -383,10 +384,10 @@ export class Sidecar {
   private lowWakes = new Map<string, { groupId: string; agent: string; choosing: Choosing }>();
   // The asker's words being judged 问答 or 动手, once each.
   private judging = new Map<string, Promise<ThreadDetail>>();
-  // Requests to 动手 in a group put to the person here: by act, the request
-  // shown last, and the dialog on screen.
+  // Requests to 动手 in a group to put to the person here, by act: its group,
+  // the AI asked and its latest request; and the request shown last.
+  private askActs = new Map<string, { groupId: string; agent: string; seq: number }>();
   private actShown = new Map<string, number>();
-  private actAsking = new Map<string, Asking>();
   // 动手 here that waits its turn, by asker and AI (actKey), with its newest
   // request: looked at again on the group's next event, since the round
   // before may be back (nextRound); gone once nothing waits on it.
@@ -599,6 +600,7 @@ export class Sidecar {
     }
     if (e.type === "group.updated") {
       for (const low of this.lowWakes.values()) if (low.groupId === e.groupId) void this.closeMoreWakesIfDone(low.groupId, low.agent);
+      for (const [id, a] of this.askActs) if (a.groupId === e.groupId) void this.dropActIfDone(id);
     }
     if (e.type === "group.mention" && e.seq !== undefined) void this.tellMention(e.groupId, e.seq);
     if (e.type === "group.invited") void this.tellInvited(e.groupId);
@@ -863,7 +865,7 @@ export class Sidecar {
       return err.status === 409;
     }
     if (asked.run) await this.nextRound(groupId, agent, asked.act, me);
-    else if (asked.act.status === "asking") void this.askGroupAct(work, work.wake, asked.act, me);
+    else if (asked.act.status === "asking") this.promptAct(groupId, agent, asked.act);
     // Past the rounds of an act still at work: its person is asked once
     // those are back, when the service has this computer look again.
     else this.log(`${groupId} 第 ${work.wake.seq} 条等这次动手做完再问主人`);
@@ -884,36 +886,76 @@ export class Sidecar {
   }
 
   // Puts a request to 动手 in a group to the person here, once for each time
-  // it is asked: a newer request of the same act takes the place of the one
-  // on screen. 稍后 leaves it 等主人同意 until it is asked again, or this
-  // computer starts again.
-  private async askGroupAct(work: GroupWork, ask: GroupMessage, act: GroupAct, me: AgentConfig): Promise<void> {
+  // it is asked, in turn with the other dialogs (next): a newer request of
+  // the same act takes the place of the one on screen or waiting. 稍后
+  // leaves it 等主人同意 until it is asked again, or this computer starts again.
+  private promptAct(groupId: string, agent: string, act: GroupAct): void {
     if (this.actShown.get(act.id) === act.askSeq) return;
-    this.actShown.set(act.id, act.askSeq);
-    this.actAsking.get(act.id)?.close();
-    const groupId = work.group.id;
-    let asking: Asking | null = null;
+    this.askActs.set(act.id, { groupId, agent, seq: act.askSeq });
+    if (!this.queue.includes(act.id)) this.queue.push(act.id);
+    // Closed, the one on screen comes back with the newer request.
+    if (this.showing?.id === act.id) this.showing.asking?.close();
+    void this.next();
+  }
+
+  // The dialog of a request to 动手 that no longer waits for its person
+  // goes: 叫停, dissolved, the AI gone from the group, a day unanswered.
+  private async dropActIfDone(id: string): Promise<void> {
+    const a = this.askActs.get(id);
+    if (!a) return;
     try {
-      const from = (await this.askerOf(work, act.asker)).name;
-      const title = groupActTitle(work.group.name, from, me.name.replace(/^我的/, "你的"));
-      asking = this.opts.ask?.({ mode: "do", title, topic: "", body: withFileNames(ask), scope: `${MODE_LABELS.do} · ${act.maxRounds} 轮` }) ?? null;
-      if (!asking) {
-        this.opts.notify(title, withFileNames(ask), `${this.opts.webUrl}/#/g/${groupId}`);
-        return;
-      }
-      this.actAsking.set(act.id, asking);
+      const work = await this.relay.groupWorkFor(a.groupId, a.agent, false, a.seq);
+      if (work?.act?.id === id && work.act.status === "asking") return;
+    } catch (err) {
+      // Its person has no AI left there: the group is gone from their view.
+      if (!(err instanceof RelayClientError && err.status === 404)) return this.log(`${a.groupId} 的动手弹框：${(err as Error).message}`);
+    }
+    this.askActs.delete(id);
+    this.queue = this.queue.filter((q) => q !== id);
+    if (this.showing?.id === id) this.showing.asking?.close();
+  }
+
+  // The dialog for a request to 动手 in a group, when its turn comes: as it
+  // stands now, or nothing if it no longer waits for its person. 同意 opens
+  // the work without holding up the dialogs after it.
+  private async showAct(id: string): Promise<void> {
+    const a = this.askActs.get(id);
+    if (!a) return;
+    const work = await this.relay.groupWorkFor(a.groupId, a.agent, false, a.seq);
+    const act = work?.act;
+    if (!work || act?.id !== id || act.status !== "asking") {
+      this.askActs.delete(id);
+      return;
+    }
+    if (this.actShown.get(id) === act.askSeq) return;
+    this.actShown.set(id, act.askSeq);
+    const me = (await this.agent(a.agent)) ?? { id: a.agent, name: a.agent, client: "claude" as const };
+    const title = groupActTitle(work.group.name, (await this.askerOf(work, act.asker)).name, me.name.replace(/^我的/, "你的"));
+    const body = withFileNames(work.wake);
+    const asking = this.opts.ask?.({ mode: "do", title, topic: "", body, scope: `${MODE_LABELS.do} · ${act.maxRounds} 轮` }) ?? null;
+    if (!asking) {
+      this.askActs.delete(id);
+      this.opts.notify(title, body, `${this.opts.webUrl}/#/g/${a.groupId}`);
+      return;
+    }
+    this.showing!.asking = asking;
+    try {
       const answer = await asking.answer;
-      if (answer === "approve") await this.nextRound(groupId, act.doer, await this.relay.approveGroupAct(groupId, act.id), me);
-      if (answer === "decline") await this.relay.declineGroupAct(groupId, act.id);
+      // Done with this request: only a newer one, already waiting its turn
+      // if it came meanwhile, or a start brings the act back.
+      if (this.askActs.get(id)?.seq === a.seq) this.askActs.delete(id);
+      if (answer === "approve") {
+        const approved = await this.relay.approveGroupAct(a.groupId, id);
+        void this.nextRound(a.groupId, a.agent, approved, me).catch((err: Error) => this.log(`${a.groupId} 动手没有开始：${err.message}`));
+      }
+      if (answer === "decline") await this.relay.declineGroupAct(a.groupId, id);
     } catch (err) {
       if (this.stopping.signal.aborted) return;
       const raw = (err as Error).message || "出错了";
-      this.log(`${groupId} 的动手弹框：${raw}`);
       // Handled meanwhile, such as 叫停: the line under the request says so already.
+      this.log(`${a.groupId} 的动手弹框：${raw}`);
       if (err instanceof RelayClientError) return;
-      await this.relay.failGroup(groupId, { agent: act.doer, seq: act.askSeq, reason: failureLine(raw) }).catch(() => {});
-    } finally {
-      if (asking && this.actAsking.get(act.id) === asking) this.actAsking.delete(act.id);
+      await this.relay.failGroup(a.groupId, { agent: a.agent, seq: act.askSeq, reason: failureLine(raw) }).catch(() => {});
     }
   }
 
@@ -1157,43 +1199,51 @@ export class Sidecar {
     void this.next();
   }
 
-  // Shows one request at a time and acts on the person's answer.
+  // Shows one request at a time, a thread's or 动手 in a group (showAct),
+  // and acts on the person's answer.
   private async next(): Promise<void> {
     if (this.showing) return;
     const id = this.queue.shift();
     if (!id) return;
     this.showing = { id, asking: null };
     try {
-      const t = await this.judged(await this.relay.getThread(id));
-      if (t.status !== "pending") return;
-      const upTo = t.messages.at(-1)?.seq ?? 0;
-      if (this.shown.get(id) === upTo) return;
-      this.shown.set(id, upTo);
-      const from = (await this.agent(t.from))?.name ?? t.from;
-      const to = ((await this.agent(t.to))?.name ?? t.to).replace(/^我的/, "你的");
-      const asking = this.opts.ask?.({
-        mode: t.mode,
-        title: requestTitle(t, from, to),
-        topic: t.topic,
-        body: withFileNames(pendingMessage(t)),
-        ...(requestReason(t) ? { reason: requestReason(t)! } : {}),
-        scope: scopeLine(t),
-      });
-      if (!asking) {
-        this.opts.notify(from, `[待批准] ${t.topic}`, `${this.opts.webUrl}/#/t/${id}`);
-        return;
-      }
-      this.showing.asking = asking;
-      const answer = await asking.answer;
-      if (answer === "approve") await this.relay.approve(id);
-      if (answer === "decline") await this.relay.decline(id);
+      if (this.askActs.has(id)) await this.showAct(id);
+      else await this.showRequest(id);
     } catch (err) {
       // Already handled elsewhere, or the relay is away; the request stays on the web page.
-      this.log(`${id} 的批准对话框：${(err as Error).message}`);
+      this.log(`${this.askActs.get(id)?.groupId ?? id} 的${this.askActs.has(id) ? "动手弹框" : "批准对话框"}：${(err as Error).message}`);
     } finally {
       this.showing = null;
       void this.next();
     }
+  }
+
+  // A thread's request: judged first, then put to the person once for each
+  // message it came to.
+  private async showRequest(id: string): Promise<void> {
+    const t = await this.judged(await this.relay.getThread(id));
+    if (t.status !== "pending") return;
+    const upTo = t.messages.at(-1)?.seq ?? 0;
+    if (this.shown.get(id) === upTo) return;
+    this.shown.set(id, upTo);
+    const from = (await this.agent(t.from))?.name ?? t.from;
+    const to = ((await this.agent(t.to))?.name ?? t.to).replace(/^我的/, "你的");
+    const asking = this.opts.ask?.({
+      mode: t.mode,
+      title: requestTitle(t, from, to),
+      topic: t.topic,
+      body: withFileNames(pendingMessage(t)),
+      ...(requestReason(t) ? { reason: requestReason(t)! } : {}),
+      scope: scopeLine(t),
+    });
+    if (!asking) {
+      this.opts.notify(from, `[待批准] ${t.topic}`, `${this.opts.webUrl}/#/t/${id}`);
+      return;
+    }
+    this.showing!.asking = asking;
+    const answer = await asking.answer;
+    if (answer === "approve") await this.relay.approve(id);
+    if (answer === "decline") await this.relay.decline(id);
   }
 
   // The asker's latest words, judged 问答 or 动手 by the AI they are for, if

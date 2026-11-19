@@ -37,19 +37,31 @@ class FakeOpener implements TaskOpener {
   }
 }
 
-// Dialogs that wait for the test to answer them.
-function dialogs(): { asked: ApprovalPrompt[]; answer: (i: number, a: Answer) => void; ask: Asker } {
+// Dialogs that wait for the test to answer them, one on screen at a time
+// as on a computer. Those `mine` leaves out, such as what an earlier test
+// left waiting in its own group, are answered 稍后 at once.
+function dialogs(mine: (title: string) => boolean = () => true): { asked: ApprovalPrompt[]; closed: number[]; answer: (i: number, a: Answer) => void; ask: Asker } {
   const asked: ApprovalPrompt[] = [];
+  const closed: number[] = [];
   const answers: ((a: Answer) => void)[] = [];
   return {
     asked,
+    closed,
     answer: (i, a) => answers[i](a),
     ask: (prompt) => {
+      if (!mine(prompt.title)) return { answer: Promise.resolve("later"), close: () => {} };
+      const n = asked.length;
       asked.push(prompt);
       let resolve!: (a: Answer) => void;
       const answer = new Promise<Answer>((r) => (resolve = r));
       answers.push(resolve);
-      return { answer, close: () => resolve("later") };
+      return {
+        answer,
+        close: () => {
+          closed.push(n);
+          resolve("later");
+        },
+      };
     },
   };
 }
@@ -196,7 +208,7 @@ describe("an AI @ed in a group answers in the background", () => {
     const claude = fangMac.agent("claude");
     const codex = wangLaptop.agent("codex");
     const opener = new FakeOpener();
-    const shown = dialogs();
+    const shown = dialogs((title) => title.includes(`「${name}」`));
     const runner = new JudgingRunner([], Array.from({ length: times }, () => "do" as const));
     const more: Partial<SidecarOptions> = { doers: { [claude]: opener }, ask: shown.ask, tasks: new TaskBook(mkdtempSync(join(tmpdir(), "achat-tasks-"))) };
     sidecarFor(wangLaptop, codex, new ByPrompt(() => "无需回复：看到了"));
@@ -310,7 +322,7 @@ describe("an AI @ed in a group answers in the background", () => {
     await until(async () => (await stateOf(g.id, third, claude)) === "acting");
     sidecar.stop();
     await result("@老王的 Codex 第二件好了", second);
-    const later = dialogs();
+    const later = dialogs((title) => title.includes("「两头」"));
     sidecarFor(fangMac, claude, new JudgingRunner([]), { ...more, ask: later.ask });
     const last = await until(async () => started()[2]);
     assert.ok(last.prompt.includes(`reply_to: ${third}`), last.prompt);
@@ -427,7 +439,7 @@ describe("an AI @ed in a group answers in the background", () => {
 
     // The computer starts again: what still waits is put to the person once more, not judged again.
     sidecar.stop();
-    const later = dialogs();
+    const later = dialogs((title) => title.includes("「稍后再说」"));
     sidecarFor(fangMac, claude, runner, { ...more, ask: later.ask });
     const again = await until(async () => later.asked[0]);
     assert.deepEqual([again.title, again.body], ["「稍后再说」群里老王的 Codex 请你的 Claude 动手", "@老方的 Claude 帮我改配置"]);
@@ -477,6 +489,66 @@ describe("an AI @ed in a group answers in the background", () => {
     await new Promise((r) => setTimeout(r, 200));
     assert.ok(!plain.calls.some((c) => c.prompt.includes("帮我跑个脚本")), "not answered in the background");
     assert.equal(await stateOf(g.id, seq, claude), "asking");
+  });
+
+  test("dialogs to 动手 come one at a time, in turn with requests in threads, and go once no longer needed", async () => {
+    const { g, claude, codex, more, sidecar } = await actingMeeting("一个个来", 0);
+    sidecar.stop();
+    const shown = dialogs((title) => title.includes("「一个个来」") || title.startsWith("老王的 Codex 想问"));
+    sidecarFor(fangMac, claude, new JudgingRunner([], ["do", "do"]), { ...more, ask: shown.ask });
+    await wangLaptop.client.postGroupMessage(g.id, { from: codex, body: "@老方的 Claude 帮我挪验签", mentions: [claude] });
+    await until(async () => shown.asked[0]);
+    await wang.call("POST", `/api/groups/${g.id}/messages`, { from: `p_${wangId}`, body: "@老方的 Claude 帮我部署", mentions: [claude] });
+    const thread = await wangLaptop.client.createRequest({ from: codex, to: claude, topic: "退款接口", message: "退款接口是同步返回还是走回调？" });
+    await until(async () => (await stateOf(g.id, (await fang.call("GET", `/api/groups/${g.id}`)).messages.at(-1).seq, claude)) === "asking");
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual(shown.asked.map((p) => p.title), ["「一个个来」群里老王的 Codex 请你的 Claude 动手"], "one at a time");
+
+    // Whichever came first after it; the other waits its turn.
+    shown.answer(0, "later");
+    const [inPerson, inThread] = ["「一个个来」群里老王请你的 Claude 动手", "老王的 Codex 想问你的 Claude"];
+    const next = (n: number) => until(async () => shown.asked[n]);
+    if ((await next(1)).title === inThread) {
+      await new Promise((r) => setTimeout(r, 200));
+      assert.equal(shown.asked.length, 2, "one at a time");
+      shown.answer(1, "decline");
+      assert.equal((await next(2)).title, inPerson);
+    } else assert.equal(shown.asked[1].title, inPerson);
+    const act = shown.asked.findIndex((p) => p.title === inPerson);
+    // 叫停: the dialog for 动手 on screen goes; the request in the thread is still asked.
+    await fang.call("POST", `/api/groups/${g.id}/stop`, {});
+    await until(async () => shown.closed.includes(act));
+    if (act === 1) {
+      assert.equal((await next(2)).title, inThread);
+      shown.answer(2, "decline");
+    }
+    await until(async () => (await wangLaptop.client.getThread(thread.id)).status === "declined");
+    assert.equal(shown.asked.length, 3);
+  });
+
+  test("同意 in a dialog for 动手 that ended meanwhile is logged, and nothing is asked again", async () => {
+    const { g, claude, codex, more, sidecar } = await actingMeeting("晚了", 0);
+    sidecar.stop();
+    // A dialog that stays on screen when told to go.
+    const asked: ApprovalPrompt[] = [];
+    let approve!: () => void;
+    const logged: string[] = [];
+    sidecarFor(fangMac, claude, new JudgingRunner([], ["do"]), {
+      ...more,
+      ask: (prompt) => {
+        if (!prompt.title.includes("「晚了」")) return { answer: Promise.resolve("later"), close: () => {} };
+        asked.push(prompt);
+        return { answer: new Promise<Answer>((r) => (approve = () => r("approve"))), close: () => {} };
+      },
+      log: (line) => logged.push(line),
+    });
+    await wangLaptop.client.postGroupMessage(g.id, { from: codex, body: "@老方的 Claude 帮我挪验签", mentions: [claude] });
+    await until(async () => asked[0]);
+    await fang.call("POST", `/api/groups/${g.id}/stop`, {});
+    approve();
+    await until(async () => logged.some((l) => l.startsWith(`${g.id} 的动手弹框：`) && l.includes("叫停")));
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(asked.length, 1);
   });
 
   // Says it need not reply every time, so only the 每天次数 count.
