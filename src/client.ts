@@ -447,6 +447,17 @@ export class RelayClient {
     return this.call("POST", `/api/groups/${encodeURIComponent(id)}/extra`, { agent });
   }
 
+  // The session the person talks to read the group up to `seq`.
+  async markGroupSeen(id: string, agent: string, seq: number): Promise<void> {
+    await this.call("POST", `/api/groups/${encodeURIComponent(id)}/seen`, { agent, seq });
+  }
+
+  // The groups where someone answered what `agent` said since its front
+  // session last looked, with the newest answer.
+  async unseenGroups(agent: string): Promise<{ id: string; name: string; seq: number }[]> {
+    return (await this.call<{ groups: { id: string; name: string; seq: number }[] }>("GET", `/api/groups/unseen?${new URLSearchParams({ agent })}`)).groups;
+  }
+
   leaveGroup(id: string, agent: string): Promise<{ ok: boolean }> {
     return this.call("POST", `/api/groups/${encodeURIComponent(id)}/leave`, { agent });
   }

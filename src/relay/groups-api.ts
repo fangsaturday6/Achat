@@ -67,6 +67,9 @@ export async function groupsApi(req: IncomingMessage, res: ServerResponse, url: 
     const agents = (url.searchParams.get("agents") ?? "").split(",").filter(Boolean);
     return ok(200, groups.work(caller, agents));
   }
+  if (parts.length === 2 && parts[1] === "unseen" && method === "GET") {
+    return ok(200, { groups: groups.unseen(caller, url.searchParams.get("agent") ?? "") });
+  }
 
   const id = parts[1];
   const action = parts[2];
@@ -152,6 +155,8 @@ export async function groupsApi(req: IncomingMessage, res: ServerResponse, url: 
     case "read":
       groups.markRead(caller, id);
       return ok(200, { ok: true });
+    case "seen":
+      return ok(200, groups.markSeen(caller, id, { agent: str(body, "agent"), seq: num(body, "seq") }));
   }
   return false;
 }

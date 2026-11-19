@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS group_members (
   -- How far its background session has read, and which session.
   read_seq INTEGER NOT NULL DEFAULT 0,
   session TEXT,
+  -- How far its front session, the one its person talks to, looked.
+  seen_seq INTEGER NOT NULL DEFAULT 0,
   joined_at TEXT NOT NULL,
   left_at TEXT,
   PRIMARY KEY (group_id, agent)
@@ -102,6 +104,7 @@ export interface MemberRow {
   joinedSeq: number;
   readSeq: number;
   session: string | null;
+  seenSeq: number;
   joinedAt: string;
   leftAt: string | null;
 }
@@ -169,6 +172,7 @@ function toMember(r: Row): MemberRow {
     joinedSeq: r.joined_seq as number,
     readSeq: r.read_seq as number,
     session: (r.session as string | null) ?? null,
+    seenSeq: r.seen_seq as number,
     joinedAt: r.joined_at as string,
     leftAt: (r.left_at as string | null) ?? null,
   };
@@ -225,9 +229,11 @@ export class GroupStore {
   constructor(private store: Store) {
     this.db = store.db;
     this.db.exec(SCHEMA);
-    // Columns added later; older rows take the defaults (nothing added, nobody told).
+    // Columns added later; older rows take the defaults (nothing added, nobody
+    // told, nothing looked at in front).
     this.addColumn("group_usage", "extra", "INTEGER NOT NULL DEFAULT 0");
     this.addColumn("group_usage", "warned", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumn("group_members", "seen_seq", "INTEGER NOT NULL DEFAULT 0");
   }
 
   private addColumn(table: string, column: string, ddl: string): void {
@@ -301,15 +307,16 @@ export class GroupStore {
     return (this.db.prepare("SELECT * FROM group_members WHERE group_id = ? AND left_at IS NULL ORDER BY joined_at, rowid").all(groupId) as Row[]).map(toMember);
   }
 
-  // Joins, or joins again after leaving, from where the group is now.
+  // Joins, or joins again after leaving, from where the group is now: what
+  // was answered before is no news to its front session.
   addMember(m: { groupId: string; agent: string; owner: string; quota: number; joinedSeq: number }, now: string): void {
     this.db
       .prepare(
-        `INSERT INTO group_members (group_id, agent, owner, quota, joined_seq, joined_at) VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO group_members (group_id, agent, owner, quota, joined_seq, seen_seq, joined_at) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (group_id, agent) DO UPDATE SET owner = excluded.owner, quota = excluded.quota, joined_seq = excluded.joined_seq,
-           joined_at = excluded.joined_at, read_seq = 0, session = NULL, left_at = NULL`,
+           joined_at = excluded.joined_at, read_seq = 0, session = NULL, seen_seq = excluded.seen_seq, left_at = NULL`,
       )
-      .run(m.groupId, m.agent, m.owner, m.quota, m.joinedSeq, now);
+      .run(m.groupId, m.agent, m.owner, m.quota, m.joinedSeq, m.joinedSeq, now);
   }
 
   leaveMember(groupId: string, agent: string, now: string): void {
@@ -325,6 +332,28 @@ export class GroupStore {
     this.db
       .prepare("UPDATE group_members SET read_seq = MAX(read_seq, ?), session = COALESCE(?, session) WHERE group_id = ? AND agent = ?")
       .run(readSeq, session, groupId, agent);
+  }
+
+  // How far an AI's front session looked in a group; it only goes forward.
+  markSeen(groupId: string, agent: string, seq: number): void {
+    this.db.prepare("UPDATE group_members SET seen_seq = MAX(seen_seq, ?) WHERE group_id = ? AND agent = ?").run(seq, groupId, agent);
+  }
+
+  // The groups `agent` is in where, after its front session last looked,
+  // someone else answered a message it wrote (their reply_to is one of its
+  // messages), each with the newest such answer; the latest first.
+  unseenReplies(agent: string): { groupId: string; seq: number }[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT r.group_id, MAX(r.seq) AS seq, MAX(r.id) AS latest FROM group_members m
+           JOIN group_messages r ON r.group_id = m.group_id AND r.seq > m.seen_seq AND r.kind = 'message' AND r.sender IS NOT m.agent
+           JOIN group_messages mine ON mine.group_id = r.group_id AND mine.seq = r.reply_to AND mine.sender = m.agent
+           WHERE m.agent = ? AND m.left_at IS NULL
+           GROUP BY r.group_id ORDER BY latest DESC`,
+        )
+        .all(agent) as Row[]
+    ).map((r) => ({ groupId: r.group_id as string, seq: r.seq as number }));
   }
 
   addInvite(i: Omit<InviteRow, "answered" | "createdAt">, now: string): InviteRow {

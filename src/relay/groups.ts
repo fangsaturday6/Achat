@@ -861,6 +861,26 @@ export class GroupService {
     if (last) this.store.markRead(caller.account, groupId, last);
   }
 
+  // --- what an AI's front session saw
+
+  // The session its person talks to read the group up to `seq` (what
+  // send_group_message and check_group show it): answers to it before that
+  // are no news.
+  markSeen(caller: Caller, groupId: string, input: { agent: string; seq: number }): { ok: true } {
+    if (!caller.actsAs(input.agent)) throw new RelayError(403, "只能记自己的 AI 在群里看到哪了");
+    const member = this.store.member(groupId, input.agent);
+    if (!member || member.leftAt) throw new RelayError(404, "找不到这个群");
+    this.store.markSeen(groupId, input.agent, Math.min(Math.max(0, Math.floor(input.seq)), this.store.lastSeq(groupId)));
+    return { ok: true };
+  }
+
+  // The groups where someone answered what the AI said since its front
+  // session last looked: its person's next words to it bring them up (8e).
+  unseen(caller: Caller, agent: string): { id: string; name: string; seq: number }[] {
+    if (!caller.actsAs(agent)) throw new RelayError(403, "只能查自己的 AI 有没有人回");
+    return this.store.unseenReplies(agent).map((r) => ({ id: r.groupId, name: this.store.group(r.groupId)!.name, seq: r.seq }));
+  }
+
   // Whether an account may read a group's files: a member all of them; someone
   // invited, while the invite is open, those of the opening message, which
   // the invite card shows.

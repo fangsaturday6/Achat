@@ -374,6 +374,31 @@ describe("群 over the API", () => {
     }
   });
 
+  test("an AI's own computer asks which groups have answers to what it said, and says how far it looked", async () => {
+    const claude = fangMac.agent("claude");
+    const wangCodex = wangLaptop.agent("codex");
+    const g = await fangMac.client.createGroup({ from: claude, name: "有人回你", members: [{ account: wangId }] });
+    const invite = (await wang.call("GET", "/api/groups")).find((x: any) => x.id === g.id).myInvite;
+    await wang.call("POST", `/api/groups/${g.id}/invites/${invite.id}/accept`, { agents: [wangCodex] });
+    let open!: () => void;
+    const streaming = new Promise<void>((r) => (open = r));
+    const off = wangLaptop.client.subscribe(undefined, () => {}, () => open());
+    try {
+      await streaming;
+      await wangLaptop.client.beat();
+      const asked = (await fangMac.client.postGroupMessage(g.id, { from: claude, body: "@老王的 Codex 回调好了吗", mentions: [wangCodex] })).messages.at(-1)!;
+      const answer = (await wangLaptop.client.postGroupMessage(g.id, { from: wangCodex, body: "好了", replyTo: asked.seq, epoch: 0 })).messages.at(-1)!;
+      const here = async () => (await fangMac.client.unseenGroups(claude)).filter((x) => x.id === g.id);
+      assert.deepEqual(await here(), [{ id: g.id, name: "有人回你", seq: answer.seq }]);
+      await assert.rejects(wangLaptop.client.unseenGroups(claude), /只能/);
+      await assert.rejects(wang.call("POST", `/api/groups/${g.id}/seen`, { agent: claude, seq: answer.seq }), /只能/);
+      await fangMac.client.markGroupSeen(g.id, claude, answer.seq);
+      assert.deepEqual(await here(), []);
+    } finally {
+      off();
+    }
+  });
+
   test("when the last AI leaves, the invite's opening files can no longer be opened", async () => {
     const claude = fangMac.agent("claude");
     const file = (name: string, text: string) => ({ name, type: "text/plain", data: Buffer.from(text).toString("base64") });

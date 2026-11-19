@@ -58,3 +58,22 @@ test("a database from before 加一份 keeps each day's count, with nothing adde
   new GroupStore(store); // opening again changes nothing
   assert.equal(groups.extra("g_1", "b", "2026-11-18"), 60);
 });
+
+test("how far an AI's front session looked only goes forward, and starts over from where it joins", () => {
+  const store = new Store(":memory:");
+  store.db.exec(`
+    CREATE TABLE group_members (group_id TEXT NOT NULL, agent TEXT NOT NULL, owner TEXT NOT NULL, quota INTEGER NOT NULL, joined_seq INTEGER NOT NULL,
+      read_seq INTEGER NOT NULL DEFAULT 0, session TEXT, joined_at TEXT NOT NULL, left_at TEXT, PRIMARY KEY (group_id, agent));
+  `);
+  const groups = new GroupStore(store);
+  const now = "2026-11-18T02:00:00.000Z";
+  groups.createGroup({ id: "g_1", name: "前台", owner: "fang" }, now);
+  groups.addMember({ groupId: "g_1", agent: "a", owner: "fang", quota: 30, joinedSeq: 0 }, now);
+  assert.equal(groups.member("g_1", "a")!.seenSeq, 0);
+  groups.markSeen("g_1", "a", 3);
+  groups.markSeen("g_1", "a", 2);
+  assert.equal(groups.member("g_1", "a")!.seenSeq, 3);
+  groups.leaveMember("g_1", "a", now);
+  groups.addMember({ groupId: "g_1", agent: "a", owner: "fang", quota: 30, joinedSeq: 7 }, now);
+  assert.equal(groups.member("g_1", "a")!.seenSeq, 7, "what was answered while it was out is not news");
+});

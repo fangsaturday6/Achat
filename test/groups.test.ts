@@ -650,6 +650,34 @@ describe("groups", () => {
     assert.equal(told("group.mention").length, 1, "an @ of an AI wakes it; no person is told");
   });
 
+  test("an AI's front session hears of the groups where someone answered what it said, until it looks again", () => {
+    const g = groups.createGroup(computer("fang"), { from: "fang/claude", name: "前台", members: [{ agent: "fang/codex" }, { account: "wang" }] });
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    const unseen = (agent: string) => groups.unseen(computer("fang"), agent);
+
+    // Someone else's @所有人 answers nothing it said.
+    groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "@所有人 大家好", mentions: [ALL] });
+    const asked = groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "@老王的 Codex 回调好了吗", mentions: ["wang/codex"] }).messages.at(-1)!;
+    assert.deepEqual(unseen("fang/claude"), []);
+    const answer = groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "好了", replyTo: asked.seq, epoch: 0 }).messages.at(-1)!;
+    assert.deepEqual(unseen("fang/claude"), [{ id: g.id, name: "前台", seq: answer.seq }]);
+    assert.deepEqual(unseen("fang/codex"), [], "only answers to what it said itself");
+
+    // Only the AI's own computer asks, or says how far it looked.
+    assert.throws(() => groups.unseen(computer("wang"), "fang/claude"), /只能/);
+    assert.throws(() => groups.markSeen(web("fang"), g.id, { agent: "fang/claude", seq: answer.seq }), /只能/);
+    assert.deepEqual(groups.markSeen(computer("fang"), g.id, { agent: "fang/claude", seq: answer.seq }), { ok: true });
+    assert.deepEqual(unseen("fang/claude"), []);
+    // How far it looked only goes forward.
+    groups.markSeen(computer("fang"), g.id, { agent: "fang/claude", seq: 1 });
+    assert.deepEqual(unseen("fang/claude"), []);
+    // Gone from the group: nothing more of it.
+    const again = groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "@老王的 Codex 还有呢", mentions: ["wang/codex"] }).messages.at(-1)!;
+    groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "没了", replyTo: again.seq, epoch: 0 });
+    groups.leave(computer("fang"), g.id, "fang/claude");
+    assert.deepEqual(unseen("fang/claude"), []);
+  });
+
   test("waiting ends at the group's next change", async () => {
     const g = start();
     const waiting = groups.waitFor(g.id, 5000);
