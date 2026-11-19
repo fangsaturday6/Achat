@@ -168,6 +168,17 @@ const MEMBERS = [
   { agent: "c/codex", name: "王闯的 Codex", owner: "chuang", canReceive: true, online: true },
 ];
 
+test("the line under a message says 动手 too: 正在动手 turns like 正在看, 等主人同意 waits still, and 叫停 shows while an AI is at work", () => {
+  const names = { a: "老王的 Claude", d: "王闯的 Codex" };
+  const r = (agent: string, state: string) => ({ agent, state, reason: null });
+  const both = page.receiptLine([r("d", "acting"), r("a", "asking")], names);
+  assert.deepEqual([both.text, both.reading], ["王闯的 Codex 正在动手… · 老王的 Claude 等主人同意", true]);
+  assert.equal(page.receiptLine([r("a", "asking")], names).reading, false);
+  const msg = (state: string) => ({ receipts: [{ agent: "c/codex", state, reason: null }] });
+  assert.equal(page.isAnswering({ status: "open", messages: [msg("acting")] }), true);
+  assert.equal(page.isAnswering({ status: "open", messages: [msg("asking")] }), false);
+});
+
 test("the person's own AIs in a group, or of theirs anywhere, are those of their account (isOwn)", () => {
   assert.equal(isOwn(MEMBERS[0], "fang"), true);
   assert.equal(isOwn(MEMBERS[1], "fang"), false);

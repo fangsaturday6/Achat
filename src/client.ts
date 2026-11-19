@@ -3,7 +3,7 @@ import type { OutgoingFile } from "./attachments.js";
 import type { AgentClient, AgentConfig } from "./config.js";
 import { signRequest, type DeviceKey } from "./device.js";
 import type { AgentModels, Effort, ModelOffer } from "./models.js";
-import type { GroupDetail, GroupEvent, GroupSummary, GroupTarget, GroupWork, RelayEvent, Scope, ThreadDetail, ThreadMode, ThreadStatus, ThreadSummary } from "./types.js";
+import type { GroupAct, GroupDetail, GroupEvent, GroupSummary, GroupTarget, GroupWork, RelayEvent, Scope, ThreadDetail, ThreadMode, ThreadStatus, ThreadSummary } from "./types.js";
 
 // A pick as sent: a model's id or 推理档位, or "default" for the next one down.
 export interface PickBody {
@@ -460,6 +460,20 @@ export class RelayClient {
 
   leaveGroup(id: string, agent: string): Promise<{ ok: boolean }> {
     return this.call("POST", `/api/groups/${encodeURIComponent(id)}/leave`, { agent });
+  }
+
+  // 动手 in a group (8n): asked for by the computer of the AI asked, once it
+  // judged the words; approved or declined once its person answered the dialog.
+  requestGroupAct(id: string, doer: string, seq: number): Promise<{ act: GroupAct; run: boolean }> {
+    return this.call("POST", `/api/groups/${encodeURIComponent(id)}/acts`, { doer, seq });
+  }
+
+  approveGroupAct(id: string, actId: string): Promise<GroupAct> {
+    return this.call("POST", `/api/groups/${encodeURIComponent(id)}/acts/${encodeURIComponent(actId)}/approve`, {});
+  }
+
+  declineGroupAct(id: string, actId: string): Promise<GroupAct> {
+    return this.call("POST", `/api/groups/${encodeURIComponent(id)}/acts/${encodeURIComponent(actId)}/decline`, {});
   }
 
   // What the AIs here were woken for and have not answered; an @ missed while

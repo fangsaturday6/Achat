@@ -410,6 +410,74 @@ describe("群 over the API", () => {
     assert.equal((await wang.call("GET", "/api/groups")).some((x: any) => x.id === g.id), false);
   });
 
+  test("动手 is asked for, approved and declined only by the computer of the AI asked, never on the web", async () => {
+    const claude = fangMac.agent("claude");
+    const wangCodex = wangLaptop.agent("codex");
+    const g = await fangMac.client.createGroup({ from: claude, name: "动手接口", members: [{ account: wangId }] });
+    const [invited] = (await wang.call("GET", "/api/groups")).filter((s: any) => s.id === g.id);
+    await wang.call("POST", `/api/groups/${g.id}/invites/${invited.myInvite.id}/accept`, { agents: [wangCodex] });
+    // 老方's computer is on, so its Claude is woken.
+    let open!: () => void;
+    const streaming = new Promise<void>((r) => (open = r));
+    const off = fangMac.client.subscribe(undefined, () => {}, () => open());
+    try {
+      await streaming;
+      await fangMac.client.beat();
+      const asked = await wangLaptop.client.postGroupMessage(g.id, { from: wangCodex, body: "@老方的 Claude 帮我改一下", mentions: [claude] });
+      const seq = asked.messages.at(-1)!.seq;
+      await assert.rejects(wangLaptop.client.requestGroupAct(g.id, claude, seq), /只有被请动手的 AI 的电脑/);
+      await assert.rejects(fang.call("POST", `/api/groups/${g.id}/acts`, { doer: claude, seq }), /只有被请动手的 AI 的电脑/);
+      const { act, run } = await fangMac.client.requestGroupAct(g.id, claude, seq);
+      assert.deepEqual([run, act.status, act.asker, act.askSeq], [false, "asking", wangCodex, seq]);
+      assert.equal((await fangMac.client.groupWorkFor(g.id, claude))!.act!.id, act.id);
+
+      await assert.rejects(fang.call("POST", `/api/groups/${g.id}/acts/${act.id}/approve`, {}), /只有被请动手的 AI 的电脑/);
+      const approved = await fangMac.client.approveGroupAct(g.id, act.id);
+      assert.deepEqual([approved.status, approved.roundsUsed], ["active", 1]);
+      const seen = await fang.call("GET", `/api/groups/${g.id}`);
+      assert.equal(seen.messages.find((m: any) => m.seq === seq).receipts[0].state, "acting");
+
+      const byPerson = await wang.call("POST", `/api/groups/${g.id}/messages`, { from: `p_${wangId}`, body: "@老方的 Claude 也帮我改", mentions: [claude] });
+      const other = await fangMac.client.requestGroupAct(g.id, claude, byPerson.messages.at(-1).seq);
+      assert.notEqual(other.act.id, act.id);
+      assert.equal((await fangMac.client.declineGroupAct(g.id, other.act.id)).status, "declined");
+      await assert.rejects(fangMac.client.declineGroupAct(g.id, other.act.id), /已经处理过了/);
+    } finally {
+      off();
+    }
+  });
+
+  test("动手's result for a friend who asked in person tells that person alone, as their own AI calling them would", async () => {
+    const claude = fangMac.agent("claude");
+    const wangCodex = wangLaptop.agent("codex");
+    const g = await fangMac.client.createGroup({ from: claude, name: "结果给本人", members: [{ account: wangId }] });
+    const [invited] = (await wang.call("GET", "/api/groups")).filter((s: any) => s.id === g.id);
+    await wang.call("POST", `/api/groups/${g.id}/invites/${invited.myInvite.id}/accept`, { agents: [wangCodex] });
+    let open!: () => void;
+    const streaming = new Promise<void>((r) => (open = r));
+    const off = fangMac.client.subscribe(undefined, () => {}, () => open());
+    const onFang = await watch(fang);
+    const onWang = await watch(wang);
+    try {
+      await streaming;
+      await fangMac.client.beat();
+      const asked = await wang.call("POST", `/api/groups/${g.id}/messages`, { from: `p_${wangId}`, body: "@老方的 Claude 帮我改一下", mentions: [claude] });
+      const seq = asked.messages.at(-1).seq;
+      const { act } = await fangMac.client.requestGroupAct(g.id, claude, seq);
+      await fangMac.client.approveGroupAct(g.id, act.id);
+      // An AI cannot @ a friend's person: the words say so, and the event tells him.
+      const result = (await fangMac.client.postGroupMessage(g.id, { from: claude, body: "@老王 改好了", replyTo: seq, epoch: g.epoch })).messages.at(-1)!;
+      const told = await until(async () => onWang.events.find((e) => e.groupId === g.id && e.type === "group.mention"));
+      assert.deepEqual(told, { type: "group.mention", groupId: g.id, members: [`p_${wangId}`], seq: result.seq });
+      await quiet();
+      assert.ok(!onFang.events.some((e) => e.groupId === g.id && e.type === "group.mention"), "nobody else is told");
+    } finally {
+      off();
+      onFang.stop();
+      onWang.stop();
+    }
+  });
+
 });
 
 test("someone newly invited into a group is emailed as for a request: the opening words, a link to the group, a way to turn it off; three a day from one person", async () => {

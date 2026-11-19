@@ -1,6 +1,6 @@
 import type { NewFile } from "../attachments.js";
 import { isEffort, type Effort } from "../models.js";
-import type { Group, GroupMessage, GroupStatus, Receipt, ReceiptState } from "../types.js";
+import type { Group, GroupAct, GroupActStatus, GroupMessage, GroupStatus, Receipt, ReceiptState } from "../types.js";
 import type { Store } from "./store.js";
 
 // 群（8n）: tables of their own beside the threads', in the same file. A
@@ -94,6 +94,23 @@ CREATE TABLE IF NOT EXISTS group_reads (
   seq INTEGER NOT NULL,
   PRIMARY KEY (reader, group_id)
 );
+-- 动手 asked for in a group: who asked which AI, and how far it went. One
+-- yes covers the same asker's requests for 10 rounds.
+CREATE TABLE IF NOT EXISTS group_acts (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES chat_groups(id),
+  -- An AI, or a person's seat.
+  asker TEXT NOT NULL,
+  doer TEXT NOT NULL,
+  status TEXT NOT NULL,
+  max_rounds INTEGER NOT NULL,
+  rounds_used INTEGER NOT NULL DEFAULT 0,
+  -- The latest message that asked.
+  ask_seq INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS group_acts_by_doer ON group_acts (group_id, doer, status);
 `;
 
 export interface MemberRow {
@@ -221,6 +238,27 @@ function toMessage(r: Row): GroupMessage {
     effort: isEffort(r.effort) ? r.effort : null,
     createdAt: r.created_at as string,
   };
+}
+
+function toAct(r: Row): GroupAct {
+  return {
+    id: r.id as string,
+    groupId: r.group_id as string,
+    asker: r.asker as string,
+    doer: r.doer as string,
+    status: r.status as GroupActStatus,
+    maxRounds: r.max_rounds as number,
+    roundsUsed: r.rounds_used as number,
+    askSeq: r.ask_seq as number,
+    createdAt: r.created_at as string,
+    updatedAt: r.updated_at as string,
+  };
+}
+
+export interface GroupActPatch {
+  status?: GroupActStatus;
+  roundsUsed?: number;
+  askSeq?: number;
 }
 
 export class GroupStore {
@@ -549,5 +587,57 @@ export class GroupStore {
     this.db
       .prepare("INSERT INTO group_reads (reader, group_id, seq) VALUES (?, ?, ?) ON CONFLICT (reader, group_id) DO UPDATE SET seq = MAX(seq, excluded.seq)")
       .run(reader, groupId, seq);
+  }
+
+  addAct(a: Omit<GroupAct, "createdAt" | "updatedAt">, now: string): GroupAct {
+    this.db
+      .prepare(
+        `INSERT INTO group_acts (id, group_id, asker, doer, status, max_rounds, rounds_used, ask_seq, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(a.id, a.groupId, a.asker, a.doer, a.status, a.maxRounds, a.roundsUsed, a.askSeq, now, now);
+    return this.act(a.id)!;
+  }
+
+  act(id: string): GroupAct | null {
+    const r = this.db.prepare("SELECT * FROM group_acts WHERE id = ?").get(id) as Row | undefined;
+    return r ? toAct(r) : null;
+  }
+
+  // What `asker` asked of `doer` that still waits for its person or is under way: the latest.
+  openAct(groupId: string, asker: string, doer: string): GroupAct | null {
+    const r = this.db
+      .prepare("SELECT * FROM group_acts WHERE group_id = ? AND asker = ? AND doer = ? AND status IN ('asking', 'active') ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      .get(groupId, asker, doer) as Row | undefined;
+    return r ? toAct(r) : null;
+  }
+
+  updateAct(id: string, patch: GroupActPatch, now: string): GroupAct {
+    const sets = ["updated_at = ?"];
+    const params: (string | number)[] = [now];
+    if (patch.status !== undefined) {
+      sets.push("status = ?");
+      params.push(patch.status);
+    }
+    if (patch.roundsUsed !== undefined) {
+      sets.push("rounds_used = ?");
+      params.push(patch.roundsUsed);
+    }
+    if (patch.askSeq !== undefined) {
+      sets.push("ask_seq = ?");
+      params.push(patch.askSeq);
+    }
+    params.push(id);
+    this.db.prepare(`UPDATE group_acts SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+    return this.act(id)!;
+  }
+
+  // Every act of a group still waiting or under way ends, such as at 叫停;
+  // with `doer`, only that AI's, such as when it leaves.
+  endActs(groupId: string, status: GroupActStatus, now: string, doer?: string): void {
+    const only = doer === undefined ? "" : " AND doer = ?";
+    this.db
+      .prepare(`UPDATE group_acts SET status = ?, updated_at = ? WHERE group_id = ? AND status IN ('asking', 'active')${only}`)
+      .run(status, now, groupId, ...(doer === undefined ? [] : [doer]));
   }
 }

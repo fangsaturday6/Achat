@@ -206,8 +206,10 @@ export const GROUP_STATUS_LABELS: Record<GroupStatus, string> = {
 };
 
 // What became of an AI a message woke. The line under the message shows
-// every state but "replied": the reply itself is right below.
-export type ReceiptState = "reading" | "replied" | "passed" | "offline" | "quota" | "cannot" | "stopped" | "failed";
+// every state but "replied": the reply itself is right below. "asking": it
+// was asked to 动手 and waits for its person to say yes on its computer;
+// "acting": 动手 is under way, until the result comes back to the group.
+export type ReceiptState = "reading" | "replied" | "passed" | "offline" | "quota" | "cannot" | "stopped" | "failed" | "asking" | "acting";
 
 export const RECEIPT_LABELS: Record<ReceiptState, string> = {
   reading: "正在看",
@@ -218,6 +220,8 @@ export const RECEIPT_LABELS: Record<ReceiptState, string> = {
   cannot: "还不能接收",
   stopped: "已叫停",
   failed: "没答上",
+  asking: "等主人同意",
+  acting: "正在动手",
 };
 
 // "@所有人" in a message's mentions.
@@ -338,6 +342,31 @@ export interface GroupWork {
   names: Record<string, string>;
   // Its own person, whom it may call with "@" and this name.
   owner: { seat: string; name: string };
+  // What the one who wrote `wake` asked of this AI, still waiting for its
+  // person or under way; null when they asked it to do nothing.
+  act: GroupAct | null;
+}
+
+// 动手 in a group (8n): one yes from the person lets `asker` have `doer`
+// work for this many of its requests.
+export const GROUP_ACT_ROUNDS = 10;
+
+export type GroupActStatus = "asking" | "active" | "declined" | "done" | "stopped";
+
+export interface GroupAct {
+  id: string;
+  groupId: string;
+  // The AI, or a person's seat, that asked.
+  asker: string;
+  // The AI asked, which works on its computer.
+  doer: string;
+  status: GroupActStatus;
+  maxRounds: number;
+  roundsUsed: number;
+  // The latest message that asked: the result answers it (replyTo).
+  askSeq: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // Sent on the same event stream as threads. `members`: every AI in the group

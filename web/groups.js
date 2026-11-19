@@ -18,7 +18,12 @@ export const RECEIPT_LABELS = {
   cannot: "还不能接收",
   stopped: "已叫停",
   failed: "没答上",
+  asking: "等主人同意",
+  acting: "正在动手",
 };
+
+// An AI on it right now, reading or 动手: its line turns, and 叫停 shows.
+const ON_IT = new Set(["reading", "acting"]);
 
 // GROUP_STATUS_LABELS in src/types.ts.
 export const GROUP_STATUS_LABELS = { open: "进行中", stopped: "已叫停", dissolved: "已解散" };
@@ -128,8 +133,9 @@ export function timeBreaks(messages, gapMs = 5 * 60_000) {
 }
 
 // The gray line under a message: the AIs it called on that did not reply,
-// those in the same state together; null once every one replied. `open`: a
-// click has more to show, for more than one AI or a reason.
+// those in the same state together; null once every one replied. `reading`:
+// some AI is on it now (正在看…, 正在动手…), so a spinner goes first. `open`:
+// a click has more to show, for more than one AI or a reason.
 export function receiptLine(receipts, names) {
   const items = receipts
     .filter((r) => r.state !== "replied")
@@ -140,10 +146,10 @@ export function receiptLine(receipts, names) {
   const text = [...byState]
     .map(([state, who]) => {
       const named = who.length > 2 ? cjk(who[0], `等 ${who.length} 个 AI`) : who.join("、");
-      return `${named} ${state === "reading" ? "正在看…" : RECEIPT_LABELS[state]}`;
+      return `${named} ${RECEIPT_LABELS[state]}${ON_IT.has(state) ? "…" : ""}`;
     })
     .join(" · ");
-  return { text, reading: byState.has("reading"), open: items.length > 1 || items.some((i) => i.reason), items };
+  return { text, reading: [...byState.keys()].some((s) => ON_IT.has(s)), open: items.length > 1 || items.some((i) => i.reason), items };
 }
 
 // Who the person can @, as the list under "@" shows them: 所有人 first, then
@@ -265,9 +271,9 @@ export function sentByMe(sender, g, me, agents) {
   return (g.names[sender] ?? "").startsWith("我的");
 }
 
-// Some AI is reading a message right now: 叫停 shows.
+// Some AI is reading a message, or 动手, right now: 叫停 shows.
 export function isAnswering(g) {
-  return g.status === "open" && g.messages.some((m) => m.receipts.some((r) => r.state === "reading"));
+  return g.status === "open" && g.messages.some((m) => m.receipts.some((r) => ON_IT.has(r.state)));
 }
 
 // What 群设置 shows the person `me`: 群名 to change and 解散群 for 群主,

@@ -3,7 +3,7 @@ import { beforeEach, describe, test } from "node:test";
 import type { AgentConfig } from "../src/config.js";
 import { GroupService, type Caller, type GroupDirectory } from "../src/relay/groups.js";
 import { Store } from "../src/relay/store.js";
-import { ALL, type GroupEvent } from "../src/types.js";
+import { ALL, RECEIPT_LABELS, type GroupEvent } from "../src/types.js";
 
 // 老方 has Claude and Codex; 老王 has Codex and Claude; 小林 has Claude,
 // 豆包 and Codex; 王闯 has Codex. 老方 is friends with 老王 and 小林; 王闯 only with 老王.
@@ -676,6 +676,121 @@ describe("groups", () => {
     groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body: "没了", replyTo: again.seq, epoch: 0 });
     groups.leave(computer("fang"), g.id, "fang/claude");
     assert.deepEqual(unseen("fang/claude"), []);
+  });
+
+  test("动手: another person's AI asks, its person approves on the computer, and the same asker's next 9 go on without asking", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    const ask = (body: string) => groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body, mentions: ["fang/claude"] }).messages.at(-1)!;
+    const request = (seq: number) => groups.requestAct(computer("fang"), g.id, { doer: "fang/claude", seq });
+    const receipt = (seq: number) => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts.find((r) => r.agent === "fang/claude")!;
+    const lastNote = () => groups.detail(web("fang"), g.id).messages.filter((m) => m.kind === "system").at(-1)!.body;
+    const result = (body: string, replyTo: number) => groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body, mentions: ["wang/codex"], replyTo, epoch: 0 });
+
+    const first = ask("@老方的 Claude 把验签挪到网关");
+    assert.throws(() => groups.requestAct(computer("wang"), g.id, { doer: "fang/claude", seq: first.seq }), /只有被请动手的 AI 的电脑/);
+    const asked = request(first.seq);
+    assert.equal(asked.run, false);
+    assert.deepEqual(
+      [asked.act.status, asked.act.asker, asked.act.doer, asked.act.askSeq, asked.act.roundsUsed, asked.act.maxRounds],
+      ["asking", "wang/codex", "fang/claude", first.seq, 0, 10],
+    );
+    assert.deepEqual([receipt(first.seq).state, RECEIPT_LABELS.asking], ["asking", "等主人同意"]);
+    // Waiting on its person, it is what its computer picks up again when it starts.
+    assert.deepEqual(groups.work(computer("fang"), ["fang/claude"]), [{ groupId: g.id, agent: "fang/claude", seq: first.seq }]);
+    assert.equal(groups.workFor(computer("fang"), g.id, "fang/claude")!.act!.id, asked.act.id);
+
+    assert.throws(() => groups.approveAct(web("fang"), g.id, asked.act.id), /只有被请动手的 AI 的电脑/);
+    assert.throws(() => groups.approveAct({ ...computer("fang"), approves: false }, g.id, asked.act.id), /主人在电脑的弹框里同意/);
+    const approved = groups.approveAct(computer("fang"), g.id, asked.act.id);
+    assert.deepEqual([approved.status, approved.roundsUsed], ["active", 1]);
+    assert.deepEqual([receipt(first.seq).state, RECEIPT_LABELS.acting], ["acting", "正在动手"]);
+    assert.equal(lastNote(), "老方的 Claude 开始动手 · 10 轮");
+    // Under way, it is what its computer goes on with, one round at a time, also after it starts again; never answered in the background.
+    assert.deepEqual(groups.work(computer("fang"), ["fang/claude"]), [{ groupId: g.id, agent: "fang/claude", seq: first.seq }]);
+    assert.equal(groups.workFor(computer("fang"), g.id, "fang/claude")!.act!.status, "active");
+    assert.throws(() => groups.approveAct(computer("fang"), g.id, asked.act.id), /已经处理过了/);
+
+    // The result goes back to the group as a message @ing whoever asked; it answers the request.
+    result("@老王的 Codex 改好了", first.seq);
+    assert.equal(receipt(first.seq).state, "replied");
+
+    const second = ask("@老方的 Claude 再加个测试");
+    const more = request(second.seq);
+    assert.deepEqual([more.run, more.act.id, more.act.roundsUsed, more.act.askSeq], [true, asked.act.id, 2, second.seq]);
+    assert.equal(receipt(second.seq).state, "acting");
+    assert.equal(request(second.seq).act.roundsUsed, 2, "the same request again is not another round");
+
+    // Two that came together may be judged newest first: each is a round, the act answers the newest, and a retry counts nothing.
+    const [third, fourth] = [ask("@老方的 Claude 第 3 轮"), ask("@老方的 Claude 第 4 轮")];
+    assert.deepEqual([request(fourth.seq).act.roundsUsed, request(third.seq).act.askSeq, request(third.seq).act.roundsUsed], [3, fourth.seq, 4]);
+
+    let latest = fourth;
+    for (let round = 5; round <= 10; round++) {
+      latest = ask(`@老方的 Claude 第 ${round} 轮`);
+      assert.equal(request(latest.seq).run, true);
+    }
+    result("@老王的 Codex 都做好了", latest.seq);
+    assert.equal(receipt(second.seq).state, "replied", "one result answers every round of the act it read");
+    assert.equal(lastNote(), "老方的 Claude 动手 10 轮用完了");
+    assert.equal(groups.store.act(asked.act.id)!.status, "done");
+
+    const again = request(ask("@老方的 Claude 再改一处").seq);
+    assert.equal(again.run, false);
+    assert.notEqual(again.act.id, asked.act.id);
+  });
+
+  test("动手: each asker is approved on its own; 拒绝 says why; one's own AIs and person need none; leaving, 叫停 and 解散 end it", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    const ask = (caller: Caller, from: string, doer = "fang/claude") => groups.postMessage(caller, g.id, { from, body: "动手改一下", mentions: [doer] }).messages.at(-1)!.seq;
+    const request = (seq: number, doer = "fang/claude") => groups.requestAct(computer("fang"), g.id, { doer, seq });
+    const receipt = (seq: number, doer = "fang/claude") => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts.find((r) => r.agent === doer)!;
+    const lastNote = () => groups.detail(web("fang"), g.id).messages.filter((m) => m.kind === "system").at(-1)!.body;
+
+    const byCodex = ask(computer("wang"), "wang/codex");
+    const a = request(byCodex);
+    const byPerson = ask(web("wang"), "p_wang");
+    const b = request(byPerson);
+    assert.notEqual(b.act.id, a.act.id, "老王本人 and his Codex are asked for apart");
+    assert.deepEqual([b.run, b.act.asker], [false, "p_wang"]);
+    assert.equal(groups.declineAct(computer("fang"), g.id, b.act.id).status, "declined");
+    assert.deepEqual(receipt(byPerson), { agent: "fang/claude", state: "passed", reason: "主人没同意动手" });
+
+    // Between one person's own: at once.
+    const byOwnAi = ask(computer("fang"), "fang/codex");
+    const own = request(byOwnAi);
+    assert.deepEqual([own.run, own.act.status, own.act.roundsUsed], [true, "active", 1]);
+    assert.equal(receipt(byOwnAi).state, "acting");
+    assert.equal(lastNote(), "老方的 Claude 开始动手 · 10 轮");
+    assert.equal(request(ask(web("fang"), "p_fang")).run, true, "nor when 老方 himself asks");
+    // A conversation that cannot open says so under what asked for it.
+    groups.fail(computer("fang"), g.id, { agent: "fang/claude", seq: byOwnAi, reason: "打不开动手的对话：claude 没有登录" });
+    assert.deepEqual(receipt(byOwnAi), { agent: "fang/claude", state: "failed", reason: "打不开动手的对话：claude 没有登录" });
+
+    // An AI that leaves ends what was asked of it.
+    const ofCodex = ask(computer("wang"), "wang/codex", "fang/codex");
+    const c = request(ofCodex, "fang/codex");
+    groups.leave(web("fang"), g.id, "fang/codex");
+    assert.deepEqual(receipt(ofCodex, "fang/codex"), { agent: "fang/codex", state: "failed", reason: "不在群里了" });
+    assert.equal(groups.store.act(c.act.id)!.status, "stopped");
+
+    // 叫停 ends what waits for its person and what is under way; a late result is refused.
+    const underWay = ask(web("fang"), "p_fang");
+    assert.equal(request(underWay).run, true);
+    groups.stop(web("wang"), g.id);
+    assert.deepEqual([receipt(byCodex).state, receipt(underWay).state], ["stopped", "stopped"]);
+    assert.deepEqual([groups.store.act(a.act.id)!.status, groups.store.act(own.act.id)!.status], ["stopped", "stopped"]);
+    assert.throws(() => request(byCodex), /叫停/);
+    groups.resume(web("wang"), g.id);
+    assert.throws(() => groups.approveAct(computer("fang"), g.id, a.act.id), /已经处理过了/);
+    assert.throws(() => groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "做好了", replyTo: underWay, epoch: 1 }), /叫停/);
+
+    const late = ask(computer("wang"), "wang/codex");
+    const d = request(late);
+    groups.dissolve(web("fang"), g.id);
+    assert.equal(receipt(late).state, "stopped");
+    assert.equal(groups.store.act(d.act.id)!.status, "stopped");
   });
 
   test("waiting ends at the group's next change", async () => {

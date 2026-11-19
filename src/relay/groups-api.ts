@@ -96,6 +96,12 @@ export async function groupsApi(req: IncomingMessage, res: ServerResponse, url: 
     if (parts[4] === "decline") return ok(200, groups.declineInvite(caller, id, parts[3]));
     return false;
   }
+  // 动手: only the computer of the AI asked calls these, the last two once its person answered the dialog.
+  if (action === "acts" && parts.length === 5) {
+    if (parts[4] === "approve") return ok(200, groups.approveAct(caller, id, parts[3]));
+    if (parts[4] === "decline") return ok(200, groups.declineAct(caller, id, parts[3]));
+    return false;
+  }
   if (parts.length !== 3) return false;
   switch (action) {
     case "messages": {
@@ -118,6 +124,8 @@ export async function groupsApi(req: IncomingMessage, res: ServerResponse, url: 
         }),
       );
     }
+    case "acts":
+      return ok(200, groups.requestAct(caller, id, { doer: str(body, "doer"), seq: num(body, "seq") }));
     case "invites":
       return ok(200, groups.invite(caller, id, { from: str(body, "from"), members: targetsOf(body) }));
     case "pass":
