@@ -7,13 +7,14 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { RelayClientError, type RelayClient } from "../src/client.js";
 import type { AchatConfig } from "../src/config.js";
+import { userPromptHook } from "../src/hook.js";
 import { createMcpServer } from "../src/mcp/server.js";
 import type { RunningRelay } from "../src/relay/server.js";
 import type { Answer, ApprovalPrompt } from "../src/sidecar/dialog.js";
 import { doerSystemPrompt, Sidecar } from "../src/sidecar/sidecar.js";
 import { actKey, backgroundId, claudeConfigFile, ClaudeTaskOpener, claudeTaskArgs, codexSessionId, codexTaskArgs, CodexTaskOpener, TaskBook, taskDir, taskFor, trustFolder, type TaskOpener, type TaskRecord, type TaskStart } from "../src/sidecar/tasks.js";
 import { codexCommand } from "../src/which.js";
-import { CLAUDE, CODEX, JudgingRunner, ScriptedRunner, startTestRelay, until } from "./helpers.js";
+import { CLAUDE, CODEX, JudgingRunner, ScriptedRunner, someArgs, startTestRelay, until } from "./helpers.js";
 
 // Achat's MCP server marks what the 动手 conversation was handed in ACHAT_HOME.
 process.env.ACHAT_HOME = mkdtempSync(join(tmpdir(), "achat-home-"));
@@ -26,9 +27,10 @@ class FakeOpener implements TaskOpener {
   }
 }
 
-async function mcpClient(relayClient: RelayClient, agentId: string, webUrl: string, waitSeconds = 10): Promise<Client> {
+// `task`: the 动手 it does, as a 动手 conversation's MCP server finds in the TaskBook.
+async function mcpClient(relayClient: RelayClient, agentId: string, webUrl: string, waitSeconds = 10, task: { key: string; given: number } | null = null): Promise<Client> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-  await createMcpServer({ connection: () => ({ client: relayClient, agentId, webUrl, mode: "local" }), waitSeconds }).connect(serverSide);
+  await createMcpServer({ connection: () => ({ client: relayClient, agentId, webUrl, mode: "local" }), waitSeconds, task: () => task }).connect(serverSide);
   const client = new Client({ name: "test", version: "1" });
   await client.connect(clientSide);
   return client;
@@ -218,6 +220,40 @@ describe("动手 on the receiving computer", () => {
     await client.postMessage(t.id, { from: CLAUDE, body: "写好了" });
     assert.match(textOf(await upgrading), /写好了/);
   });
+});
+
+test("a 动手 conversation has only the tools it hands its work back with: asking the person's other AIs, or anything else for them, is the person's to do", async () => {
+  // Its own relay: what it asks of nobody is counted.
+  const { relay, client } = await startTestRelay();
+  try {
+    const t = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "改脚本", message: "改一下", mode: "do" });
+    await client.approve(t.id);
+    const doer = await mcpClient(client, CLAUDE, relay.url, 1, { key: t.id, given: 0 });
+    const threads = (await client.listThreads({ agent: CLAUDE })).length;
+    const { tools } = await doer.listTools();
+    const handsBack = ["send_message", "check_thread"];
+    for (const name of [...handsBack, "send_request", "send_group_message", "create_group", "review_pending"]) assert.ok(tools.some((tool) => tool.name === name), name);
+    for (const tool of tools.filter((tool) => !handsBack.includes(tool.name))) {
+      const refused = await doer.callTool({ name: tool.name, arguments: someArgs(tool.inputSchema) });
+      assert.equal(refused.isError, true, tool.name);
+      assert.equal(
+        textOf(refused),
+        `你在替协作 ${t.id} 动手，不能用 ${tool.name}：这件事要主人来做（在动手文件夹以外的会话里），需要主人做的写进结果，用 send_message（thread_id: ${t.id}）交回。`,
+      );
+    }
+    assert.equal((await client.listThreads({ agent: CLAUDE })).length, threads, "it asked nobody");
+    // What it hands the work back with still works, for the thread it works for.
+    assert.match(textOf(await doer.callTool({ name: "check_thread", arguments: { thread_id: t.id } })), new RegExp(`^协作 ${t.id}：改脚本`));
+    const elsewhere = await doer.callTool({ name: "send_message", arguments: { thread_id: "t_other", message: "好了" } });
+    assert.equal(textOf(elsewhere), `你在替协作 ${t.id} 动手，只能在这条协作里交回结果（thread_id: ${t.id}）。`);
+    assert.match(textOf(await doer.callTool({ name: "send_message", arguments: { thread_id: t.id, message: "改好了" } })), /^已交回给/);
+    // Nor is it told to have requests approved: that is the person's, in their own session.
+    await client.createRequest({ from: CODEX, to: CLAUDE, topic: "另一件", message: "看看" });
+    assert.match((await userPromptHook(client, CLAUDE)) ?? "", /有 1 个待批准的请求/);
+    assert.equal(await userPromptHook(client, CLAUDE, { task: t.id }), null);
+  } finally {
+    await relay.close();
+  }
 });
 
 test("the task's folder is named after the topic, and another thread with the same topic gets its own", () => {

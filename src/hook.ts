@@ -8,8 +8,9 @@ export interface HookInput {
   // The session's own conversation log, as Claude Code and Codex hand it to hooks.
   transcriptPath?: string;
   // The 动手 this session does (its TaskBook key, by the folder it runs in),
-  // if it is a 动手 conversation: what is answered in groups is the front
-  // session's news, not its own.
+  // if it is a 动手 conversation: it is told nothing, since approving,
+  // threads it asked and groups it spoke in are the front session's, and
+  // the tools for them are not its own (createMcpServer).
   task?: string | null;
 }
 
@@ -34,7 +35,7 @@ async function sessionLog(transcriptPath: string | undefined): Promise<string> {
 // groups, the session that spoke there when someone replied to what it said
 // (8n), naming only the group.
 export async function userPromptHook(client: RelayClient, agentId: string, input: HookInput = {}): Promise<string | null> {
-  if (process.env.ACHAT_HEADLESS) return null;
+  if (process.env.ACHAT_HEADLESS || input.task) return null;
   let pending: ThreadSummary[];
   let news: ThreadSummary[];
   let replied: UnseenGroup[];
@@ -44,7 +45,7 @@ export async function userPromptHook(client: RelayClient, agentId: string, input
       client.listThreads({ unseen: agentId }),
       // Groups need an account: on this computer alone, or with an Achat
       // service from before, there are none, and the rest is still told.
-      input.task ? [] : client.unseenGroups(agentId).catch(() => []),
+      client.unseenGroups(agentId).catch(() => []),
     ]);
   } catch {
     return null;

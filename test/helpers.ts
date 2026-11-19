@@ -62,6 +62,19 @@ export class JudgingRunner extends ScriptedRunner {
   }
 }
 
+// The least a tool's input schema takes, as listTools gives it: for calling
+// every tool a server has, whatever each one asks for.
+export function someArgs(schema: { properties?: Record<string, any>; required?: string[] }): Record<string, unknown> {
+  const value = (p: any): unknown => {
+    if (p.enum) return p.enum[0];
+    if (p.type === "integer" || p.type === "number") return p.minimum ?? 1;
+    if (p.type === "boolean") return false;
+    if (p.type === "array") return [value(p.items ?? {})];
+    return "x";
+  };
+  return Object.fromEntries((schema.required ?? []).map((k) => [k, value(schema.properties?.[k] ?? {})]));
+}
+
 export async function until<T>(fn: () => Promise<T | null | undefined | false>, timeoutMs = 5000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {

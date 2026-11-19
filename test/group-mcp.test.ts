@@ -11,7 +11,7 @@ import { createMcpServer } from "../src/mcp/server.js";
 import type { Answer } from "../src/sidecar/dialog.js";
 import { Sidecar } from "../src/sidecar/sidecar.js";
 import { actKey, TaskBook, type TaskOpener, type TaskRecord, type TaskStart } from "../src/sidecar/tasks.js";
-import { addComputer, type Browser, JudgingRunner, logIn, ScriptedRunner, startTestCloud, until } from "./helpers.js";
+import { addComputer, type Browser, JudgingRunner, logIn, ScriptedRunner, someArgs, startTestCloud, until } from "./helpers.js";
 
 // `task`: the 动手 it does, as a 动手 conversation's MCP server finds in the TaskBook.
 async function mcp(client: RelayClient, agentId: string, task: { key: string; given: number } | null = null): Promise<Client> {
@@ -448,10 +448,32 @@ test("a 动手 conversation speaks only in the group it works for, and only to s
     const done = await send({ group: g.id });
     assert.equal(done.isError, true);
     assert.equal(textOf(done), "这次动手没有正在做的请求了，不用再发：对方要改会再 @ 你。");
-    // Nor does it speak in a thread: its work goes back to the group.
-    const thread = await doer.callTool({ name: "send_message", arguments: { thread_id: "t_1", message: "好了" } });
-    assert.equal(thread.isError, true);
-    assert.equal(textOf(thread), `你在替群「网关」里的老王的 Codex 动手，结果用 send_group_message（group: ${g.id}）发回群里。`);
+  } finally {
+    await close();
+  }
+});
+
+test("a 动手 conversation in a group has only the tools it sends its work back with: asking, inviting or anything else for its person is the person's to do", async () => {
+  const { fangMac, wangLaptop, claude, g, doer, close } = await actingFor();
+  try {
+    const groups = (await fangMac.client.groups()).length;
+    const said = (await wangLaptop.client.group(g.id)).messages.length;
+    const { tools } = await doer.listTools();
+    const handsBack = ["send_group_message", "check_group"];
+    for (const name of [...handsBack, "send_message", "send_request", "create_group", "invite_to_group"]) assert.ok(tools.some((tool) => tool.name === name), name);
+    for (const tool of tools.filter((tool) => !handsBack.includes(tool.name))) {
+      const refused = await doer.callTool({ name: tool.name, arguments: someArgs(tool.inputSchema) });
+      assert.equal(refused.isError, true, tool.name);
+      assert.equal(
+        textOf(refused),
+        `你在替群「网关」里的老王的 Codex 动手，不能用 ${tool.name}：这件事要主人来做（在动手文件夹以外的会话里），需要主人做的写进结果，用 send_group_message（group: ${g.id}）发回群里。`,
+      );
+    }
+    assert.equal((await fangMac.client.groups()).length, groups, "no group made");
+    const now = await wangLaptop.client.group(g.id);
+    assert.equal(now.messages.length, said, "nobody invited, nothing said");
+    assert.equal(now.status, "open", "not 叫停");
+    assert.ok(now.members.some((m) => m.agent === claude), "still in it");
   } finally {
     await close();
   }

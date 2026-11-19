@@ -111,6 +111,16 @@ function realPath(dir: string): string {
   }
 }
 
+// The Achat tools a 动手 conversation hands its work back with: a thread's
+// for a thread, a group's for a group. Codex runs them with nobody there to
+// approve them (codexTaskArgs); Achat's MCP server refuses a 动手
+// conversation every other tool, Claude's and Codex's alike: what it says
+// and does has others' words behind it, not its person's (createMcpServer).
+export const HAND_BACK: Record<"thread" | "group", readonly string[]> = {
+  thread: ["send_message", "check_thread"],
+  group: ["send_group_message", "check_group"],
+};
+
 // One conversation does what one asker asks of one AI in a group, across
 // its acts, in one folder: what the TaskBook keeps it by.
 export function actKey(groupId: string, asker: string, doer: string): string {
@@ -314,10 +324,9 @@ export class ClaudeTaskOpener implements TaskOpener {
 // the whole computer, and in a group, whoever asked, what it reads has
 // others' words in it, which could have it send files out. Nor is anybody
 // there to approve an MCP call, which Codex asks for of Achat's tools, so
-// those it hands the work back with go ahead: a thread's for a thread, a
-// group's for a group. Asking anyone else, or speaking anywhere else, does
-// not. A later conversation resumes the earlier one.
-const CODEX_HAND_BACK = { thread: ["send_message", "check_thread"], group: ["send_group_message", "check_group"] };
+// those it hands the work back with go ahead (HAND_BACK). Asking anyone
+// else, or speaking anywhere else, does not. A later conversation resumes
+// the earlier one.
 
 export function codexTaskArgs(start: TaskStart): string[] {
   const common = [
@@ -327,7 +336,7 @@ export function codexTaskArgs(start: TaskStart): string[] {
     "-c",
     `sandbox_workspace_write.network_access=${start.own === true && !start.inGroup}`,
     ...codexModelArgs(start),
-    ...CODEX_HAND_BACK[start.inGroup ? "group" : "thread"].flatMap((tool) => ["-c", `mcp_servers.achat.tools.${tool}.approval_mode="approve"`]),
+    ...HAND_BACK[start.inGroup ? "group" : "thread"].flatMap((tool) => ["-c", `mcp_servers.achat.tools.${tool}.approval_mode="approve"`]),
   ];
   return start.from
     ? ["exec", "resume", ...common, start.from.sessionId, "-"]

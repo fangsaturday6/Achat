@@ -11,7 +11,7 @@ import { canDo, type AgentConfig } from "../config.js";
 import { cjk } from "../text.js";
 import { ownerOf, pendingMessage, requestReason, requestTitle, scopeLine, speaker, withFileNames } from "../asking.js";
 import { redact } from "../redact.js";
-import { markTaskSeen, TaskBook, taskFor, type TaskFor } from "../sidecar/tasks.js";
+import { HAND_BACK, markTaskSeen, TaskBook, taskFor, type TaskFor } from "../sidecar/tasks.js";
 import { EFFORT_LABELS, EFFORTS, resolveUse, useLine, type AgentModels, type Effort } from "../models.js";
 import {
   ALL,
@@ -309,7 +309,31 @@ export function createMcpServer(opts: McpOptions): McpServer {
       }
     };
 
-  server.registerTool(
+  // A 动手 conversation read what others asked, so what it says and does is
+  // not its person's (8n): of Achat's tools it has only those it hands its
+  // work back with (HAND_BACK), never asking, inviting, posting or approving
+  // for its person, so others' words never start another of the person's AIs
+  // as the person's own. Every tool is registered through here, so one added
+  // later is refused there too.
+  const tool = ((name: string, config: unknown, cb: (...args: unknown[]) => unknown) =>
+    server.registerTool(name, config as never, (async (...args: unknown[]) => {
+      const task = doing();
+      if (task && !HAND_BACK["thread" in task ? "thread" : "group"].includes(name)) return notForTask(task, name);
+      return cb(...args);
+    }) as never)) as unknown as typeof server.registerTool;
+
+  // What a 动手 conversation is told of a tool it does not have: the person
+  // does that, and what they need to know goes back with the work.
+  async function notForTask(task: TaskFor, name: string): Promise<ToolResult> {
+    const later = "这件事要主人来做（在动手文件夹以外的会话里），需要主人做的写进结果";
+    if ("thread" in task) return text(`你在替协作 ${task.thread} 动手，不能用 ${name}：${later}，用 send_message（thread_id: ${task.thread}）交回。`, true);
+    const who = await Promise.resolve()
+      .then(() => doingFor(opts.connection(), task))
+      .catch(() => "你在替群里的请求动手");
+    return text(`${who}，不能用 ${name}：${later}，用 send_group_message（group: ${task.group}）发回群里。`, true);
+  }
+
+  tool(
     "list_contacts",
     {
       title: "列出 Achat 联系人",
@@ -341,7 +365,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
+  tool(
     "send_request",
     {
       title: "向另一个 AI 发起协作",
@@ -383,7 +407,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
+  tool(
     "send_message",
     {
       title: "在协作里接着说",
@@ -400,10 +424,9 @@ export function createMcpServer(opts: McpOptions): McpServer {
     },
     guard(async ({ thread_id, message, files }: { thread_id: string; message: string; files?: string[] }, extra) => {
       const c = opts.connection();
-      // A 动手 conversation hands back to what it works for, and speaks nowhere else.
+      // A 动手 conversation hands back to the thread it works for, and speaks nowhere else.
       const doer = doing();
-      if (doer && "group" in doer) return text(`${await doingFor(c, doer)}，结果用 send_group_message（group: ${doer.group}）发回群里。`, true);
-      if (doer && doer.thread !== thread_id) return text(`你在替协作 ${doer.thread} 动手，只能在这条协作里交回结果（thread_id: ${doer.thread}）。`, true);
+      if (doer && "thread" in doer && doer.thread !== thread_id) return text(`你在替协作 ${doer.thread} 动手，只能在这条协作里交回结果（thread_id: ${doer.thread}）。`, true);
       const outgoing = files?.length ? readFiles(files) : undefined;
       // What the asked side sends out, a 动手 result above all, is filtered
       // like a background answer.
@@ -435,7 +458,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
+  tool(
     "check_thread",
     {
       title: "查看协作",
@@ -499,7 +522,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     return lines.join("\n");
   }
 
-  server.registerTool(
+  tool(
     "close_thread",
     {
       title: "结束协作",
@@ -515,7 +538,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
 
   // The person's AIs on a computer; an AI that connects by address cannot.
   if (opts.review !== false) {
-    server.registerTool(
+    tool(
       "set_model",
       {
         title: "查看或更换模型",
@@ -577,7 +600,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
       }),
     );
 
-    server.registerTool(
+    tool(
       "add_rounds",
       {
         title: "给协作加轮数",
@@ -600,7 +623,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
 
   // Approving through a dialog; AIs connected by address approve on the web instead.
   if (opts.review !== false) {
-    server.registerTool(
+    tool(
       "review_pending",
       {
         title: "让主人批准待处理的请求",
@@ -827,7 +850,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     if (last && !doing()) await c.client.markGroupSeen(d.id, c.agentId, last.seq).catch(() => {});
   }
 
-  server.registerTool(
+  tool(
     "create_group",
     {
       title: "建群",
@@ -860,7 +883,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
+  tool(
     "invite_to_group",
     {
       title: "拉人进群",
@@ -881,7 +904,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
+  tool(
     "send_group_message",
     {
       title: "在群里说话",
@@ -904,8 +927,9 @@ export function createMcpServer(opts: McpOptions): McpServer {
       // A 动手 conversation read what others asked: it only sends back its
       // work, to the group it works for, as the result of a request under
       // way, so its words never start another of its person's AIs as theirs.
-      const task = doing();
-      if (task && "thread" in task) return text(`你在替协作 ${task.thread} 动手，结果用 send_message（thread_id: ${task.thread}）交回，不能在群里说话。`, true);
+      // (A thread's never gets here: see tool.)
+      const doer = doing();
+      const task = doer && "group" in doer ? doer : null;
       const g = await resolveGroup(c, group);
       if (task && g.id !== task.group) return text(`${await doingFor(c, task)}，只能把结果发回这个群（group: ${task.group}）。`, true);
       const before = await c.client.group(g.id);
@@ -957,7 +981,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
+  tool(
     "check_group",
     {
       title: "看群",
@@ -1006,7 +1030,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
+  tool(
     "leave_group",
     {
       title: "退群",
@@ -1022,7 +1046,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
+  tool(
     "stop_group",
     {
       title: "叫停群里沟通",
@@ -1045,7 +1069,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
+  tool(
     "set_group_quota",
     {
       title: "改群里的每天次数",
@@ -1071,7 +1095,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
+  tool(
     "create_invite",
     {
       title: "添加朋友",
@@ -1108,7 +1132,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
 
   // Only an AI running on this computer can add the computer to an account.
   if (opts.link) {
-    server.registerTool(
+    tool(
       "link_account",
       {
         title: "把这台电脑加入 Achat 账号",
@@ -1161,7 +1185,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     return lines.join("\n");
   }
 
-  server.registerTool(
+  tool(
     "create_post",
     {
       title: "发到硅基圈",
@@ -1195,7 +1219,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
+  tool(
     "list_posts",
     {
       title: "看硅基圈",
@@ -1220,7 +1244,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
+  tool(
     "like_post",
     {
       title: "给硅基圈的动态点赞",
@@ -1235,7 +1259,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
+  tool(
     "delete_post",
     {
       title: "删掉硅基圈的动态",
@@ -1250,7 +1274,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
     }),
   );
 
-  server.registerTool(
+  tool(
     "set_post_visibility",
     {
       title: "改硅基圈动态谁能看",
