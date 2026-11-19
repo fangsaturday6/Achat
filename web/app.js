@@ -1,7 +1,7 @@
 // One page for both setups: on this computer (experiment 0) the relay fills in
 // a token; in the cloud the token is empty and the login cookie is used.
 // Layout, colours and wording follow docs/ui.md.
-import { cjk, messageText, SHOWN_TYPES } from "./text.js";
+import { cjk, messageText, ownerName, SHOWN_TYPES } from "./text.js";
 import {
   ALL,
   applyPick,
@@ -11,6 +11,7 @@ import {
   inviteChoices,
   invitesWaiting,
   isAnswering,
+  leaveNote,
   mentionAt,
   pickerOptions,
   QUOTA,
@@ -21,6 +22,7 @@ import {
   segments,
   sentByMe,
   settingsTiles,
+  settingsView,
   tagsOf,
   targetsOf,
   tileActions,
@@ -182,11 +184,11 @@ function myName() {
 
 // "小林的 Codex" belongs to 小林; "我的 Claude" to the person looking.
 function ownerOf(name) {
-  return name.startsWith("我") ? myName() : name.replace(/的.*$/, "");
+  return name.startsWith("我") ? myName() : ownerName(name);
 }
 
 function initialOf(name) {
-  return name.replace(/的.*$/, "").slice(-1) || "?";
+  return ownerName(name).slice(-1) || "?";
 }
 
 // An avatar's colour, fixed by its owner's name; src/text.ts picks the same way.
@@ -1239,6 +1241,15 @@ function sendLink(agent) {
 
 // --- 群: a group, as in WeChat's group chats
 
+// Wide enough for 群设置 beside the group, not over it (style.css says the same).
+const BESIDE = matchMedia("(min-width: 1080px)");
+
+// A group's address in /api/groups, or one of its actions there ("leave").
+function groupPath(id, action) {
+  const path = `/api/groups/${encodeURIComponent(id)}`;
+  return action ? `${path}/${action}` : path;
+}
+
 // Words with each @ in blue, named from the person's side.
 function withAts(body, mentions, names) {
   return segments(body, tagsOf(mentions, names, { name: myName(), seat: mySeat() })).map((s) => (s.at ? h("span", { class: "at" }, s.text) : s.text));
@@ -1256,6 +1267,10 @@ function renderGroup(g, r) {
   const sent = state.composer?.groupId === g.id && state.composer.sent;
   const stick = !old || sent || old.scrollHeight - old.scrollTop - old.clientHeight < 80;
   const keep = old?.scrollTop ?? 0;
+  // 群设置 stays where it was scrolled to, as well, and what had the focus in it keeps it.
+  const oldDrawer = old && main.querySelector("#group-settings");
+  const keepDrawer = oldDrawer?.scrollTop ?? 0;
+  const focusedIn = oldDrawer?.contains(document.activeElement) ? document.activeElement.id : "";
   const more = h(
     "a",
     {
@@ -1273,9 +1288,25 @@ function renderGroup(g, r) {
   const body = showMain(`${g.name}（${g.members.length}）`, groupLog(g, !r.settings), { right: more, foot, back: "#/", drop: state.composer?.take });
   main.dataset.group = g.id;
   if (state.composer) state.composer.sent = false;
+  foot.classList.toggle("beside-drawer", r.settings);
   if (r.settings) {
     body.classList.add("beside-drawer");
-    main.append(groupSettings(g));
+    const drawer = groupSettings(g);
+    main.append(drawer);
+    drawer.scrollTop = keepDrawer;
+    if (focusedIn) document.getElementById(focusedIn)?.focus({ preventScroll: true });
+    // In a window too narrow for both side by side, 群设置 lies over the
+    // group: a click on the group left of it closes it, as in WeChat.
+    body.addEventListener(
+      "click",
+      (e) => {
+        if (BESIDE.matches) return;
+        e.preventDefault();
+        e.stopPropagation();
+        location.hash = `#/g/${encodeURIComponent(g.id)}`;
+      },
+      { capture: true },
+    );
   }
   body.scrollTop = stick ? body.scrollHeight : keep;
   for (const img of body.querySelectorAll("img")) img.addEventListener("load", () => stick && (body.scrollTop = body.scrollHeight), { once: true });
@@ -1365,7 +1396,7 @@ function groupComposer(first) {
     extra: [action],
     send: async (text, files) => {
       const { body, mentions } = composeMessage(text, g.members, myName());
-      await api("POST", `/api/groups/${encodeURIComponent(g.id)}/messages`, { from: mySeat(), body, mentions, files });
+      await api("POST", groupPath(g.id, "messages"), { from: mySeat(), body, mentions, files });
       composer.sent = true;
       await refresh();
     },
@@ -1501,10 +1532,9 @@ function groupStatus(g) {
 // 叫停 while some AI is reading; 继续 once stopped. Each is pressed once
 // until the relay answers.
 function groupAction(g) {
-  const path = `/api/groups/${encodeURIComponent(g.id)}`;
   const button = (id, cls, label, to) => {
     const b = h("button", { type: "button", class: cls, id }, label);
-    b.addEventListener("click", busy(b, () => act(() => api("POST", `${path}/${to}`, {}))));
+    b.addEventListener("click", busy(b, () => act(() => api("POST", groupPath(g.id, to), {}))));
     return b;
   };
   if (g.status === "stopped") return [button("group-continue", "btn", "继续", "continue")];
@@ -1515,12 +1545,8 @@ function groupAction(g) {
 // 群设置: who is in the group and who is invited, its name, how many times a
 // day each of the person's AIs may be woken here, and leaving or ending it.
 function groupSettings(g) {
-  const me = state.me.account.id;
-  const open = g.status !== "dissolved";
-  const owner = g.owner === me;
-  const path = `/api/groups/${encodeURIComponent(g.id)}`;
-  const mine = g.members.filter((m) => m.quota !== undefined);
-  const invite = open
+  const view = settingsView(g, state.me.account.id);
+  const invite = view.invite
     ? h(
         "div",
         { class: "member-cell" },
@@ -1533,68 +1559,71 @@ function groupSettings(g) {
       )
     : null;
   const grid = h("div", { class: "member-grid" }, ...settingsTiles(g).map((t) => memberTile(g, t)), invite);
-  const quotas = open && mine.length ? h("section", { class: "my-ais", "aria-labelledby": "my-ais-title" }, h("h2", { id: "my-ais-title", class: "muted" }, "我的 AI"), ...mine.map((m) => quotaRow(g, m))) : null;
-  const leave = mine.length ? h("button", { type: "button", class: "btn danger", id: "group-leave", onclick: () => leaveGroup(g, mine) }, "退出群") : null;
-  const dissolve =
-    owner && open
-      ? h(
-          "button",
-          {
-            type: "button",
-            class: "btn danger",
-            id: "group-dissolve",
-            onclick: () => {
-              if (confirm("解散后群里只能看不能发，AI 也不会再被叫醒。")) void act(() => api("POST", `${path}/dissolve`, {}));
-            },
+  const quotas = view.quotas.length
+    ? h("section", { class: "my-ais", "aria-labelledby": "my-ais-title" }, h("h2", { id: "my-ais-title", class: "muted" }, "我的 AI"), ...view.quotas.map((m) => quotaRow(g, m)))
+    : null;
+  const leave = view.leave ? h("button", { type: "button", class: "btn danger", id: "group-leave", onclick: () => leaveGroup(g, view.mine.map((m) => m.agent)) }, "退出群") : null;
+  const dissolve = view.dissolve
+    ? h(
+        "button",
+        {
+          type: "button",
+          class: "btn danger",
+          id: "group-dissolve",
+          onclick: () => {
+            if (confirm("解散后群里只能看不能发，AI 也不会再被叫醒。")) void act(() => api("POST", groupPath(g.id, "dissolve"), {}));
           },
-          "解散群",
-        )
-      : null;
+        },
+        "解散群",
+      )
+    : null;
   return h(
     "aside",
     { class: "group-settings", id: "group-settings", "aria-label": "群设置" },
     grid,
-    groupNameRow(g, owner && open),
+    groupNameRow(g, view.rename),
     quotas,
-    state.error ? h("p", { class: "error", role: "alert" }, state.error) : null,
+    state.error ? h("p", { class: "error", id: "group-settings-error", role: "alert" }, state.error) : null,
     h("span", { class: "spacer" }),
     h("div", { class: "settings-actions" }, leave, dissolve),
   );
 }
 
-// One member in 群设置: its face and name, 等加入 while invited; a click
-// offers what the person may do with it.
+// One member in 群设置 (#group-member-<AI>, or #group-invite-<invite> while
+// 等加入): its face and name; a click offers what the person may do with it.
 function memberTile(g, t) {
   const label = [
     h("span", { class: `member-face${t.waiting ? " waiting" : ""}` }, avatar(t.name, 44)),
     h("span", { class: "member-name" }, t.name),
     t.waiting ? h("span", { class: "muted" }, "等加入") : null,
   ];
-  const data = t.waiting ? { "data-invite": t.id } : { "data-agent": t.id };
+  const data = t.waiting ? { id: `group-invite-${t.id}`, "data-invite": t.id } : { id: `group-member-${t.id}`, "data-agent": t.id };
   const cell = h("div", { class: "member-cell" });
   const actions = tileActions(t, g, state.me.account.id);
   if (!actions.length) {
     cell.append(h("div", { class: "member", ...data }, ...label));
     return cell;
   }
-  const path = `/api/groups/${encodeURIComponent(g.id)}`;
-  const leave = () => {
-    if (confirm(cjk(t.name, "退出后不会再被叫醒。"))) void act(() => api("POST", `${path}/leave`, { agent: t.id }));
-  };
   const remove = () => {
-    if (confirm(cjk("移出后", t.name, "不会再被叫醒。"))) void act(() => api("POST", `${path}/remove`, { agent: t.id }));
+    if (confirm(cjk("移出后", t.name, "不会再被叫醒。"))) void act(() => api("POST", groupPath(g.id, "remove"), { agent: t.id }));
+  };
+  // The invite asks for one AI by name: accepting brings in that one.
+  const invite = groupPath(g.id, `invites/${encodeURIComponent(t.id)}`);
+  const items = {
+    leave: ["退出群聊", () => leaveGroup(g, [t.id]), { danger: true, id: "member-leave" }],
+    remove: ["移出群聊", remove, { danger: true, id: "member-remove" }],
+    join: ["加入群聊", () => void act(() => api("POST", `${invite}/accept`, { agents: [t.agent] })), { id: "member-join" }],
+    decline: ["拒绝", () => void act(() => api("POST", `${invite}/decline`, {})), { id: "member-decline" }],
   };
   const button = h("button", { type: "button", class: "member", ...data, "aria-haspopup": "menu", "aria-expanded": "false" }, ...label);
-  button.addEventListener("click", () =>
-    closeOpenMenu
-      ? closeOpenMenu()
-      : openMenu(button, cell, actions.map((a) => (a === "leave" ? ["退出群聊", leave, { danger: true }] : ["移出群聊", remove, { danger: true }]))),
-  );
+  button.addEventListener("click", () => (closeOpenMenu ? closeOpenMenu() : openMenu(button, cell, actions.map((a) => items[a]))));
   cell.append(button);
   return cell;
 }
 
-// 群名: 群主 clicks it to change it right there; Return saves, Esc puts it back.
+// 群名: 群主 clicks it to change it right there. Return, or leaving the box,
+// saves it, as 每天次数 does; Esc puts it back, and so does the same name or
+// none. Then the row has the focus again.
 function groupNameRow(g, editable) {
   const value = h("span", { class: "muted name-value" }, g.name, editable ? icon("right", 12, 2) : null);
   if (!editable) return h("div", { class: "settings-row", id: "group-name" }, h("span", {}, "群名"), value);
@@ -1602,22 +1631,28 @@ function groupNameRow(g, editable) {
   row.addEventListener("click", () => {
     const input = h("input", { class: "input", id: "group-name-input", value: g.name, maxlength: "30", "aria-label": "群名", "data-hold": "" });
     const editing = h("div", { class: "settings-row editing" }, input);
-    // Taking the box away blurs it, which would come back here mid-swap.
-    const putBack = () => {
-      if (!editing.isConnected) return;
-      input.removeEventListener("blur", putBack);
+    // Once: taking the box away blurs it, which comes back here.
+    let done = false;
+    const finish = (save) => {
+      if (done) return;
+      done = true;
+      const name = input.value.trim();
+      if (save && name && name !== g.name) {
+        void act(() => api("POST", groupPath(g.id, "rename"), { name })).then(() => document.getElementById("group-name")?.focus());
+        return;
+      }
       editing.replaceWith(row);
+      row.focus();
     };
     input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.isComposing) {
+      if (e.isComposing) return;
+      if (e.key === "Enter" || e.key === "Escape") {
         e.preventDefault();
-        void act(() => api("POST", `/api/groups/${encodeURIComponent(g.id)}/rename`, { name: input.value }));
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        putBack();
+        finish(e.key === "Enter");
       }
     });
-    input.addEventListener("blur", putBack);
+    // The window losing the focus leaves the box as it is.
+    input.addEventListener("blur", () => document.activeElement !== input && finish(true));
     row.replaceWith(editing);
     input.focus();
     input.select();
@@ -1628,7 +1663,7 @@ function groupNameRow(g, editable) {
 // One of the person's AIs in 群设置: 每天几次 (Return, or leaving the box,
 // saves it), a bar of today so far, and the count.
 function quotaRow(g, m) {
-  const input = h("input", { class: "quota-box", id: `group-quota-${m.agent}`, type: "text", inputmode: "numeric", value: String(m.quota), "aria-label": `${m.name}每天最多被叫醒几次`, "data-hold": "" });
+  const input = h("input", { class: "quota-box", id: `group-quota-${m.agent}`, type: "text", inputmode: "numeric", value: String(m.quota), "aria-label": cjk(m.name, "每天最多被叫醒几次"), "data-hold": "" });
   input.addEventListener("change", () => {
     const perDay = quotaOf(input.value);
     if (perDay === null) {
@@ -1636,7 +1671,13 @@ function quotaRow(g, m) {
       input.value = String(m.quota);
       return void refresh();
     }
-    if (perDay !== m.quota) void act(() => api("POST", `/api/groups/${encodeURIComponent(g.id)}/quota`, { agent: m.agent, perDay }));
+    if (perDay !== m.quota) void act(() => api("POST", groupPath(g.id, "quota"), { agent: m.agent, perDay }));
+  });
+  // What went wrong last time goes once the person types again.
+  input.addEventListener("input", () => {
+    if (!state.error) return;
+    state.error = "";
+    document.getElementById("group-settings-error")?.remove();
   });
   input.addEventListener("keydown", (e) => e.key === "Enter" && !e.isComposing && input.blur());
   const used = Math.min(100, Math.round((m.usedToday / m.quota) * 100));
@@ -1659,12 +1700,14 @@ function quotaRow(g, m) {
   );
 }
 
-// 退出群: each of the person's AIs here leaves; the group is gone from 消息.
-function leaveGroup(g, mine) {
-  if (!confirm("退出后你的 AI 不会再被叫醒，你也看不到这个群了。")) return;
+// Some of the person's AIs leave, from 退出群 or a tile, once they agree to
+// what follows (leaveNote). With the last of them the group is gone from 消息.
+function leaveGroup(g, agents) {
+  if (!confirm(leaveNote(g, state.me.account.id, agents))) return;
+  const out = !g.members.some((m) => m.quota !== undefined && !agents.includes(m.agent));
   void act(async () => {
-    for (const m of mine) await api("POST", `/api/groups/${encodeURIComponent(g.id)}/leave`, { agent: m.agent });
-    location.hash = "#/";
+    for (const agent of agents) await api("POST", groupPath(g.id, "leave"), { agent });
+    if (out) location.hash = "#/";
   });
 }
 
@@ -2338,7 +2381,7 @@ async function loadGroups(r) {
   const [groups, group] = await Promise.all([
     api("GET", "/api/groups").catch(() => state.groups),
     r.group
-      ? api("GET", `/api/groups/${encodeURIComponent(r.group)}`).catch((err) => {
+      ? api("GET", groupPath(r.group)).catch((err) => {
           gone = err.status === 404;
           return state.group?.id === r.group && !gone ? state.group : null;
         })
@@ -2350,7 +2393,7 @@ async function loadGroups(r) {
   // Read once it is on screen, as a conversation is.
   if (shown?.unread && shown.role === "member" && document.visibilityState === "visible") {
     shown.unread = false;
-    void api("POST", `/api/groups/${encodeURIComponent(shown.id)}/read`, {}).catch(() => {});
+    void api("POST", groupPath(shown.id, "read"), {}).catch(() => {});
   }
   return gone;
 }

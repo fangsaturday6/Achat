@@ -688,14 +688,17 @@ body.public { background: var(--panel); }
   .mention-picker { left: 12px; right: 12px; width: auto; }
 }
 
-/* 群设置: a drawer over the right of the group, from under the title bar to the bottom. */
-.group-more.on { color: var(--accent); }
+/* 群设置: a drawer over the right of the group, from under the title bar to the bottom. Open, its ··· only turns blue. */
+.group-more.on { color: var(--accent); background: none; }
 .group-settings {
   position: absolute; top: 60px; right: 0; bottom: 0; z-index: 3; width: 320px; padding: 20px; overflow-y: auto;
   display: flex; flex-direction: column; gap: 20px; background: var(--panel); box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
 }
 .group-settings .spacer { flex: 1; }
-.main-body.beside-drawer { padding-right: 344px; }
+/* Wide enough for both (BESIDE in app.js), the group and its box make room for it; narrower, it lies over the group. */
+@media (min-width: 1080px) {
+  .main-body.beside-drawer, .main-foot.beside-drawer { padding-right: 344px; }
+}
 .member-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 8px; }
 .member-cell { position: relative; display: flex; min-width: 0; }
 .member {
@@ -710,6 +713,7 @@ body.public { background: var(--panel); }
   justify-content: center; color: var(--muted);
 }
 .member-cell .menu { top: 52px; left: 0; }
+.member-cell:nth-child(4n) .menu { left: auto; right: 0; }
 .settings-row {
   width: 100%; min-height: 40px; padding: 0; border: none; border-top: 1px solid var(--line); background: none; display: flex;
   gap: 12px; align-items: center; justify-content: space-between; text-align: left; color: var(--ink);
@@ -731,7 +735,6 @@ body.public { background: var(--panel); }
 .settings-actions { display: flex; flex-direction: column; gap: 8px; }
 @media (max-width: 719px) {
   .group-settings { left: 0; width: auto; }
-  .main-body.beside-drawer { padding-right: 12px; }
 }
 
 /* 消息's ＋ menu. */

@@ -423,6 +423,44 @@ describe("groups", () => {
     assert.equal(list[1].updatedAt, invitedAt);
   });
 
+  test("renaming a group to the name it has changes nothing and says nothing", () => {
+    const g = start("开场白");
+    const heard: string[] = [];
+    groups.onEvent((e) => heard.push(e.type));
+    now = new Date(now.getTime() + 60_000);
+    const same = groups.rename(web("fang"), g.id, " 支付对接 ");
+    assert.deepEqual([same.name, same.messages.length, same.updatedAt], ["支付对接", g.messages.length, g.updatedAt]);
+    assert.deepEqual(heard, []);
+  });
+
+  test("a person has one invite at a time: not invited as a person once their AI is in, and an invite waiting covers what it asks", () => {
+    const g = start();
+    const theirs = (account: string) =>
+      groups
+        .detail(web("fang"), g.id)
+        .invites.filter((i) => i.account === account)
+        .map((i) => i.agent);
+    // 老王's invite lets him pick: his Claude asked for by name is in it already.
+    groups.invite(computer("fang"), g.id, { from: "fang/claude", members: [{ agent: "wang/claude" }, { agent: "r_lin" }] });
+    assert.deepEqual(theirs("wang"), [null]);
+    // 小林's Claude was asked for by name: the same again is not a second invite; her 豆包 is.
+    groups.invite(computer("fang"), g.id, { from: "fang/claude", members: [{ agent: "lin/claude" }] });
+    assert.deepEqual(theirs("lin"), ["lin/claude", "r_lin"]);
+
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    assert.throws(
+      () => groups.invite(computer("fang"), g.id, { from: "fang/claude", members: [{ agent: "lin/claude" }, { account: "wang" }] }),
+      (err: Error & { status?: number }) => err.status === 400 && err.message === "老王已经在群里了，邀请他的 AI 吧",
+    );
+    assert.deepEqual(theirs("wang"), [], "nothing else of that call was sent");
+    groups.invite(computer("fang"), g.id, { from: "fang/claude", members: [{ agent: "wang/claude" }] });
+    assert.deepEqual(theirs("wang"), ["wang/claude"]);
+
+    // A group made with a person and their AI by name invites the person once.
+    const made = groups.createGroup(computer("fang"), { from: "fang/claude", name: "两次", members: [{ account: "wang" }, { agent: "wang/codex" }] });
+    assert.deepEqual(made.invites.map((i) => [i.account, i.agent]), [["wang", null]]);
+  });
+
   test("waiting ends at the group's next change", async () => {
     const g = start();
     const waiting = groups.waitFor(g.id, 5000);

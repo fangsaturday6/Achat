@@ -200,10 +200,15 @@ export class GroupService {
     return { join, invite };
   }
 
-  // An invite to a person, or one waiting already, made new for another 7 days.
+  // An invite to a person, or one waiting already, made new for another 7
+  // days. A person has one invite card: one that lets them pick covers any of
+  // their AIs, and asking them to pick while an AI of theirs is asked for by
+  // name waits on that one. Another AI by name is its own invite, which they
+  // answer in 群设置 once they are in.
   private offer(groupId: string, t: { account: string; agent: string | null }, by: string, now: string): void {
     const expiresAt = new Date(this.now().getTime() + this.limits.inviteTtlMs).toISOString();
-    const open = this.store.openInvites(groupId, now).find((i) => i.account === t.account && i.agent === t.agent);
+    const theirs = this.store.openInvites(groupId, now).filter((i) => i.account === t.account);
+    const open = theirs.find((i) => i.agent === null || i.agent === t.agent) ?? (t.agent === null ? theirs[0] : undefined);
     if (open) return this.store.renewInvite(open.id, expiresAt);
     this.store.addInvite({ id: `gi_${randomBytes(6).toString("hex")}`, groupId, account: t.account, agent: t.agent, invitedBy: by, expiresAt }, now);
   }
@@ -384,6 +389,9 @@ export class GroupService {
     const from = this.requireSpeaker(caller, input.from);
     const { join, invite } = this.sort(caller, input.members);
     const members = this.store.members(groupId);
+    // Someone already in picks no more AIs: each is asked for by name.
+    const inside = invite.find((t) => !t.agent && members.some((m) => m.owner === t.account));
+    if (inside) throw new RelayError(400, cjk(this.dir.person(inside.account, caller.account), "已经在群里了，邀请他的 AI 吧"));
     const newcomers = join.filter((a) => !members.some((m) => m.agent === a));
     const fresh = invite.filter((t) => !t.agent || !members.some((m) => m.agent === t.agent));
     if (!newcomers.length && !fresh.length) throw new RelayError(409, "他们已经在群里了");
@@ -665,6 +673,8 @@ export class GroupService {
     if (group.owner !== caller.account || !caller.approves) throw new RelayError(403, "只有群主可以改群名");
     const clean = name.trim();
     if (!clean || clean.length > 30) throw new RelayError(400, "群名需要在 1 到 30 个字之间");
+    // The same name again: nothing to tell the group.
+    if (clean === group.name) return this.detail(caller, groupId);
     const now = this.stamp();
     this.store.transaction(() => {
       this.store.updateGroup(groupId, { name: clean }, now);

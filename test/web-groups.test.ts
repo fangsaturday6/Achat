@@ -230,9 +230,62 @@ test("群设置 lists the members, then those invited as 等加入; a click on e
   assert.deepEqual(page.tileActions(tiles[0], { ...g, status: "dissolved" }, "fang"), []);
 });
 
-test("每天次数 as typed: a whole number from 1 to 500", () => {
+test("群设置: someone in the group answers an invite for another of their AIs on its tile", () => {
+  const g = {
+    owner: "wang",
+    status: "open",
+    members: [{ ...MEMBERS[5], quota: 30, usedToday: 0 }],
+    invites: [
+      { id: "gi_1", account: "chuang", name: "我", agent: "c/claude", agentName: "我的 Claude" },
+      { id: "gi_2", account: "chuang", name: "我", agent: null, agentName: null },
+      { id: "gi_3", account: "lin", name: "小林", agent: "l/claude", agentName: "小林的 Claude" },
+    ],
+  };
+  const tiles = page.settingsTiles(g);
+  assert.deepEqual(tiles.slice(1).map((t: any) => [t.id, t.account, t.agent]), [
+    ["gi_1", "chuang", "c/claude"],
+    ["gi_2", "chuang", null],
+    ["gi_3", "lin", "l/claude"],
+  ]);
+  assert.deepEqual(tiles.map((t: any) => page.tileActions(t, g, "chuang")), [["leave"], ["join", "decline"], [], []]);
+  assert.deepEqual(page.tileActions(tiles[1], { ...g, status: "stopped" }, "chuang"), ["join", "decline"]);
+  assert.deepEqual(page.tileActions(tiles[1], { ...g, status: "dissolved" }, "chuang"), []);
+});
+
+test("群设置 shows 群主 the name to change and 解散群; everyone in it their 每天次数 and 退出群; a dissolved group only 退出群", () => {
+  const mine = { agent: "f/claude", name: "我的 Claude", owner: "fang", quota: 30, usedToday: 2 };
+  const wang = { agent: "w/codex", name: "老王的 Codex", owner: "wang" };
+  const g = { owner: "fang", status: "open", members: [mine, wang] };
+  const shown = (v: any) => [v.rename, v.invite, v.quotas.map((m: any) => m.agent), v.leave, v.dissolve];
+  assert.deepEqual(shown(page.settingsView(g, "fang")), [true, true, ["f/claude"], true, true], "群主");
+  const theirs = { ...g, members: [{ ...mine, quota: undefined, usedToday: undefined }, { ...wang, quota: 10, usedToday: 0 }] };
+  assert.deepEqual(shown(page.settingsView(theirs, "wang")), [false, true, ["w/codex"], true, false], "not 群主");
+  assert.deepEqual(shown(page.settingsView({ ...g, status: "stopped" }, "fang")), [true, true, ["f/claude"], true, true], "叫停 changes none of it");
+  assert.deepEqual(shown(page.settingsView({ ...g, status: "dissolved" }, "fang")), [false, false, [], true, false], "dissolved");
+  assert.deepEqual(page.settingsView(g, "fang").mine.map((m: any) => m.agent), ["f/claude"]);
+});
+
+test("leaving says what follows: who 群主 passes to, that the group ends, or that one AI stops being woken", () => {
+  const claude = { agent: "f/claude", name: "我的 Claude", owner: "fang", quota: 30, usedToday: 0 };
+  const codex = { agent: "f/codex", name: "我的 Codex", owner: "fang", quota: 30, usedToday: 0 };
+  const wang = { agent: "w/codex", name: "老王的 Codex", owner: "wang" };
+  const lin = { agent: "l/claude", name: "小林的 Claude", owner: "lin" };
+  const g = { owner: "fang", status: "open", members: [claude, lin, codex, wang] };
+  assert.equal(page.leaveNote(g, "fang", ["f/claude"]), "我的 Claude 退出后不会再被叫醒。");
+  // 群主 passes to the person whose AI joined first (drop in src/relay/groups.ts).
+  assert.equal(page.leaveNote(g, "fang", ["f/claude", "f/codex"]), "退出后群主交给小林，你也看不到这个群了。");
+  assert.equal(page.leaveNote({ ...g, members: [claude, lin, wang] }, "fang", ["f/claude"]), "退出后群主交给小林，你也看不到这个群了。", "the last of the person's AIs leaving from its tile");
+  assert.equal(page.leaveNote({ ...g, members: [claude, codex] }, "fang", ["f/claude", "f/codex"]), "群里只剩你的 AI，退出后群会解散。");
+  assert.equal(page.leaveNote({ ...g, owner: "wang" }, "fang", ["f/claude", "f/codex"]), "退出后你的 AI 不会再被叫醒，你也看不到这个群了。");
+  assert.equal(page.leaveNote({ ...g, status: "dissolved" }, "fang", ["f/claude", "f/codex"]), "退出后你就看不到这个群了。");
+});
+
+test("每天次数 as typed: a whole number from 1 to 500, in half- or full-width digits", () => {
   assert.equal(page.quotaOf(" 50 "), 50);
-  for (const bad of ["0", "501", "2.5", "", "三十"]) assert.equal(page.quotaOf(bad), null, bad);
+  assert.equal(page.quotaOf("１"), 1);
+  assert.equal(page.quotaOf("５００"), 500);
+  assert.equal(page.quotaOf("５0"), 50);
+  for (const bad of ["0", "501", "０", "５０１", "2.5", "5.", "1e2", "0x10", "+5", "-1", "", " ", "三十"]) assert.equal(page.quotaOf(bad), null, bad);
 });
 
 test("发起群聊: a friend, or some of their AIs, never both; what 完成 sends", () => {

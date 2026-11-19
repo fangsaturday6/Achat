@@ -15,6 +15,11 @@ export function cjk(...parts) {
   });
 }
 
+// Whose an AI is, by its name: "小林的 Codex" is 小林's.
+export function ownerName(name) {
+  return name.replace(/的.*$/, "");
+}
+
 // The words of a message in a list: what it said, or what it sent.
 export function messageText(m) {
   if (m.body || !m.files?.length) return m.body;

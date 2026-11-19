@@ -2,7 +2,7 @@
 // draws it, and test/web-groups.test.ts checks it in Node. Words and numbers
 // that come from the relay are written here once; the tests keep them the
 // same as src/types.ts and src/relay/groups.ts.
-import { cjk, messageText } from "./text.js";
+import { cjk, messageText, ownerName } from "./text.js";
 
 // "@所有人" in a message's mentions (ALL in src/types.ts), and as it is written.
 export const ALL = "all";
@@ -220,27 +220,59 @@ export function isAnswering(g) {
   return g.status === "open" && g.messages.some((m) => m.receipts.some((r) => r.state === "reading"));
 }
 
+// What 群设置 shows the person `me`: 群名 to change and 解散群 for 群主,
+// 邀请 and the 每天次数 of their AIs (`quotas`), all until the group is
+// dissolved; 退出群 while an AI of theirs (`mine`) is in it.
+export function settingsView(g, me) {
+  const open = g.status !== "dissolved";
+  const owner = g.owner === me;
+  const mine = g.members.filter((m) => m.quota !== undefined);
+  return { rename: owner && open, invite: open, quotas: open ? mine : [], mine, leave: mine.length > 0, dissolve: owner && open };
+}
+
 // The members in 群设置: the AIs in the group (the person's own marked
-// `mine`), then those invited, who show as 等加入. `id`: the AI, or the invite.
+// `mine`), then those invited, who show as 等加入. `id`: the AI, or the
+// invite, with whom it is for and the AI it asks for by name, if one.
 export function settingsTiles(g) {
   return [
     ...g.members.map((m) => ({ id: m.agent, name: m.name, waiting: false, mine: m.quota !== undefined })),
-    ...g.invites.map((i) => ({ id: i.id, name: i.agentName ?? i.name, waiting: true, mine: false })),
+    ...g.invites.map((i) => ({ id: i.id, name: i.agentName ?? i.name, waiting: true, mine: false, account: i.account, agent: i.agent })),
   ];
 }
 
 // What a click on a member in 群设置 offers: the person's own AI may leave;
-// 群主 may remove another's. Nothing once dissolved, nor for those invited.
+// 群主 may remove another's; an invite for another of the person's AIs, by
+// name, they join or decline right there (they see no invite card once in).
+// Nothing once dissolved.
 export function tileActions(tile, g, me) {
-  if (tile.waiting || g.status === "dissolved") return [];
+  if (g.status === "dissolved") return [];
+  if (tile.waiting) return tile.account === me && tile.agent ? ["join", "decline"] : [];
   if (tile.mine) return ["leave"];
   return g.owner === me ? ["remove"] : [];
 }
 
-// 每天次数 as typed, or null when it is not a whole number from 1 to the most.
+// What leaving does, asked before it is done; `agents`: the person's AIs
+// that leave. Their last one takes the person out: 群主 passes to the person
+// whose AI joined first (drop in src/relay/groups.ts), and with nobody
+// else's AI left the group ends.
+export function leaveNote(g, me, agents) {
+  if (g.status === "dissolved") return "退出后你就看不到这个群了。";
+  const rest = g.members.filter((m) => !agents.includes(m.agent));
+  if (rest.some((m) => m.owner === me)) return cjk(g.members.find((m) => m.agent === agents[0]).name, "退出后不会再被叫醒。");
+  if (!rest.length) return "群里只剩你的 AI，退出后群会解散。";
+  if (g.owner === me) return `退出后群主交给${ownerName(rest[0].name)}，你也看不到这个群了。`;
+  return "退出后你的 AI 不会再被叫醒，你也看不到这个群了。";
+}
+
+// 每天次数 as typed, in half- or full-width digits, or null when it is not a
+// whole number from 1 to the most.
 export function quotaOf(text) {
-  const n = Number(String(text).trim());
-  return String(text).trim() !== "" && Number.isInteger(n) && n >= 1 && n <= QUOTA.max ? n : null;
+  const digits = String(text)
+    .trim()
+    .replace(/[０-９]/g, (d) => String.fromCharCode(d.charCodeAt(0) - 0xfee0));
+  if (!/^\d+$/.test(digits)) return null;
+  const n = Number(digits);
+  return n >= 1 && n <= QUOTA.max ? n : null;
 }
 
 // What is picked in 发起群聊 and 邀请: people ({person, name}), who choose
