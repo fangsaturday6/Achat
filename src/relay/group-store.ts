@@ -565,10 +565,15 @@ export class GroupStore {
     return r?.extra ?? 0;
   }
 
-  addExtra(groupId: string, agent: string, day: string, n: number): void {
+  // 加一份: another day's 每天次数 (`share`) for `day`, once. Asked again, or
+  // a request tried again, it adds nothing more; a 每天次数 raised since
+  // brings it up to the new one.
+  addShare(groupId: string, agent: string, day: string, share: number): void {
     this.db
-      .prepare("INSERT INTO group_usage (group_id, agent, day, extra) VALUES (?, ?, ?, ?) ON CONFLICT (group_id, agent, day) DO UPDATE SET extra = extra + excluded.extra")
-      .run(groupId, agent, day, n);
+      .prepare(
+        "INSERT INTO group_usage (group_id, agent, day, extra) VALUES (?, ?, ?, ?) ON CONFLICT (group_id, agent, day) DO UPDATE SET extra = MAX(extra, excluded.extra)",
+      )
+      .run(groupId, agent, day, share);
   }
 
   // Marks that an AI's person was told its 每天次数 for `day` is nearly used

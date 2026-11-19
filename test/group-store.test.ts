@@ -50,13 +50,15 @@ test("a database from before 加一份 keeps each day's count, with nothing adde
   `);
   const groups = new GroupStore(store);
   assert.deepEqual([groups.used("g_1", "b", "2026-11-18"), groups.extra("g_1", "b", "2026-11-18")], [3, 0]);
-  groups.addExtra("g_1", "b", "2026-11-18", 30);
-  groups.addExtra("g_1", "b", "2026-11-18", 30);
-  groups.addExtra("g_1", "b", "2026-11-19", 5);
-  assert.deepEqual([groups.extra("g_1", "b", "2026-11-18"), groups.extra("g_1", "b", "2026-11-19"), groups.used("g_1", "b", "2026-11-19")], [60, 5, 0]);
+  groups.addShare("g_1", "b", "2026-11-18", 30);
+  groups.addShare("g_1", "b", "2026-11-18", 30);
+  groups.addShare("g_1", "b", "2026-11-19", 5);
+  assert.deepEqual([groups.extra("g_1", "b", "2026-11-18"), groups.extra("g_1", "b", "2026-11-19"), groups.used("g_1", "b", "2026-11-19")], [30, 5, 0], "a day's share once a day");
+  groups.addShare("g_1", "b", "2026-11-19", 8);
+  assert.equal(groups.extra("g_1", "b", "2026-11-19"), 8, "up to a 每天次数 raised since");
   assert.deepEqual([groups.warn("g_1", "b", "2026-11-18"), groups.warn("g_1", "b", "2026-11-18"), groups.warn("g_1", "b", "2026-11-20")], [true, false, true]);
   new GroupStore(store); // opening again changes nothing
-  assert.equal(groups.extra("g_1", "b", "2026-11-18"), 60);
+  assert.equal(groups.extra("g_1", "b", "2026-11-18"), 30);
 });
 
 test("how far an AI's front session looked only goes forward, and starts over from where it joins", () => {

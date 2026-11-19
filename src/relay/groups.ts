@@ -757,14 +757,15 @@ export class GroupService {
   }
 
   // 加一份: its person, asked on their computer as it was nearly used up,
-  // lets one of their AIs be woken another day's 每天次数 today only. Like
-  // raising them, it takes up the latest @ it had to leave; nothing is
+  // lets one of their AIs be woken another day's 每天次数 today only, once a
+  // day however often it is asked, so a request tried again adds nothing.
+  // Like raising them, it takes up the latest @ it had to leave; nothing is
   // written in the group.
   addToday(caller: Caller, groupId: string, input: { agent: string }): GroupDetail {
     const member = this.requireOwnMember(caller, groupId, input.agent);
     const now = this.stamp();
     const wake = this.store.transaction(() => {
-      this.store.addExtra(groupId, input.agent, beijingDay(this.now()), member.quota);
+      this.store.addShare(groupId, input.agent, beijingDay(this.now()), member.quota);
       return this.takeUp(this.store.group(groupId)!, input.agent, ["quota"], now);
     });
     this.emit("group.updated", groupId, { wake });

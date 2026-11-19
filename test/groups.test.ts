@@ -613,13 +613,18 @@ describe("groups", () => {
     assert.equal(added.messages.length, before, "nothing is written in the group");
     assert.deepEqual(heard.map((e) => [e.type, e.wake]), [["group.updated", ["fang/codex"]]]);
     assert.equal(groups.detail(web("wang"), g.id).members.find((m) => m.agent === "fang/codex")!.extraToday, undefined, "only its person sees it");
+    // A day's more at most: asked again, or a request tried again, adds nothing.
+    groups.addToday(web("fang"), g.id, { agent: "fang/codex" });
+    assert.deepEqual([codex().extraToday, codex().usedToday], [2, 3]);
 
     // Today it may be woken quota + what was added.
     assert.equal(ask("四").receipts[0].state, "reading");
     assert.equal(ask("五").receipts[0].state, "quota");
-    // The next day in 北京 it is its 每天次数 again.
+    // The next day in 北京 it is its 每天次数 again, and a day's more can be added again.
     now = new Date("2026-11-18T16:00:00Z");
     assert.deepEqual([codex().extraToday, codex().usedToday], [0, 0]);
+    groups.addToday(web("fang"), g.id, { agent: "fang/codex" });
+    assert.equal(codex().extraToday, 2);
     groups.dissolve(web("fang"), g.id);
     assert.throws(() => groups.addToday(web("fang"), g.id, { agent: "fang/codex" }), /解散/);
   });
