@@ -197,3 +197,19 @@ test("发起群聊: a friend, or some of their AIs, never both; what 完成 send
   assert.deepEqual(page.targetsOf(page.togglePick(picked, wangCodex)), [{ agent: "f/claude" }]);
   assert.deepEqual(page.targetsOf([mine, wang]), [{ agent: "f/claude" }, { account: "wang" }]);
 });
+
+test("the invite card offers the person's own AIs, those that can answer ticked; only the one asked for by name", () => {
+  const mine = [
+    { id: "w/codex", name: "我的 Codex", client: "codex" },
+    { id: "w/claude", name: "我的 Claude", client: "claude" },
+    { id: "r_w", name: "我的豆包", client: "doubao", canReceive: false },
+    { id: "p_wang", name: "我", client: "person", canReceive: false },
+  ];
+  assert.deepEqual(page.inviteChoices({ agent: null }, mine).map((c: any) => [c.name, c.checked, c.locked, c.speaksOnly]), [
+    ["我的 Codex", true, false, false],
+    ["我的 Claude", true, false, false],
+    ["我的豆包", false, false, true],
+  ]);
+  assert.deepEqual(page.inviteChoices({ agent: "w/claude" }, mine).map((c: any) => [c.name, c.checked, c.locked]), [["我的 Claude", true, true]]);
+  assert.deepEqual(page.inviteChoices({ agent: "gone" }, mine), []);
+});

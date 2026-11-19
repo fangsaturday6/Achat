@@ -214,3 +214,19 @@ export function togglePick(picked, item) {
 export function targetsOf(picked) {
   return picked.map((p) => (p.person ? { account: p.person } : { agent: p.agent }));
 }
+
+// The AIs a person may bring into a group they are invited to: their own,
+// those that can answer ticked; just the one asked for by name, ticked and
+// fixed. 豆包 and the like can join but only speak when told.
+export function inviteChoices(invite, agents) {
+  const mine = agents.filter((a) => a.client !== "person");
+  const shown = invite.agent ? mine.filter((a) => a.id === invite.agent) : mine;
+  return shown.map((a) => ({
+    id: a.id,
+    name: a.name,
+    client: a.client,
+    checked: !!invite.agent || a.canReceive !== false,
+    locked: !!invite.agent,
+    speaksOnly: a.canReceive === false,
+  }));
+}

@@ -7,6 +7,7 @@ import {
   composeMessage,
   GROUP_STATUS_LABELS,
   groupPreview,
+  inviteChoices,
   invitesWaiting,
   isAnswering,
   mentionAt,
@@ -1229,6 +1230,7 @@ function withAts(body, mentions, names) {
 // A group: its messages, each @ in blue, under each who did not reply, and
 // the box to write in; 群设置 slides over on the right (#/g/<id>/settings).
 function renderGroup(g, r) {
+  if (g.role === "invited") return renderInvite(g);
   const main = document.getElementById("main");
   // A redraw of the same group keeps the place the person was reading,
   // unless they were at the bottom, where the newest stays in view.
@@ -1753,6 +1755,78 @@ async function openGroupPicker({ group } = {}) {
   paint();
   document.body.append(overlay);
   search.focus();
+}
+
+// Which of the person's computers an AI is on, for telling two Claudes apart.
+function deviceOf(agentId) {
+  return state.me.devices.find((d) => d.agents?.some((a) => a.id === agentId))?.name ?? null;
+}
+
+// Invited: a card from whoever invited the person, with the opening message
+// and its files, who is in the group, which of their AIs to bring in, and
+// how many times a day each may be woken; 拒绝 or 加入.
+function renderInvite(g) {
+  const invite = g.myInvite;
+  const me = state.me.account.id;
+  const choices = inviteChoices(invite, [...state.agents.values()].filter((a) => a.owner === me));
+  const opener = g.messages[0] ?? null;
+  const picks = choices.map((c) => {
+    const box = h("input", { type: "checkbox", id: `invite-ai-${c.id}`, checked: c.checked, disabled: c.locked, "data-agent": c.id });
+    const where = c.speaksOnly ? "只能发言" : deviceOf(c.id);
+    return h("label", { class: "pick" }, box, clientAvatar(c.client, 28), h("span", { class: "grow" }, c.name), where ? h("span", { class: "muted" }, where) : null);
+  });
+  const quota = h("input", { class: "quota-box", id: "invite-quota", type: "text", inputmode: "numeric", value: String(QUOTA.perDay), "aria-label": "每天最多被叫醒几次" });
+  const error = h("p", { class: "error", role: "alert" });
+  const path = `/api/groups/${encodeURIComponent(g.id)}/invites/${encodeURIComponent(invite.id)}`;
+  const decline = h("button", { type: "button", class: "btn", id: "invite-decline" }, "拒绝");
+  decline.addEventListener(
+    "click",
+    busy(decline, async () => {
+      try {
+        await api("POST", `${path}/decline`, {});
+        location.hash = "#/";
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }),
+  );
+  const accept = h("button", { type: "button", class: "btn primary", id: "invite-accept", disabled: !choices.length }, "加入");
+  accept.addEventListener(
+    "click",
+    busy(accept, async () => {
+      error.textContent = "";
+      const agents = picks.map((p) => p.querySelector("input")).filter((i) => i.checked).map((i) => i.dataset.agent);
+      const perDay = quotaOf(quota.value);
+      if (!agents.length) return void (error.textContent = "选至少一个 AI 进群");
+      if (perDay === null) return void (error.textContent = `每天次数需要在 1 到 ${QUOTA.max} 之间`);
+      try {
+        await api("POST", `${path}/accept`, { agents, quota: perDay });
+        await refresh();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }),
+  );
+  const card = h(
+    "article",
+    { class: "card invite-card", id: "invite-card", "aria-label": `邀请你加入「${g.name}」` },
+    h("h2", {}, `邀请你加入「${g.name}」`),
+    opener?.body ? h("p", {}, ...withAts(opener.body, opener.mentions, g.names)) : null,
+    opener?.files.length ? h("div", { class: "card-files" }, ...opener.files.map(fileTile)) : null,
+    h("span", { class: "with-avatar faces" }, ...facesOf(g).slice(0, 3).map((name) => avatar(name, 20)), h("span", { class: "muted" }, `群里有 ${g.members.length} 个 AI`)),
+    h("div", { class: "invite-pick" }, ...picks),
+    h("label", { class: "muted quota-label", for: quota.id }, "查对话记录 · 每天", quota, "次"),
+    error,
+    h("div", { class: "card-actions" }, decline, accept),
+  );
+  const log = h(
+    "div",
+    { class: "log", role: "log", "aria-label": "进群邀请" },
+    h("span", { class: "event" }, shortTime(opener?.createdAt ?? g.createdAt)),
+    h("div", { class: "msg" }, avatar(invite.invitedByName, 34), h("div", { class: "msg-col" }, h("span", { class: "msg-name" }, invite.invitedByName), card)),
+  );
+  state.composer = null;
+  showMain(g.name, log, { back: "#/" });
 }
 
 // A new group before its first words: they are its opening message

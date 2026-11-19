@@ -763,3 +763,14 @@ body.public { background: var(--panel); }
   .picker-picked { display: none; }
   .picker-count { display: inline; }
 }
+
+/* 进群卡片: from whoever invited the person, in the conversation like a request card. */
+.invite-card { width: 420px; max-width: 100%; gap: 10px; }
+.msg-col:has(> .invite-card) { --col-max: 70%; }
+.invite-card .faces { gap: 4px; }
+.invite-card .faces .muted { margin-left: 4px; }
+.invite-pick { padding-top: 6px; border-top: 1px solid var(--line); display: flex; flex-direction: column; }
+.invite-pick .pick { height: 36px; padding: 0; }
+@media (max-width: 719px) {
+  .msg-col:has(> .invite-card) { --col-max: calc(100% - 44px); }
+}
