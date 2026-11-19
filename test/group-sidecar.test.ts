@@ -406,6 +406,32 @@ describe("an AI @ed in a group answers in the background", () => {
     await result("@老王的 Codex 第 11 件好了", eleventh);
   });
 
+  test("a Codex doing a round that stops without sending its result back leaves 没答上 under it, and the asker's next request goes on", async () => {
+    const { g, claude, codex, shown, more, sidecar } = await actingMeeting("停了", 0);
+    sidecar.stop();
+    // Its conversation ends right after it opens, sending nothing back.
+    const opener = new FakeOpener();
+    const stopping: TaskOpener & { starts: TaskStart[] } = {
+      starts: opener.starts,
+      open: async (start) => {
+        const rec = await opener.open(start);
+        setTimeout(() => start.onExit?.(), 50);
+        return rec;
+      },
+    };
+    sidecarFor(fangMac, claude, new JudgingRunner([], ["do", "do"]), { ...more, doers: { [claude]: stopping } });
+    const seq = (await wangLaptop.client.postGroupMessage(g.id, { from: codex, body: "@老方的 Claude 帮我挪验签", mentions: [claude] })).messages.at(-1)!.seq;
+    await until(async () => shown.asked.find((p) => p.title.includes("「停了」")));
+    shown.answer(shown.asked.findIndex((p) => p.title.includes("「停了」")), "approve");
+    await until(async () => (await stateOf(g.id, seq, claude)) === "failed");
+    const d: GroupDetail = await fang.call("GET", `/api/groups/${g.id}`);
+    assert.equal(d.messages.find((m) => m.seq === seq)!.receipts[0].reason, "动手的对话停了，没发回结果");
+    // Asked again, the act goes on in the same conversation.
+    const again = (await wangLaptop.client.postGroupMessage(g.id, { from: codex, body: "@老方的 Claude 再挪一次", mentions: [claude] })).messages.at(-1)!.seq;
+    const next = await until(async () => opener.starts.filter((s) => s.topic === "停了")[1]);
+    assert.ok(next.prompt.includes(`reply_to: ${again}`), next.prompt);
+  });
+
   test("a round waiting its turn is let go once 叫停 ends its act", async () => {
     const { g, claude, codex, opener, shown, sidecar } = await actingMeeting("叫停排队", 2);
     const ask = async (body: string) => (await wangLaptop.client.postGroupMessage(g.id, { from: codex, body, mentions: [claude] })).messages.at(-1)!.seq;

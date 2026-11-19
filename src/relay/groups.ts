@@ -579,7 +579,7 @@ export class GroupService {
         now,
       );
       if (answering) this.settle(groupId, from.id, input.replyTo!, "replied", null, input, now);
-      if (acting) this.resultBack(groupId, from.id, input.replyTo!, now);
+      if (acting) this.roundBack(groupId, from.id, this.store.message(groupId, input.replyTo!)?.sender, now);
       return { seq: msg.seq, wake: this.wake(this.store.group(groupId)!, msg, from.id) };
     });
     this.emit("group.message", groupId, posted);
@@ -618,11 +618,16 @@ export class GroupService {
     if (!caller.actsAs(input.agent)) throw new RelayError(403, "只有被叫醒的 AI 可以这样报");
     const r = this.store.receipt(groupId, input.seq, input.agent);
     const reason = input.reason.trim().slice(0, 120) || null;
-    // A round of 动手 that could not start fails the same way, with every
-    // request it was for, as its result would answer them (settle); it is
-    // never held.
+    // A round of 动手 that could not start, or whose conversation stopped,
+    // fails the same way, with every request it was for, as its result
+    // would answer them (settle), and its act goes on or ends as after a
+    // result (roundBack); it is never held.
     if (r?.state === "acting" && state === "failed") {
-      this.transaction(() => this.settle(groupId, input.agent, input.seq, state, reason, {}, this.stamp()));
+      this.transaction(() => {
+        const now = this.stamp();
+        this.settle(groupId, input.agent, input.seq, state, reason, {}, now);
+        this.roundBack(groupId, input.agent, this.store.message(groupId, input.seq)?.sender, now);
+      });
       this.emit("group.updated", groupId, { seq: input.seq });
     } else if (r?.state === "reading") {
       this.store.setReceipt(groupId, input.seq, input.agent, state, reason, r.epoch, this.stamp());
@@ -688,14 +693,19 @@ export class GroupService {
     }
   }
 
-  // 动手's result for `seq` came back. Once nothing of its act is left to
-  // do, an act whose rounds are used, or that a request it does not cover
-  // waits on (requestAct), ends; its computer, looking again at the
-  // group's event, then puts that request to its person.
-  private resultBack(groupId: string, doer: string, seq: number, now: string): void {
-    const asker = this.store.message(groupId, seq)?.sender;
+  // A round of `asker`'s act ended: its result came back for `seq`, or it
+  // could not start, or did not come back in a day (expireActing). What it
+  // has still to do is the next round, which starts now, and its day is
+  // counted from now. Once nothing of it is left to do, an act whose
+  // rounds are used, or that a request it does not cover waits on
+  // (requestAct), ends; its computer, looking again at the group's event,
+  // then puts that request to its person.
+  private roundBack(groupId: string, doer: string, asker: string | null | undefined, now: string): void {
     const act = asker ? this.store.openAct(groupId, asker, doer) : null;
-    if (act?.status !== "active" || this.due(act)) return;
+    if (act?.status !== "active") return;
+    const left = this.askedBy(groupId, doer, asker, "acting");
+    for (const r of left) this.store.setReceipt(groupId, r.seq, doer, "acting", null, r.epoch, now);
+    if (left.length) return;
     if (act.roundsUsed < act.maxRounds && !this.askedBy(groupId, doer, asker, "asking").length) return;
     this.end(act, now);
   }
@@ -895,13 +905,30 @@ export class GroupService {
     return old.length > 0;
   }
 
+  // 动手 under way whose round started over a day ago and never came back,
+  // such as a Codex that stopped or a Claude waiting for its person to allow
+  // a command: those requests did not get an answer, and the line under each
+  // says why; the act goes on with what waited behind them, or ends
+  // (roundBack). True when one did.
+  private expireActing(groupId: string, agent: string, since: number, now: string): boolean {
+    let expired = false;
+    for (const act of this.store.actsOf(groupId, agent, "active")) {
+      const old = this.askedBy(groupId, agent, act.asker, "acting").filter((r) => Date.parse(r.updatedAt) < since);
+      for (const r of old) this.store.setReceipt(groupId, r.seq, agent, "failed", "一天没发回结果", r.epoch, now);
+      if (old.length) this.roundBack(groupId, agent, act.asker, now);
+      expired ||= old.length > 0;
+    }
+    return expired;
+  }
+
   // What the caller's AIs (`agents`, on its computer) have to answer now. The
   // latest @ missed while the computer was off is taken up first, within a
   // day; one left for 每天次数 waits until its person raises them (setQuota)
   // or adds a day's more (addToday), so a computer coming back does not
   // spend today's on yesterday's. What it
   // was woken for over a day ago and never answered is too late: 不在线;
-  // 动手 left a day for its person ends (expireAsking).
+  // 动手 left a day for its person ends (expireAsking), and a round of 动手
+  // not back a day after it started fails (expireActing).
   work(caller: Caller, agents: string[]): { groupId: string; agent: string; seq: number }[] {
     const now = this.stamp();
     const since = this.now().getTime() - this.limits.catchUpMs;
@@ -913,7 +940,10 @@ export class GroupService {
         for (const r of this.store.receiptsOf(group.id, agent, ["reading"])) {
           if (Date.parse(r.updatedAt) < since) this.store.setReceipt(group.id, r.seq, agent, "offline", null, r.epoch, r.updatedAt);
         }
-        const { wake, expired } = this.transaction(() => ({ expired: this.expireAsking(group.id, agent, since, now), wake: this.takeUp(group, agent, ["offline"], now) }));
+        const { wake, expired } = this.transaction(() => ({
+          expired: [this.expireActing(group.id, agent, since, now), this.expireAsking(group.id, agent, since, now)].some(Boolean),
+          wake: this.takeUp(group, agent, ["offline"], now),
+        }));
         if (wake.length || expired) this.emit("group.updated", group.id, { wake });
         const waiting = this.waitingOn(group.id, agent, ["reading", "asking"]);
         for (const r of [...(waiting ? [waiting] : []), ...this.roundsOf(group.id, agent)]) out.push({ groupId: group.id, agent, seq: r.seq });

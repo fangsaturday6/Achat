@@ -1073,6 +1073,63 @@ describe("groups", () => {
     assert.deepEqual([anew.act.status, anew.act.id === act.id], ["asking", false]);
   });
 
+  test("a round of 动手 whose result is not back a day after it started fails, and what waited behind it goes on: the next round, or once ten are used a new yes", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    const ask = (body: string) => groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body, mentions: ["fang/claude"] }).messages.at(-1)!.seq;
+    const request = (seq: number) => groups.requestAct(computer("fang"), g.id, { doer: "fang/claude", seq });
+    const receipt = (seq: number) => groups.detail(web("fang"), g.id).messages.find((m) => m.seq === seq)!.receipts.find((r) => r.agent === "fang/claude")!;
+    const result = (replyTo: number) => groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "@老王的 Codex 好了", mentions: ["wang/codex"], replyTo, epoch: 0 });
+    const work = () => groups.work(computer("fang"), ["fang/claude"]).map((w) => w.seq);
+    const later = (hours: number) => (now = new Date(now.getTime() + hours * 60 * 60 * 1000));
+
+    // Round 1 never comes back, such as a Codex that stopped; a second request waits behind it.
+    const first = ask("@老方的 Claude 第一件");
+    const act = request(first).act;
+    groups.approveAct(computer("fang"), g.id, act.id);
+    later(20);
+    const second = ask("@老方的 Claude 第二件");
+    assert.equal(request(second).run, true);
+    later(5);
+    assert.deepEqual(work(), [second], "the next round is to start");
+    assert.deepEqual(receipt(first), { agent: "fang/claude", state: "failed", reason: "一天没发回结果" });
+    assert.equal(receipt(second).state, "acting");
+    // That round has its own day, from when the one before ended.
+    later(20);
+    assert.deepEqual(work(), [second]);
+    result(second);
+    assert.equal(groups.store.act(act.id)!.status, "active");
+
+    // Its last rounds never come back while an 11th waits: the act ends, and the 11th is put to its person.
+    let tenth = second;
+    for (let round = 3; round <= 10; round++) assert.equal(request((tenth = ask(`@老方的 Claude 第 ${round} 件`))).run, true);
+    const eleventh = ask("@老方的 Claude 第 11 件");
+    assert.equal(request(eleventh).act.id, act.id);
+    later(25);
+    assert.deepEqual(work(), [eleventh]);
+    assert.deepEqual(receipt(tenth), { agent: "fang/claude", state: "failed", reason: "一天没发回结果" });
+    assert.equal(groups.store.act(act.id)!.status, "done");
+    assert.equal(groups.detail(web("fang"), g.id).messages.filter((m) => m.kind === "system").at(-1)!.body, "老方的 Claude 动手 10 轮用完了");
+    const anew = request(eleventh);
+    assert.deepEqual([anew.run, anew.act.status, anew.act.id === act.id], [false, "asking", false]);
+  });
+
+  test("a round of 动手 that could not start ends its act as a result would, once nothing of it is left to do", () => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    const ask = (body: string) => groups.postMessage(computer("wang"), g.id, { from: "wang/codex", body, mentions: ["fang/claude"] }).messages.at(-1)!.seq;
+    const request = (seq: number) => groups.requestAct(computer("fang"), g.id, { doer: "fang/claude", seq });
+    const first = ask("@老方的 Claude 第 1 件");
+    const act = request(first).act;
+    groups.approveAct(computer("fang"), g.id, act.id);
+    groups.postMessage(computer("fang"), g.id, { from: "fang/claude", body: "好了", replyTo: first, epoch: 0 });
+    let tenth = first;
+    for (let round = 2; round <= 10; round++) request((tenth = ask(`@老方的 Claude 第 ${round} 件`)));
+    groups.fail(computer("fang"), g.id, { agent: "fang/claude", seq: tenth, reason: "打不开动手的对话：claude 没有登录" });
+    assert.equal(groups.store.act(act.id)!.status, "done");
+    assert.equal(groups.detail(web("fang"), g.id).messages.filter((m) => m.kind === "system").at(-1)!.body, "老方的 Claude 动手 10 轮用完了");
+  });
+
   test("reply_to from the front only sends back 动手's result: what the background is reading stays its to answer", () => {
     const g = start();
     groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });

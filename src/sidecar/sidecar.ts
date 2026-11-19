@@ -1022,6 +1022,12 @@ export class Sidecar {
         readDirs: [filesDir(groupId)],
         own: act.own,
         inGroup: true,
+        // Stopped with this round still under way: it never sent its result
+        // back. The service lets the act go on, as after a result.
+        onExit: () =>
+          void this.relay
+            .failGroup(groupId, { agent, seq: work.wake.seq, reason: "动手的对话停了，没发回结果" })
+            .catch((e: Error) => this.log(`${groupId} 第 ${work.wake.seq} 条动手的对话停了，没有传到：${e.message}`)),
       });
     } catch (err) {
       if (this.stopping.signal.aborted) return;

@@ -332,6 +332,13 @@ describe("a Codex conversation for 动手", () => {
     assert.match(log, /args: exec /);
   });
 
+  test("says once it has stopped, so a round that never sent its result back is not left under way", async () => {
+    const opener = new CodexTaskOpener(fakeCodex("echo codex; echo 画完了"), mkdtempSync(join(tmpdir(), "achat-scripts-")), mkdtempSync(join(tmpdir(), "achat-root-")), false, 10_000);
+    let stopped = false;
+    await opener.open({ threadId: "ga_1", topic: "画", prompt: "画", systemPrompt: "规则", onExit: () => (stopped = true) });
+    await until(async () => stopped);
+  });
+
   test("a run that fails at the start says why instead of waiting", async () => {
     const opener = new CodexTaskOpener(fakeCodex("echo 'ERROR: model is not supported'; exit 1"), mkdtempSync(join(tmpdir(), "achat-scripts-")), mkdtempSync(join(tmpdir(), "achat-root-")), false, 10_000);
     await assert.rejects(opener.open({ threadId: "t10", topic: "画", prompt: "画", systemPrompt: "规则" }), /打不开动手的对话：model is not supported/);

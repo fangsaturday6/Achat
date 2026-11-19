@@ -159,6 +159,9 @@ export interface TaskStart {
   // Told the folder it works in before the conversation starts, so what is
   // in there knows which 动手 it is (TaskBook.claim).
   claim?: (dir: string) => void;
+  // Told once the conversation has stopped, where that can be known: `codex
+  // exec` ends, a Claude Code background session does not say.
+  onExit?: () => void;
 }
 
 // What a task's record keeps of what it works with.
@@ -306,10 +309,13 @@ export class CodexTaskOpener implements TaskOpener {
     child.on("error", (err: NodeJS.ErrnoException) => {
       problem = err.code === "ENOENT" ? `这台电脑上找不到 ${this.command} 命令` : err.message;
     });
-    child.on("exit", (code) => {
-      ended = true;
-      if (code) problem ||= `codex 退出了（${code}）`;
-    });
+    const exited = new Promise<void>((resolve) =>
+      child.on("exit", (code) => {
+        ended = true;
+        if (code) problem ||= `codex 退出了（${code}）`;
+        resolve();
+      }),
+    );
     child.stdin?.on("error", () => {});
     child.stdin?.end(start.prompt);
     child.unref();
@@ -330,6 +336,7 @@ export class CodexTaskOpener implements TaskOpener {
       const hint = `关掉窗口不影响干活。要插话：在这个文件夹里运行 codex resume ${sessionId}`;
       await showWindow(this.scripts, name, dir, [`echo ${shellQuote(hint)}`, `exec tail -n +1 -f ${shellQuote(log)}`]);
     }
+    if (start.onExit) void exited.then(start.onExit);
     return { sessionId, dir, ...workingWith(start) };
   }
 }
