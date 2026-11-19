@@ -146,7 +146,8 @@ export interface TaskStart {
   // Folders outside its own it may read without asking, such as where the
   // thread's files are kept.
   readDirs?: string[];
-  // Between one person's own AIs: Codex's commands may then go online.
+  // Between one person's own AIs: Codex's commands may then go online, in a
+  // thread only (codexTaskArgs).
   own?: boolean;
   // 动手 asked for in a group (by an act's id): it hands the work back to
   // the group, not to a thread.
@@ -248,11 +249,13 @@ export class ClaudeTaskOpener implements TaskOpener {
 // with the person's own Codex settings: their model, image generation, and
 // Achat, which it hands the work back with. Nobody is there to approve a
 // command, so it writes only inside its folder, and its commands go online
-// only between one person's own AIs. Nor is anybody there to approve an MCP
-// call, which Codex asks for of Achat's tools, so those it hands the work
-// back with go ahead: a thread's for a thread, a group's for a group. Asking
-// anyone else, or speaking anywhere else, does not. A later conversation
-// resumes the earlier one.
+// only between one person's own AIs in a thread: in its sandbox it can read
+// the whole computer, and in a group, whoever asked, what it reads has
+// others' words in it, which could have it send files out. Nor is anybody
+// there to approve an MCP call, which Codex asks for of Achat's tools, so
+// those it hands the work back with go ahead: a thread's for a thread, a
+// group's for a group. Asking anyone else, or speaking anywhere else, does
+// not. A later conversation resumes the earlier one.
 const CODEX_HAND_BACK = { thread: ["send_message", "check_thread"], group: ["send_group_message", "check_group"] };
 
 export function codexTaskArgs(start: TaskStart): string[] {
@@ -261,7 +264,7 @@ export function codexTaskArgs(start: TaskStart): string[] {
     "-c",
     'sandbox_mode="workspace-write"',
     "-c",
-    `sandbox_workspace_write.network_access=${start.own === true}`,
+    `sandbox_workspace_write.network_access=${start.own === true && !start.inGroup}`,
     ...codexModelArgs(start),
     ...CODEX_HAND_BACK[start.inGroup ? "group" : "thread"].flatMap((tool) => ["-c", `mcp_servers.achat.tools.${tool}.approval_mode="approve"`]),
   ];

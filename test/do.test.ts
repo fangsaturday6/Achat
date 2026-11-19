@@ -264,7 +264,7 @@ test("the folder a 动手 conversation works in says which 动手 it is, the lat
   assert.equal(book.at(a), "t_2");
 });
 
-test("Codex works in its folder with nobody to approve commands: online only between one person's own AIs, and a later run resumes", () => {
+test("Codex works in its folder with nobody to approve commands: online only between one person's own AIs in a thread, and a later run resumes", () => {
   const first = codexTaskArgs({ threadId: "t1", topic: "画图", prompt: "画", systemPrompt: "规则" });
   assert.deepEqual(first.slice(0, 2), ["exec", "--skip-git-repo-check"]);
   assert.ok(first.includes('sandbox_mode="workspace-write"'));
@@ -282,6 +282,8 @@ test("Codex works in its folder with nobody to approve commands: online only bet
   // 动手 asked for in a group hands back to the group, and nothing else.
   const inGroup = codexTaskArgs({ threadId: "ga_1", topic: "支付对接", prompt: "做", systemPrompt: "规则", inGroup: true });
   assert.deepEqual(approved(inGroup), ["send_group_message", "check_group"]);
+  // What it reads in a group has others' words in it, whoever asked: never online.
+  assert.ok(codexTaskArgs({ threadId: "ga_1", topic: "支付对接", prompt: "做", systemPrompt: "规则", inGroup: true, own: true }).includes("sandbox_workspace_write.network_access=false"));
   assert.deepEqual(later.slice(0, 2), ["exec", "resume"]);
   assert.deepEqual(later.slice(-2), ["0199-abc", "-"]);
   assert.equal(codexSessionId("OpenAI Codex v0.169\n--------\nworkdir: /x\nsession id: 01a1e4e6-9149-7ef2-a71d-01b8e8de82bc\n--------"), "01a1e4e6-9149-7ef2-a71d-01b8e8de82bc");
