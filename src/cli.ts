@@ -14,13 +14,18 @@ function flag(args: string[], name: string): string | undefined {
 
 // Claude Code and Codex send the hook input on stdin as JSON; the hook needs
 // the path of the session's conversation log from it.
-async function readHookInput(): Promise<{ transcriptPath?: string }> {
+// What Claude Code and Codex hand the hook: the session's log, and the
+// folder it runs in.
+async function readHookInput(): Promise<{ transcriptPath?: string; cwd?: string }> {
   if (process.stdin.isTTY) return {};
   let raw = "";
   for await (const chunk of process.stdin) raw += chunk;
   try {
-    const input = JSON.parse(raw) as { transcript_path?: unknown };
-    return typeof input.transcript_path === "string" ? { transcriptPath: input.transcript_path } : {};
+    const input = JSON.parse(raw) as { transcript_path?: unknown; cwd?: unknown };
+    return {
+      ...(typeof input.transcript_path === "string" ? { transcriptPath: input.transcript_path } : {}),
+      ...(typeof input.cwd === "string" ? { cwd: input.cwd } : {}),
+    };
   } catch {
     return {};
   }
@@ -118,8 +123,11 @@ async function main(): Promise<void> {
       if (!localId) throw new Error("缺少 --agent");
       const input = await readHookInput();
       const { userPromptHook } = await import("./hook.js");
+      const { TaskBook } = await import("./sidecar/tasks.js");
       const conn = connect(cfg);
-      const out = await userPromptHook(conn.client, conn.agentId(localId), input);
+      // A 动手 conversation runs in the folder it works in.
+      const task = new TaskBook().at(input.cwd ?? process.cwd());
+      const out = await userPromptHook(conn.client, conn.agentId(localId), { transcriptPath: input.transcriptPath, task });
       if (out) process.stdout.write(out);
       return;
     }

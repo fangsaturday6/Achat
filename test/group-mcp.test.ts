@@ -369,7 +369,9 @@ test("waiting on its own person, the AI asking hears its other AI waits for 你�
   }
 });
 
-test("a 动手 conversation speaks only in the group it works for, and only to send back a request under way, reply_to filled in for it", async () => {
+// 老王's Codex asks 老方's Claude in 网关 to 动手, and 老方 says yes; 老方
+// also has a group of his own, 别的群. `wangOn`: 老王's computer stays on.
+async function actingFor(wangOn = false) {
   const { cloud, mailer } = await startTestCloud();
   const fang = await logIn(cloud, mailer, "fang@example.com", "老方");
   const wang = await logIn(cloud, mailer, "wang@example.com", "老王");
@@ -399,18 +401,38 @@ test("a 动手 conversation speaks only in the group it works for, and only to s
     log: () => {},
   });
   sidecar.start();
+  let heard = false;
+  const stayOn = wangOn ? wangLaptop.client.subscribe(undefined, () => {}, () => (heard = true)) : () => {};
+  const close = async () => {
+    sidecar.stop();
+    stayOn();
+    await cloud.close();
+  };
   try {
     const g = await wangLaptop.client.createGroup({ from: wangCodex, name: "网关", members: [{ account: fangId }] });
     const invite = (await fang.call("GET", "/api/groups")).find((s: any) => s.id === g.id).myInvite;
     await fang.call("POST", `/api/groups/${g.id}/invites/${invite.id}/accept`, { agents: [claude] });
     await fangMac.client.createGroup({ from: claude, name: "别的群", members: [{ account: wangId }] });
     await until(async () => (await wang.call("GET", `/api/groups/${g.id}`)).members.find((m: any) => m.agent === claude)?.online);
+    if (wangOn) {
+      await until(async () => heard);
+      await wangLaptop.client.beat();
+    }
     const seq = (await wangLaptop.client.postGroupMessage(g.id, { from: wangCodex, body: "@老方的 Claude 请你在网关加验签", mentions: [claude] })).messages.at(-1)!.seq;
     await until(async () => answers[0]);
     answers[0]("approve");
     await until(async () => opener.starts.length === 1);
-
     const doer = await mcp(fangMac.client, claude, actKey(g.id, wangCodex, claude));
+    return { fangMac, wangLaptop, claude, wangCodex, g, seq, doer, close };
+  } catch (err) {
+    await close();
+    throw err;
+  }
+}
+
+test("a 动手 conversation speaks only in the group it works for, and only to send back a request under way, reply_to filled in for it", async () => {
+  const { wangLaptop, g, seq, doer, close } = await actingFor();
+  try {
     const send = (args: Record<string, unknown>) => doer.callTool({ name: "send_group_message", arguments: { message: "@老王的 Codex 加好了", mentions: ["老王的 Codex"], wait: false, ...args } });
     const elsewhere = await send({ group: "别的群" });
     assert.equal(elsewhere.isError, true);
@@ -430,7 +452,33 @@ test("a 动手 conversation speaks only in the group it works for, and only to s
     assert.equal(thread.isError, true);
     assert.equal(textOf(thread), `你在替群「网关」里的老王的 Codex 动手，结果用 send_group_message（group: ${g.id}）发回群里。`);
   } finally {
-    sidecar.stop();
-    await cloud.close();
+    await close();
+  }
+});
+
+test("a 动手 conversation does not take the front session's news: what it reads there stays unseen, and its person's words to it bring up no group", async () => {
+  const { fangMac, wangLaptop, claude, wangCodex, g, seq, doer, close } = await actingFor(true);
+  try {
+    // 老方's front session asked 老王's Codex something, whose answer it has not read yet.
+    const front = await mcp(fangMac.client, claude);
+    const asked = textOf(await front.callTool({ name: "send_group_message", arguments: { group: g.id, message: "@老王的 Codex 网关在哪台机器", mentions: ["老王的 Codex"], wait: false } }));
+    const askedSeq = (await fangMac.client.group(g.id)).messages.at(-1)!.seq;
+    await wangLaptop.client.postGroupMessage(g.id, { from: wangCodex, body: "在 10 号机", replyTo: askedSeq, epoch: 0, sessionId: "s_wang" });
+    const unseen = async () => (await fangMac.client.unseenGroups(claude)).map((u) => u.id);
+    assert.deepEqual(await unseen(), [g.id]);
+
+    assert.match(textOf(await doer.callTool({ name: "check_group", arguments: { group: g.id } })), /在 10 号机/);
+    const sent = textOf(await doer.callTool({ name: "send_group_message", arguments: { group: g.id, message: "@老王的 Codex 加好了", mentions: ["老王的 Codex"], wait: false } }));
+    assert.equal(sent, `已发到群「网关」（${g.id}），不等回复。`, "nor is it told of answers to what the front said");
+    assert.equal((await wangLaptop.client.group(g.id)).messages.find((m) => m.seq === seq)!.receipts[0].state, "replied");
+    assert.deepEqual(await unseen(), [g.id], "still news for the front session");
+
+    // The person typing in the 动手 conversation is not told of the group; in the front session they are.
+    const log = join(mkdtempSync(join(tmpdir(), "achat-transcript-")), "doing.jsonl");
+    writeFileSync(log, JSON.stringify({ content: `${asked} ${g.id}` }) + "\n");
+    assert.equal(await userPromptHook(fangMac.client, claude, { transcriptPath: log, task: actKey(g.id, wangCodex, claude) }), null);
+    assert.notEqual(await userPromptHook(fangMac.client, claude, { transcriptPath: log }), null);
+  } finally {
+    await close();
   }
 });

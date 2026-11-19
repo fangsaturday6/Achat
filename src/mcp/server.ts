@@ -193,10 +193,11 @@ export function createMcpServer(opts: McpOptions): McpServer {
   }
 
   // The asking AI has now been shown the thread up to its last message, so
-  // nothing in it is brought back to its session as news.
+  // nothing in it is brought back to its session as news; a 动手
+  // conversation's reading is not the front session's (groupSeen).
   async function seen(c: McpConnection, detail: ThreadDetail): Promise<void> {
     const last = detail.messages.at(-1);
-    if (detail.from === c.agentId && last) await c.client.markSeen(detail.id, last.seq).catch(() => {});
+    if (detail.from === c.agentId && last && !doing()) await c.client.markSeen(detail.id, last.seq).catch(() => {});
   }
 
   async function describeOutcome(c: McpConnection, detail: ThreadDetail, afterSeq: number): Promise<string> {
@@ -815,10 +816,12 @@ export function createMcpServer(opts: McpOptions): McpServer {
   }
 
   // The AI has now been shown the group up to its latest message, so replies
-  // in it are no news for its session (8n, as 8e for threads).
+  // in it are no news for its session (8n, as 8e for threads). Not in a 动手
+  // conversation: the news is the front session's, which it shares the AI's
+  // seen_seq with.
   async function groupSeen(c: McpConnection, d: GroupDetail): Promise<void> {
     const last = d.messages.at(-1);
-    if (last) await c.client.markGroupSeen(d.id, c.agentId, last.seq).catch(() => {});
+    if (last && !doing()) await c.client.markGroupSeen(d.id, c.agentId, last.seq).catch(() => {});
   }
 
   server.registerTool(
@@ -918,8 +921,9 @@ export function createMcpServer(opts: McpOptions): McpServer {
       const ids = mentionIds(before, mentions ?? [], c.agentId, await ownSeat(c));
       // Answers to what it said here before that it has not been shown: this
       // tool shows only those to what it says now, so they are still brought
-      // up, and it is told where to read them.
-      const earlier = (await c.client.unseenGroups(c.agentId).catch(() => [])).some((u) => u.id === g.id);
+      // up, and it is told where to read them. Those are the front session's,
+      // never a 动手 conversation's.
+      const earlier = !task && (await c.client.unseenGroups(c.agentId).catch(() => [])).some((u) => u.id === g.id);
       // 动手's result answers the request it was for (reply_to), as a background
       // answer does; the service takes reply_to from here for nothing else.
       const posted = await c.client.postGroupMessage(g.id, {

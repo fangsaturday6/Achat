@@ -7,6 +7,10 @@ import type { ThreadSummary, UnseenGroup } from "./types.js";
 export interface HookInput {
   // The session's own conversation log, as Claude Code and Codex hand it to hooks.
   transcriptPath?: string;
+  // The 动手 this session does (its TaskBook key, by the folder it runs in),
+  // if it is a 动手 conversation: what is answered in groups is the front
+  // session's news, not its own.
+  task?: string | null;
 }
 
 // The session's own log, which tells the threads and groups it took part in:
@@ -40,7 +44,7 @@ export async function userPromptHook(client: RelayClient, agentId: string, input
       client.listThreads({ unseen: agentId }),
       // Groups need an account: on this computer alone, or with an Achat
       // service from before, there are none, and the rest is still told.
-      client.unseenGroups(agentId).catch(() => []),
+      input.task ? [] : client.unseenGroups(agentId).catch(() => []),
     ]);
   } catch {
     return null;
