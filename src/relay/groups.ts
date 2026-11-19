@@ -747,9 +747,12 @@ export class GroupService {
         this.end(open, now);
       }
       if (open?.status === "asking") return { act: this.store.updateAct(open.id, { askSeq: Math.max(open.askSeq, input.seq) }, now), run: false };
-      // A new act answers the latest of what waits: several may have waited for the one before to end.
-      const askSeq = Math.max(input.seq, ...this.askedBy(groupId, input.doer, asker, "asking").map((x) => x.seq));
-      const own = this.ownAsk(this.store.message(groupId, askSeq)!, member.owner);
+      // A new act answers the latest of what waits: several may have waited
+      // for the one before to end, and starting it does them all, so it is
+      // its person's own only when every one of them is.
+      const waiting = this.askedBy(groupId, input.doer, asker, "asking");
+      const askSeq = Math.max(...waiting.map((x) => x.seq));
+      const own = waiting.every((x) => this.ownAsk(this.store.message(groupId, x.seq)!, member.owner));
       const act = this.store.addAct(
         { id: `ga_${randomBytes(6).toString("hex")}`, groupId, asker, doer: input.doer, status: "asking", own, maxRounds: GROUP_ACT_ROUNDS, roundsUsed: 0, askSeq },
         now,

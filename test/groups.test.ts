@@ -959,6 +959,23 @@ describe("groups", () => {
     assert.equal(groups.store.act(again.id)!.status, "active");
     const later = request(echo());
     assert.deepEqual([later.run, later.act.status, later.act.own, groups.store.act(again.id)!.status], [false, "asking", false, "done"]);
+    groups.declineAct(computer("fang"), g.id, later.act.id);
+
+    // Its ten rounds used, an echo and its own asking both wait: the act after needs a yes, since starting it would do both.
+    const fronts: number[] = [];
+    const ownAsk = () => groups.postMessage(computer("fang"), g.id, { from: "fang/codex", body: "@老方的 Claude 接着整理", mentions: ["fang/claude"] }).messages.at(-1)!.seq;
+    for (let round = 1; round <= 10; round++) {
+      fronts.push(ownAsk());
+      assert.equal(request(fronts.at(-1)!).run, true);
+      if (round < 10) result(fronts.at(-1)!);
+    }
+    const echoed = echo();
+    request(echoed);
+    const mine = ownAsk();
+    request(mine);
+    result(fronts.at(-1)!);
+    const next2 = request(mine);
+    assert.deepEqual([next2.run, next2.act.status, next2.act.own], [false, "asking", false]);
   });
 
   test("动手 under way is listed act by act beside what waits for its person, and fetched by message with every request it has still to answer", () => {
