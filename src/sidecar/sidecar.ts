@@ -6,8 +6,8 @@ import type { AgentClient, AgentConfig } from "../config.js";
 import { NO_PICK, resolveUse, type ModelOffer, type ModelUse } from "../models.js";
 import { redact } from "../redact.js";
 import { cjk } from "../text.js";
-import { beijingDay, mentionsIn, passReason } from "../groups.js";
-import { MIN_ROUND_BUDGET_USD, MODE_LABELS, MORE_SCOPE, todayTotal, waitingForAsker, type GroupAct, type GroupEvent, type GroupMessage, type GroupWork, type Message, type RelayEvent, type ThreadDetail, type ThreadMode } from "../types.js";
+import { mentionsIn, passReason } from "../groups.js";
+import { MIN_ROUND_BUDGET_USD, MODE_LABELS, MORE_SCOPE, quotaLowAt, todayTotal, waitingForAsker, type GroupAct, type GroupEvent, type GroupMessage, type GroupWork, type Message, type RelayEvent, type ThreadDetail, type ThreadMode } from "../types.js";
 import type { Alerter, Asker, Asking, Chooser, Choosing } from "./dialog.js";
 import { LoginWait } from "./login-wait.js";
 import type { Notifier } from "./notify.js";
@@ -356,8 +356,8 @@ export class Sidecar {
   // that opened each.
   private offered = new Set<string>();
   private choosing = new Map<string, Choosing>();
-  // 每天次数 running low already put to the person, by group, AI and 北京时间 day.
-  private warned = new Set<string>();
+  // 每天次数 running low put to the person: the dialog on screen, by group and AI.
+  private lowWakes = new Map<string, { groupId: string; agent: string; choosing: Choosing }>();
   // The asker's words being judged 问答 or 动手, once each.
   private judging = new Map<string, Promise<ThreadDetail>>();
   // Requests to 动手 in a group put to the person here: by act, the request
@@ -568,23 +568,25 @@ export class Sidecar {
     if (e.type === "group.quotaLow") {
       for (const agent of e.members) if (this.mine(agent)) void this.offerMoreWakes(e.groupId, agent);
     }
+    if (e.type === "group.updated") {
+      for (const low of this.lowWakes.values()) if (low.groupId === e.groupId) void this.closeMoreWakesIfDone(low.groupId, low.agent);
+    }
     if (e.type === "group.mention" && e.seq !== undefined) void this.tellMention(e.groupId, e.seq);
     if (e.type === "group.invited") void this.tellInvited(e.groupId);
   }
 
   // An AI here has few of today's 每天次数 left in a group (8n): the person
-  // is asked, once a day for each group and AI, whether to give it a day's
-  // more, the same choice as a conversation's last round (8o). Where no
-  // dialog can be shown, a notification opens the group's settings, where
-  // the 次数 are set.
+  // is asked whether to give it a day's more, the same choice as a
+  // conversation's last round (8o); the service says so once a day for each
+  // group and AI, also across restarts. Where no dialog can be shown, a
+  // notification opens the group's settings, where the 次数 are set.
   private async offerMoreWakes(groupId: string, agent: string): Promise<void> {
-    const key = `${groupId}:${agent}:${beijingDay(new Date())}`;
-    if (this.warned.has(key)) return;
-    this.warned.add(key);
+    const key = `${groupId}:${agent}`;
     try {
       const g = await this.relay.group(groupId);
       const m = g.members.find((x) => x.agent === agent);
-      if (!m || m.quota === undefined || m.usedToday === undefined) return;
+      // One on screen already, such as yesterday's not answered yet, stands.
+      if (!m || m.quota === undefined || m.usedToday === undefined || this.lowWakes.has(key)) return;
       const total = todayTotal({ quota: m.quota, extraToday: m.extraToday });
       const title = cjk(m.name.replace(/^我的/, "你的"), `在「${g.name}」群今天还剩 ${total - m.usedToday} 次`);
       const body = `${m.usedToday} / ${total} 次`;
@@ -593,8 +595,27 @@ export class Sidecar {
         this.opts.notify(title, body, `${this.opts.webUrl}/#/g/${groupId}/settings`);
         return;
       }
-      if ((await choosing.answer) === "more") await this.relay.addGroupExtra(groupId, agent);
+      this.lowWakes.set(key, { groupId, agent, choosing });
+      const answer = await choosing.answer.finally(() => this.lowWakes.delete(key));
+      if (answer === "more") await this.relay.addGroupExtra(groupId, agent);
     } catch (err) {
+      if (!this.stopping.signal.aborted) this.log(`${groupId} 的次数弹框：${(err as Error).message}`);
+    }
+  }
+
+  // The 每天次数 dialog goes once it is no longer needed: the group was 叫停
+  // or dissolved, the AI left it, or its 次数 for today were raised
+  // elsewhere (on the web, by its AI, on another computer) past nearly used up.
+  private async closeMoreWakesIfDone(groupId: string, agent: string): Promise<void> {
+    const close = () => this.lowWakes.get(`${groupId}:${agent}`)?.choosing.close();
+    try {
+      const g = await this.relay.group(groupId);
+      const m = g.members.find((x) => x.agent === agent);
+      if (g.status !== "open" || m?.quota === undefined || m.usedToday === undefined) return close();
+      if (todayTotal({ quota: m.quota, extraToday: m.extraToday }) - m.usedToday > quotaLowAt(m.quota)) close();
+    } catch (err) {
+      // Its person has no AI left there: the group is gone from their view.
+      if (err instanceof RelayClientError && err.status === 404) return close();
       if (!this.stopping.signal.aborted) this.log(`${groupId} 的次数弹框：${(err as Error).message}`);
     }
   }

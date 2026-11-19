@@ -395,6 +395,48 @@ describe("an AI @ed in a group answers in the background", () => {
     assert.deepEqual(elsewhere, [], "nothing on the computer without that AI");
   });
 
+  test("the 每天次数 dialog goes once it is no longer needed: the 次数 raised elsewhere, the group 叫停, the AI gone from it", async () => {
+    const claude = fangMac.agent("claude");
+    const shown: { title: string; closed: boolean }[] = [];
+    sidecarFor(fangMac, claude, counting(), {
+      choose: (prompt) => {
+        const dialog = { title: prompt.title, closed: false };
+        shown.push(dialog);
+        let resolve!: (c: Choice) => void;
+        const answer = new Promise<Choice>((r) => (resolve = r));
+        return {
+          answer,
+          close: () => {
+            dialog.closed = true;
+            resolve("stop");
+          },
+        };
+      },
+    });
+    const nearly = async (name: string) => {
+      const g = await ownGroup(name, [claude]);
+      await fangMac.client.setGroupQuota(g.id, claude, 12);
+      await wake(g.id, claude, 7);
+      return { g, dialog: await until(async () => shown.find((d) => d.title.includes(name))) };
+    };
+
+    const raised = await nearly("调高");
+    // Something else changes there: still nearly used up.
+    await fang.call("POST", `/api/groups/${raised.g.id}/rename`, { name: "调高了" });
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(raised.dialog.closed, false);
+    await fang.call("POST", `/api/groups/${raised.g.id}/quota`, { agent: claude, perDay: 30 });
+    await until(async () => raised.dialog.closed);
+
+    const stopped = await nearly("叫停");
+    await fang.call("POST", `/api/groups/${stopped.g.id}/stop`, {});
+    await until(async () => stopped.dialog.closed);
+
+    const left = await nearly("退群");
+    await fangMac.client.leaveGroup(left.g.id, claude);
+    await until(async () => left.dialog.closed);
+  });
+
   test("where no dialog can be shown a notification opens the group's settings, and a day asks once", async () => {
     const claude = fangMac.agent("claude");
     const told: string[][] = [];

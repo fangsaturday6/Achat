@@ -281,6 +281,13 @@ export function todayTotal(m: { quota: number; extraToday?: number }): number {
   return m.quota + (m.extraToday ?? 0);
 }
 
+// Nearly used up (8n): this many of today's left in a group, 5, or 1 for an
+// AI woken fewer than 10 times a day; its person is asked whether to add a
+// day's more.
+export function quotaLowAt(quota: number): number {
+  return quota < 10 ? 1 : 5;
+}
+
 // A group where someone answered what an AI said in front since its front
 // session last looked there, with the newest such answer.
 export interface UnseenGroup {

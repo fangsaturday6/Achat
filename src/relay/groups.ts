@@ -19,6 +19,7 @@ import {
   type GroupSummary,
   type GroupTarget,
   type GroupWork,
+  quotaLowAt,
   type ReceiptState,
   todayTotal,
   type UnseenGroup,
@@ -279,7 +280,7 @@ export class GroupService {
       woken.push(agent);
       const { used, extra } = this.store.usage(group.id, agent, day);
       const left = todayTotal({ quota: member.quota, extraToday: extra }) - used;
-      if (left > 0 && left <= (member.quota < 10 ? 1 : 5) && this.store.warn(group.id, agent, day)) this.low.push({ groupId: group.id, agent });
+      if (left > 0 && left <= quotaLowAt(member.quota) && this.store.warn(group.id, agent, day)) this.low.push({ groupId: group.id, agent });
     }
     return woken;
   }
