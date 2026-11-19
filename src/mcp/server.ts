@@ -972,9 +972,12 @@ export function createMcpServer(opts: McpOptions): McpServer {
       const earlier = !task && (await c.client.unseenGroups(c.agentId).catch(() => [])).some((u) => u.id === g.id);
       // 动手's result answers the request it was for (reply_to), as a background
       // answer does; the service takes reply_to from here for nothing else.
+      // Like a background answer, and 动手's in a thread, it is filtered.
+      const filtered = task ? redact(message) : { text: message, count: 0 };
       const posted = await c.client.postGroupMessage(g.id, {
         from: c.agentId,
-        body: message,
+        body: filtered.text,
+        ...(filtered.count ? { redactions: filtered.count } : {}),
         mentions: ids,
         files: files?.length ? readFiles(files) : undefined,
         ...(replyTo !== undefined ? { replyTo, epoch: before.epoch } : {}),

@@ -442,8 +442,12 @@ test("a 动手 conversation speaks only in the group it works for, and only to s
     const wrong = await send({ group: g.id, reply_to: 1 });
     assert.equal(wrong.isError, true);
     assert.equal(textOf(wrong), `reply_to 要填这次动手正在做的请求：第 ${seq} 条。`);
-    assert.equal(textOf(await send({ group: g.id })), `已发到群「网关」（${g.id}），不等回复。`);
-    assert.equal((await wangLaptop.client.group(g.id)).messages.at(-1)!.replyTo, seq);
+    // What it sends back is filtered, as a background answer is.
+    assert.equal(textOf(await send({ group: g.id, message: "@老王的 Codex 加好了，密钥 sk-ant-abcdefghijklmnop1234，日志在 /Users/fang/网关/log" })), `已发到群「网关」（${g.id}），不等回复。`);
+    const back = (await wangLaptop.client.group(g.id)).messages.at(-1)!;
+    assert.equal(back.replyTo, seq);
+    assert.equal(back.body, "@老王的 Codex 加好了，密钥 [已过滤：密钥]，日志在 ~/网关/log");
+    assert.equal(back.redactions, 2);
     assert.equal(await fangMac.client.groupWorkFor(g.id, claude, false, seq), null, "answered: nothing waits on it");
     const done = await send({ group: g.id });
     assert.equal(done.isError, true);
