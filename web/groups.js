@@ -42,6 +42,39 @@ export function invitesWaiting(groups) {
   return groups.filter((g) => g.role === "invited").length;
 }
 
+// 消息's number, the conversations that need the person and the invites
+// waiting on them, and the label that says which.
+export function messagesBadge(conversations, invites) {
+  const what = [conversations ? `${conversations} 个对话` : null, invites ? `${invites} 个进群邀请` : null].filter(Boolean);
+  return { count: conversations + invites, label: what.length ? `消息，${what.join("、")}等你看` : "消息" };
+}
+
+// A group's address in /api/groups, and its parts after: an action ("leave"),
+// or an invite and what is done with it. No group: /api/groups itself.
+export function groupPath(...parts) {
+  return ["/api/groups", ...parts.map(encodeURIComponent)].join("/");
+}
+
+// What 消息 and the open group show once /api/groups and the group's own
+// address (`wanted`, if one is open) answer, each as Promise.allSettled
+// gives it. What failed keeps what `before` showed, the open group only if
+// it is the same one; a group the person cannot open (404: removed from it,
+// left it, or a wrong link) is `gone`, and the page goes back to 消息.
+export function loadedGroups(before, wanted, list, one) {
+  const groups = list.status === "fulfilled" ? list.value : before.groups;
+  if (!wanted) return { groups, group: null, gone: false };
+  if (one.status === "fulfilled") return { groups, group: one.value, gone: false };
+  const gone = one.reason?.status === 404;
+  return { groups, group: !gone && before.group?.id === wanted ? before.group : null, gone };
+}
+
+// One of the person's own AIs: a member of a group, one in /api/agents, or
+// one picked, all carry their account as `owner`. (The relay sends 每天次数
+// with the person's own members alone.)
+export function isMine(m, me) {
+  return m.owner === me;
+}
+
 // A name as written in the group, from nobody's side, as the AIs read and
 // write it ("@老方的 Claude"); the page names the person's own "我的 Claude".
 export function plainName(name, myName) {
@@ -123,9 +156,9 @@ export function receiptLine(receipts, names) {
 // Who the person can @, as the list under "@" shows them: 所有人 first, then
 // the AIs that are on (others' before the person's own), then those whose
 // computer is off, and last, grayed out, those that cannot answer yet.
-// `query`: what was typed after the @.
-export function pickerOptions(members, query = "") {
-  const rank = (m) => (!m.canReceive ? 3 : !m.online ? 2 : m.quota !== undefined ? 1 : 0);
+// `me`: the person's account; `query`: what was typed after the @.
+export function pickerOptions(members, me, query = "") {
+  const rank = (m) => (!m.canReceive ? 3 : !m.online ? 2 : isMine(m, me) ? 1 : 0);
   const ais = members
     .map((m, i) => ({ m, i }))
     .filter(({ m }) => fits(m.name, query))
@@ -194,8 +227,8 @@ export function composeMessage(text, members, myName) {
 // The person's AI nearest its 每天次数, for the bottom of the group: "我的
 // Claude 今天 12 / 30 次". Nearest is the fewest times left; of those, the
 // one with more of its share used. `full` once it is used up. Null without one.
-export function quotaLine(members) {
-  const mine = members.filter((m) => m.quota !== undefined);
+export function quotaLine(members, me) {
+  const mine = members.filter((m) => isMine(m, me));
   if (!mine.length) return null;
   const left = (m) => m.quota - m.usedToday;
   const nearer = (a, b) => left(b) < left(a) || (left(b) === left(a) && b.usedToday / b.quota > a.usedToday / a.quota);
@@ -210,8 +243,8 @@ export function quotaLine(members) {
 // the one trace of it left.
 export function sentByMe(sender, g, me, agents) {
   if (sender === `p_${me}`) return true;
-  const owner = g.members.find((m) => m.agent === sender)?.owner ?? agents.get(sender)?.owner;
-  if (owner !== undefined) return owner === me;
+  const known = g.members.find((m) => m.agent === sender) ?? agents.get(sender);
+  if (known?.owner !== undefined) return isMine(known, me);
   return (g.names[sender] ?? "").startsWith("我的");
 }
 
@@ -226,16 +259,16 @@ export function isAnswering(g) {
 export function settingsView(g, me) {
   const open = g.status !== "dissolved";
   const owner = g.owner === me;
-  const mine = g.members.filter((m) => m.quota !== undefined);
+  const mine = g.members.filter((m) => isMine(m, me));
   return { rename: owner && open, invite: open, quotas: open ? mine : [], mine, leave: mine.length > 0, dissolve: owner && open };
 }
 
-// The members in 群设置: the AIs in the group (the person's own marked
+// The members in 群设置: the AIs in the group (the person `me`'s own marked
 // `mine`), then those invited, who show as 等加入. `id`: the AI, or the
 // invite, with whom it is for and the AI it asks for by name, if one.
-export function settingsTiles(g) {
+export function settingsTiles(g, me) {
   return [
-    ...g.members.map((m) => ({ id: m.agent, name: m.name, waiting: false, mine: m.quota !== undefined })),
+    ...g.members.map((m) => ({ id: m.agent, name: m.name, waiting: false, mine: isMine(m, me) })),
     ...g.invites.map((i) => ({ id: i.id, name: i.agentName ?? i.name, waiting: true, mine: false, account: i.account, agent: i.agent })),
   ];
 }
@@ -258,7 +291,7 @@ export function tileActions(tile, g, me) {
 export function leaveNote(g, me, agents) {
   if (g.status === "dissolved") return "退出后你就看不到这个群了。";
   const rest = g.members.filter((m) => !agents.includes(m.agent));
-  if (rest.some((m) => m.owner === me)) return cjk(g.members.find((m) => m.agent === agents[0]).name, "退出后不会再被叫醒。");
+  if (rest.some((m) => isMine(m, me))) return cjk(g.members.find((m) => m.agent === agents[0]).name, "退出后不会再被叫醒。");
   if (!rest.length) return "群里只剩你的 AI，退出后群会解散。";
   if (g.owner === me) return `退出后群主交给${ownerName(rest[0].name)}，你也看不到这个群了。`;
   return "退出后你的 AI 不会再被叫醒，你也看不到这个群了。";
@@ -273,6 +306,12 @@ export function quotaOf(text) {
   if (!/^\d+$/.test(digits)) return null;
   const n = Number(digits);
   return n >= 1 && n <= QUOTA.max ? n : null;
+}
+
+// What is wrong with 每天次数 as typed, in the relay's words (checkQuota in
+// src/relay/groups.ts); null when quotaOf takes it.
+export function quotaProblem(text) {
+  return quotaOf(text) === null ? `每天次数需要在 1 到 ${QUOTA.max} 之间` : null;
 }
 
 // What is picked in 发起群聊 and 邀请: people ({person, name}), who choose
@@ -293,7 +332,7 @@ export function togglePick(picked, item) {
 // What stops 完成: a new group needs one of the person's own AIs (as
 // createGroup in src/relay/groups.ts checks); an invite (`group`) does not.
 export function pickProblem(picked, me, group) {
-  return !group && !picked.some((p) => p.owner === me) ? "群里至少要有你自己的一个 AI" : null;
+  return !group && !picked.some((p) => isMine(p, me)) ? "群里至少要有你自己的一个 AI" : null;
 }
 
 // The rows of 发起群聊 and 邀请: a heading, the person's own AIs, a heading,
@@ -317,7 +356,7 @@ export function pickerRows({ me, agents, contacts, group = null, query = "", ope
     waiting,
     indent,
   });
-  const own = agents.filter((a) => a.owner === me && a.client !== "person" && !inGroup.has(a.id) && fits(a.name)).map((a) => ai(a, me, asked(me, a), false));
+  const own = agents.filter((a) => isMine(a, me) && a.client !== "person" && !inGroup.has(a.id) && fits(a.name)).map((a) => ai(a, me, asked(me, a), false));
   const friends = contacts.flatMap((f) => {
     const out = f.agents.filter((a) => !inGroup.has(a.id));
     const isIn = (group?.members ?? []).some((m) => m.owner === f.id);
@@ -358,7 +397,7 @@ export function targetsOf(picked) {
 // already says so, as with two Claudes: "我的 Claude（MacBook）".
 export function inviteChoices(invites, agents, me, devices = []) {
   const named = invites.every((i) => i.agent) ? invites.map((i) => i.agent) : null;
-  const mine = agents.filter((a) => a.owner === me && a.client !== "person");
+  const mine = agents.filter((a) => isMine(a, me) && a.client !== "person");
   const shown = named ? mine.filter((a) => named.includes(a.id)) : mine;
   return shown.map((a) => {
     const device = devices.find((d) => d.agents?.some((x) => x.id === a.id))?.name ?? null;

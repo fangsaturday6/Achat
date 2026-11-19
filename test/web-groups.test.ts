@@ -16,12 +16,18 @@ describe("the page's modules", () => {
   before(async () => ({ relay } = await startTestRelay()));
   after(() => relay.close());
 
-  test("every script parses, and what app.js imports is served as JavaScript", async () => {
-    for (const file of ["app.js", "text.js", "groups.js"]) execFileSync(process.execPath, ["--check", join(WEB, file)]);
-    // An import may run over several lines.
-    const imports = [...readFileSync(join(WEB, "app.js"), "utf8").matchAll(/^import [\s\S]*? from "\.\/(.+)";$/gm)].map((m) => m[1]);
-    assert.deepEqual(imports.sort(), ["groups.js", "text.js"]);
-    for (const file of imports) {
+  test("every script parses, and what app.js imports, and what those import, is served as JavaScript", async () => {
+    const files = new Set<string>();
+    const visit = (file: string) => {
+      if (files.has(file)) return;
+      files.add(file);
+      execFileSync(process.execPath, ["--check", join(WEB, file)]);
+      // An import may run over several lines.
+      for (const m of readFileSync(join(WEB, file), "utf8").matchAll(/^import [\s\S]*? from "\.\/(.+)";$/gm)) visit(m[1]);
+    };
+    visit("app.js");
+    assert.deepEqual([...files].sort(), ["app.js", "group-view.js", "groups.js", "redraw.js", "text.js"]);
+    for (const file of files) {
       const res = await fetch(`${relay.url}/${file}`);
       assert.equal(res.status, 200, file);
       assert.match(res.headers.get("content-type") ?? "", /javascript/, file);
@@ -49,6 +55,54 @@ test("a group in 消息: the invite waiting in red, else who said the latest wor
   assert.deepEqual(page.groupPreview({ ...base, role: "invited", myInvite: {} }), { pending: true, text: "有人邀请你" });
   assert.deepEqual(page.groupPreview({ ...base, lastMessage: said, lastSender: null }), { pending: false, text: "可以，网关把原始报文落一份" });
   assert.equal(page.invitesWaiting([{ ...base, role: "invited" }, { ...base, unread: true }]), 1);
+});
+
+test("消息's number says what waits: conversations, invites to groups, or both", () => {
+  assert.deepEqual(page.messagesBadge(2, 0), { count: 2, label: "消息，2 个对话等你看" });
+  assert.deepEqual(page.messagesBadge(0, 1), { count: 1, label: "消息，1 个进群邀请等你看" });
+  assert.deepEqual(page.messagesBadge(2, 1), { count: 3, label: "消息，2 个对话、1 个进群邀请等你看" });
+  assert.deepEqual(page.messagesBadge(0, 0), { count: 0, label: "消息" });
+});
+
+test("a group's addresses in /api/groups, each part encoded", () => {
+  assert.equal(page.groupPath(), "/api/groups");
+  assert.equal(page.groupPath("g_1"), "/api/groups/g_1");
+  assert.equal(page.groupPath("g_1", "leave"), "/api/groups/g_1/leave");
+  assert.equal(page.groupPath("g/1", "invites", "gi 2", "accept"), "/api/groups/g%2F1/invites/gi%202/accept");
+});
+
+describe("what 消息 and the open group show once /api/groups answers", () => {
+  const ok = (value: unknown) => ({ status: "fulfilled", value });
+  const failed = (status: number) => ({ status: "rejected", reason: Object.assign(new Error("连不上 Achat"), { status }) });
+  const a = { id: "g_a", name: "支付对接" };
+  const b = { id: "g_b", name: "发版" };
+  const shown = { id: "g_a", name: "支付对接", messages: [] };
+  const fresh = { id: "g_a", name: "支付对接", messages: [{ seq: 1 }] };
+  const before = { groups: [a], group: shown };
+
+  test("both answer: what they sent", () => {
+    assert.deepEqual(page.loadedGroups(before, "g_a", ok([a, b]), ok(fresh)), { groups: [a, b], group: fresh, gone: false });
+  });
+
+  test("the list fails: 消息 keeps the groups it had", () => {
+    assert.deepEqual(page.loadedGroups(before, "g_a", failed(0), ok(fresh)), { groups: [a], group: fresh, gone: false });
+    assert.deepEqual(page.loadedGroups(before, "g_a", failed(500), ok(fresh)).groups, [a]);
+  });
+
+  test("the open group fails: it stays as it was shown, unless it is another one", () => {
+    assert.deepEqual(page.loadedGroups(before, "g_a", ok([a, b]), failed(0)), { groups: [a, b], group: shown, gone: false });
+    assert.deepEqual(page.loadedGroups(before, "g_a", ok([a, b]), failed(500)).group, shown);
+    assert.deepEqual(page.loadedGroups(before, "g_b", ok([a, b]), failed(0)), { groups: [a, b], group: null, gone: false });
+  });
+
+  test("a group the person cannot open (removed from it, left it, or a wrong link) is gone: back to 消息", () => {
+    assert.deepEqual(page.loadedGroups(before, "g_a", ok([b]), failed(404)), { groups: [b], group: null, gone: true });
+    assert.deepEqual(page.loadedGroups(before, "g_x", failed(0), failed(404)), { groups: [a], group: null, gone: true });
+  });
+
+  test("no group open: none, whatever was shown before", () => {
+    assert.deepEqual(page.loadedGroups(before, null, ok([a, b]), ok(null)), { groups: [a, b], group: null, gone: false });
+  });
 });
 
 test("each @ reads from the person's side, while the words keep nobody's side", () => {
@@ -105,16 +159,23 @@ test("the line under a message says who did not reply, the same state together, 
 
 // 支付对接 from 老方's side, in the order they joined.
 const MEMBERS = [
-  { agent: "f/claude", name: "我的 Claude", canReceive: true, online: true, quota: 30, usedToday: 12 },
-  { agent: "w/codex", name: "老王的 Codex", canReceive: true, online: true },
-  { agent: "w/claude", name: "老王的 Claude", canReceive: true, online: true },
-  { agent: "l/claude", name: "小林的 Claude", canReceive: true, online: false },
-  { agent: "l/doubao", name: "小林的豆包", canReceive: false, online: false },
-  { agent: "c/codex", name: "王闯的 Codex", canReceive: true, online: true },
+  { agent: "f/claude", name: "我的 Claude", owner: "fang", canReceive: true, online: true, quota: 30, usedToday: 12 },
+  { agent: "w/codex", name: "老王的 Codex", owner: "wang", canReceive: true, online: true },
+  { agent: "w/claude", name: "老王的 Claude", owner: "wang", canReceive: true, online: true },
+  { agent: "l/claude", name: "小林的 Claude", owner: "lin", canReceive: true, online: false },
+  { agent: "l/doubao", name: "小林的豆包", owner: "lin", canReceive: false, online: false },
+  { agent: "c/codex", name: "王闯的 Codex", owner: "chuang", canReceive: true, online: true },
 ];
 
+test("the person's own AIs in a group, or of theirs anywhere, are those of their account", () => {
+  assert.equal(page.isMine(MEMBERS[0], "fang"), true);
+  assert.equal(page.isMine(MEMBERS[1], "fang"), false);
+  assert.equal(page.isMine(MEMBERS[1], "wang"), true);
+  assert.equal(page.isMine({ agent: "f/claude", owner: "fang" }, "fang"), true, "an AI from /api/agents, or one picked");
+});
+
 test("the list under @: 所有人, the AIs that are on (the person's own after), those off, and grayed out last those that cannot answer", () => {
-  assert.deepEqual(page.pickerOptions(MEMBERS).map((o: any) => [o.name, o.note, o.disabled]), [
+  assert.deepEqual(page.pickerOptions(MEMBERS, "fang").map((o: any) => [o.name, o.note, o.disabled]), [
     ["所有人", null, false],
     ["老王的 Codex", null, false],
     ["老王的 Claude", null, false],
@@ -123,9 +184,11 @@ test("the list under @: 所有人, the AIs that are on (the person's own after),
     ["小林的 Claude", "不在线", false],
     ["小林的豆包", "还不能接收", true],
   ]);
-  assert.deepEqual(page.pickerOptions(MEMBERS, "老王").map((o: any) => o.name), ["老王的 Codex", "老王的 Claude"]);
-  assert.deepEqual(page.pickerOptions(MEMBERS, "all").map((o: any) => o.id), [ALL]);
-  assert.deepEqual(page.pickerOptions(MEMBERS, "没有这个人"), []);
+  assert.deepEqual(page.pickerOptions(MEMBERS, "fang", "老王").map((o: any) => o.name), ["老王的 Codex", "老王的 Claude"]);
+  assert.deepEqual(page.pickerOptions(MEMBERS, "fang", "all").map((o: any) => o.id), [ALL]);
+  assert.deepEqual(page.pickerOptions(MEMBERS, "fang", "没有这个人"), []);
+  // From 老王's side, his own two go after the others that are on.
+  assert.deepEqual(page.pickerOptions(MEMBERS.slice(0, 3), "wang").map((o: any) => o.id), [ALL, "f/claude", "w/codex", "w/claude"]);
 });
 
 test("the @ being typed is found just before the caret", () => {
@@ -191,17 +254,17 @@ test("what the person writes goes in with its @s, each AI named from nobody's si
 });
 
 test("the bottom names the person's AI nearest its 每天次数, red once used up; 叫停 shows while an AI reads", () => {
-  assert.deepEqual(page.quotaLine(MEMBERS), { agent: "f/claude", text: "我的 Claude 今天 12 / 30 次", full: false });
-  const two = [MEMBERS[0], { agent: "f/codex", name: "我的 Codex", canReceive: true, online: true, quota: 5, usedToday: 5 }];
-  assert.deepEqual(page.quotaLine(two), { agent: "f/codex", text: "我的 Codex 今天 5 / 5 次", full: true });
-  assert.equal(page.quotaLine(MEMBERS.slice(1)), null);
+  assert.deepEqual(page.quotaLine(MEMBERS, "fang"), { agent: "f/claude", text: "我的 Claude 今天 12 / 30 次", full: false });
+  const two = [MEMBERS[0], { agent: "f/codex", name: "我的 Codex", owner: "fang", canReceive: true, online: true, quota: 5, usedToday: 5 }];
+  assert.deepEqual(page.quotaLine(two, "fang"), { agent: "f/codex", text: "我的 Codex 今天 5 / 5 次", full: true });
+  assert.equal(page.quotaLine(MEMBERS.slice(1), "fang"), null);
   // Nearest is the fewest times left, not the most used by share.
-  const big = { agent: "f/claude", name: "我的 Claude", canReceive: true, online: true, quota: 500, usedToday: 400 };
-  const small = { agent: "f/codex", name: "我的 Codex", canReceive: true, online: true, quota: 5, usedToday: 0 };
-  assert.equal(page.quotaLine([big, small]).agent, "f/codex");
+  const big = { agent: "f/claude", name: "我的 Claude", owner: "fang", canReceive: true, online: true, quota: 500, usedToday: 400 };
+  const small = { agent: "f/codex", name: "我的 Codex", owner: "fang", canReceive: true, online: true, quota: 5, usedToday: 0 };
+  assert.equal(page.quotaLine([big, small], "fang").agent, "f/codex");
   // As many left: the one with more of its share used.
-  assert.equal(page.quotaLine([{ ...big, quota: 20, usedToday: 10 }, { ...small, quota: 100, usedToday: 90 }]).agent, "f/codex");
-  assert.equal(page.quotaLine([{ ...small, quota: 100, usedToday: 90 }, { ...big, quota: 20, usedToday: 10 }]).agent, "f/codex");
+  assert.equal(page.quotaLine([{ ...big, quota: 20, usedToday: 10 }, { ...small, quota: 100, usedToday: 90 }], "fang").agent, "f/codex");
+  assert.equal(page.quotaLine([{ ...small, quota: 100, usedToday: 90 }, { ...big, quota: 20, usedToday: 10 }], "fang").agent, "f/codex");
   const msg = (state: string) => ({ receipts: [{ agent: "c/codex", state, reason: null }] });
   assert.equal(page.isAnswering({ status: "open", messages: [msg("passed"), msg("reading")] }), true);
   assert.equal(page.isAnswering({ status: "open", messages: [msg("passed")] }), false);
@@ -218,13 +281,14 @@ test("群设置 lists the members, then those invited as 等加入; a click on e
       { id: "gi_2", name: "小林", agent: null, agentName: null },
     ],
   };
-  const tiles = page.settingsTiles(g);
+  const tiles = page.settingsTiles(g, "fang");
   assert.deepEqual(tiles.map((t: any) => [t.id, t.name, t.waiting, t.mine]), [
     ["f/claude", "我的 Claude", false, true],
     ["w/codex", "老王的 Codex", false, false],
     ["gi_1", "王闯的 Claude", true, false],
     ["gi_2", "小林", true, false],
   ]);
+  assert.deepEqual(page.settingsTiles(g, "wang").map((t: any) => t.mine), [false, true, false, false], "老王's own, from his side");
   assert.deepEqual(tiles.map((t: any) => page.tileActions(t, g, "fang")), [["leave"], ["remove"], [], []]);
   assert.deepEqual(page.tileActions(tiles[1], g, "wang"), [], "only 群主 removes another's AI");
   assert.deepEqual(page.tileActions(tiles[0], { ...g, status: "dissolved" }, "fang"), []);
@@ -241,7 +305,7 @@ test("群设置: someone in the group answers an invite for another of their AIs
       { id: "gi_3", account: "lin", name: "小林", agent: "l/claude", agentName: "小林的 Claude" },
     ],
   };
-  const tiles = page.settingsTiles(g);
+  const tiles = page.settingsTiles(g, "chuang");
   assert.deepEqual(tiles.slice(1).map((t: any) => [t.id, t.account, t.agent]), [
     ["gi_1", "chuang", "c/claude"],
     ["gi_2", "chuang", null],
@@ -286,6 +350,11 @@ test("每天次数 as typed: a whole number from 1 to 500, in half- or full-widt
   assert.equal(page.quotaOf("５００"), 500);
   assert.equal(page.quotaOf("５0"), 50);
   for (const bad of ["0", "501", "０", "５０１", "2.5", "5.", "1e2", "0x10", "+5", "-1", "", " ", "三十"]) assert.equal(page.quotaOf(bad), null, bad);
+});
+
+test("每天次数 out of range says so in the relay's words, written once for 群设置 and the invite card", () => {
+  for (const bad of ["0", "501", "三十", ""]) assert.equal(page.quotaProblem(bad), `每天次数需要在 1 到 ${GROUP_LIMITS.maxQuota} 之间`, bad);
+  for (const good of ["1", " 30 ", "３０", "500"]) assert.equal(page.quotaProblem(good), null, good);
 });
 
 test("发起群聊: a friend, or some of their AIs, never both; what 完成 sends", () => {

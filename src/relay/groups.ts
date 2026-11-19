@@ -429,11 +429,10 @@ export class GroupService {
 
   // The person picks which of their AIs join, or those asked for by name
   // join (leaving out any since removed), and how many times a day each may
-  // be woken here.
+  // be woken here. A dissolved group's invite is refused by requireInvite.
   acceptInvite(caller: Caller, groupId: string, inviteId: string, input: { agents?: string[]; quota?: number }): GroupDetail {
     const invite = this.requireInvite(caller, groupId, inviteId);
     const group = this.requireGroup(groupId);
-    this.requireOpen(group);
     const card = this.card(caller, groupId, invite);
     const named = card.every((i) => i.agent) ? card.map((i) => i.agent!) : null;
     const agents = named ? named.filter((a) => this.dir.agent(a)) : [...new Set(input.agents ?? [])];
