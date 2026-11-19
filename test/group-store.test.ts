@@ -102,3 +102,21 @@ test("a database from before 前台提醒 has each AI's front session start at i
   new GroupStore(store);
   assert.deepEqual(groups.unseenReplies("a"), [{ groupId: "g_1", seq: answer.seq }]);
 });
+
+test("adding the front session's column and starting it at each group's latest message go together: interrupted, the next start does both", () => {
+  const store = new Store(":memory:");
+  const before = new GroupStore(store);
+  const now = "2026-11-18T02:00:00.000Z";
+  before.createGroup({ id: "g_1", name: "前台", owner: "fang" }, now);
+  before.addMember({ groupId: "g_1", agent: "a", owner: "fang", quota: 30, joinedSeq: 0 }, now);
+  const asked = before.addMessage("g_1", { sender: "a", kind: "message", body: "@b 好了吗", mentions: ["b"] }, now);
+  before.addMessage("g_1", { sender: "b", kind: "message", body: "好了", replyTo: asked.seq }, now);
+  store.db.exec("ALTER TABLE group_members DROP COLUMN seen_seq");
+  // Starting stops between the two, such as the process being killed.
+  store.db.exec("CREATE TRIGGER stop_here BEFORE UPDATE ON group_members BEGIN SELECT RAISE(ABORT, 'stopped'); END");
+  assert.throws(() => new GroupStore(store), /stopped/);
+  store.db.exec("DROP TRIGGER stop_here");
+  const groups = new GroupStore(store);
+  assert.equal(groups.member("g_1", "a")!.seenSeq, 2);
+  assert.deepEqual(groups.unseenReplies("a"), []);
+});

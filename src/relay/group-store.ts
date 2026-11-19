@@ -280,9 +280,12 @@ export class GroupStore {
     addColumn(this.db, "group_acts", "own", "INTEGER NOT NULL DEFAULT 0");
     // Members from before have their front session start where their group
     // is now: what was answered before is no news, as for one joining now.
-    if (addColumn(this.db, "group_members", "seen_seq", "INTEGER NOT NULL DEFAULT 0")) {
-      this.db.exec("UPDATE group_members SET seen_seq = (SELECT COALESCE(MAX(seq), 0) FROM group_messages WHERE group_id = group_members.group_id)");
-    }
+    // Both or neither, or a start stopped between them would never fill it in.
+    this.transaction(() => {
+      if (addColumn(this.db, "group_members", "seen_seq", "INTEGER NOT NULL DEFAULT 0")) {
+        this.db.exec("UPDATE group_members SET seen_seq = (SELECT COALESCE(MAX(seq), 0) FROM group_messages WHERE group_id = group_members.group_id)");
+      }
+    });
   }
 
   transaction<T>(fn: () => T): T {
