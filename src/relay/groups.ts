@@ -97,7 +97,8 @@ export interface GroupPostInput {
 export class GroupService {
   readonly store: GroupStore;
   private events = new EventEmitter();
-  // AIs a wake just brought near today's 每天次数, told of by the next emit.
+  // AIs a wake just brought near today's 每天次数, told of by the emit after
+  // its change; dropped when the change is undone (transaction).
   private low: { groupId: string; agent: string }[] = [];
 
   constructor(
@@ -137,6 +138,18 @@ export class GroupService {
 
   private stamp(): string {
     return this.now().toISOString();
+  }
+
+  // A change to a group, all or nothing. Undone, the AIs it brought near
+  // their 每天次数 are not told of: marking them told was undone with it.
+  private transaction<T>(fn: () => T): T {
+    const low = this.low.length;
+    try {
+      return this.store.transaction(fn);
+    } catch (err) {
+      this.low.length = low;
+      throw err;
+    }
   }
 
   // An AI or a person's seat, named from `viewer`'s side (from nobody's by default).
@@ -366,7 +379,7 @@ export class GroupService {
   private drop(group: Group, agent: string, note: string): void {
     const now = this.stamp();
     let invited: string[] = [];
-    this.store.transaction(() => {
+    this.transaction(() => {
       this.store.leaveMember(group.id, agent, now);
       // What it was still reading, or asked to 动手 for, stays unanswered, and
       // the line under it says why; what was asked of it ends with it.
@@ -409,7 +422,7 @@ export class GroupService {
     const now = this.stamp();
     const id = `g_${randomBytes(5).toString("hex")}`;
     const asked: string[] = [];
-    const opened = this.store.transaction(() => {
+    const opened = this.transaction(() => {
       this.store.createGroup({ id, name, owner: caller.account }, now);
       for (const agent of join) this.store.addMember({ groupId: id, agent, owner: caller.account, quota: this.limits.quota, joinedSeq: 0 }, now);
       for (const t of invite) if (this.offer(id, t, from.id, now)) asked.push(t.account);
@@ -441,7 +454,7 @@ export class GroupService {
     const now = this.stamp();
     // Someone already in is not told: their AI asked for waits on a tile in 群设置.
     const asked: string[] = [];
-    const wake = this.store.transaction(() => {
+    const wake = this.transaction(() => {
       for (const t of fresh) if (this.offer(groupId, t, from.id, now) && !members.some((m) => m.owner === t.account)) asked.push(t.account);
       return this.admit(group, newcomers, caller.account, this.limits.quota, now);
     });
@@ -490,7 +503,7 @@ export class GroupService {
     const newcomers = agents.filter((a) => !members.some((m) => m.agent === a));
     if (members.length + newcomers.length > this.limits.maxMembers) throw new RelayError(409, `群里最多 ${this.limits.maxMembers} 个 AI`);
     const now = this.stamp();
-    const wake = this.store.transaction(() => {
+    const wake = this.transaction(() => {
       for (const i of card) this.store.answerInvite(i.id, "accepted");
       return this.admit(group, newcomers, caller.account, quota, now);
     });
@@ -500,7 +513,7 @@ export class GroupService {
 
   declineInvite(caller: Caller, groupId: string, inviteId: string): { ok: true } {
     const invite = this.requireInvite(caller, groupId, inviteId);
-    this.store.transaction(() => {
+    this.transaction(() => {
       for (const i of this.card(caller, groupId, invite)) this.store.answerInvite(i.id, "declined");
     });
     this.emit("group.updated", groupId, {}, [this.dir.seat(caller.account)]);
@@ -526,7 +539,7 @@ export class GroupService {
     // 动手's result, sent back for a request under way.
     const acting = answering && this.store.receipt(groupId, input.replyTo!, from.id)?.state === "acting";
     const now = this.stamp();
-    const posted = this.store.transaction(() => {
+    const posted = this.transaction(() => {
       const msg = this.store.addMessage(
         groupId,
         {
@@ -566,7 +579,7 @@ export class GroupService {
     if (!caller.actsAs(input.agent)) throw new RelayError(403, "只有被叫醒的 AI 可以这样回");
     this.requireReading(group, input.agent, input.seq, input.epoch);
     const reason = (input.reason ?? "").trim().split("\n")[0].slice(0, 60) || null;
-    this.store.transaction(() => this.settle(groupId, input.agent, input.seq, "passed", reason, input, this.stamp()));
+    this.transaction(() => this.settle(groupId, input.agent, input.seq, "passed", reason, input, this.stamp()));
     this.emit("group.updated", groupId, { seq: input.seq });
     return this.detail(caller, groupId);
   }
@@ -655,7 +668,7 @@ export class GroupService {
     // Asked for already, such as a retry or after a restart: nothing changes.
     if (open && r.state !== "reading") return { act: open, run: open.status === "active" };
     const now = this.stamp();
-    const result = this.store.transaction((): { act: GroupAct; run: boolean } => {
+    const result = this.transaction((): { act: GroupAct; run: boolean } => {
       if (open?.status === "active" && open.roundsUsed < open.maxRounds) {
         this.store.setReceipt(groupId, input.seq, input.doer, "acting", null, r.epoch, now);
         // askSeq is the latest request: two that came together may be judged newest first.
@@ -679,7 +692,7 @@ export class GroupService {
   // Its person said yes in the dialog on its computer.
   approveAct(caller: Caller, groupId: string, actId: string): GroupAct {
     const act = this.requireAsking(caller, groupId, actId);
-    const started = this.store.transaction(() => this.startAct(act, this.stamp()));
+    const started = this.transaction(() => this.startAct(act, this.stamp()));
     this.emit("group.updated", groupId, { seq: act.askSeq });
     return started;
   }
@@ -688,7 +701,7 @@ export class GroupService {
   declineAct(caller: Caller, groupId: string, actId: string): GroupAct {
     const act = this.requireAsking(caller, groupId, actId);
     const now = this.stamp();
-    const declined = this.store.transaction(() => {
+    const declined = this.transaction(() => {
       for (const r of this.askedBy(groupId, act.doer, act.asker, "asking")) this.store.setReceipt(groupId, r.seq, act.doer, "passed", "主人没同意动手", r.epoch, now);
       return this.store.updateAct(act.id, { status: "declined" }, now);
     });
@@ -703,7 +716,7 @@ export class GroupService {
     this.requireOpen(group);
     if (group.status === "stopped") return this.detail(caller, groupId);
     const now = this.stamp();
-    this.store.transaction(() => {
+    this.transaction(() => {
       this.store.updateGroup(groupId, { status: "stopped", epoch: group.epoch + 1 }, now);
       // Everything still waiting stops: what is being read, what was left
       // for a computer that was off or a 每天次数 used up, so “继续” or a
@@ -723,7 +736,7 @@ export class GroupService {
     this.requireOpen(group);
     if (group.status !== "stopped") return this.detail(caller, groupId);
     const now = this.stamp();
-    this.store.transaction(() => {
+    this.transaction(() => {
       this.store.updateGroup(groupId, { status: "open" }, now);
       this.store.addMessage(groupId, { sender: null, kind: "system", body: cjk(this.who(caller, by), "让群里接着聊") }, now);
     });
@@ -748,7 +761,7 @@ export class GroupService {
     this.requireOwnMember(caller, groupId, input.agent);
     const perDay = this.checkQuota(input.perDay);
     const now = this.stamp();
-    const wake = this.store.transaction(() => {
+    const wake = this.transaction(() => {
       this.store.setQuota(groupId, input.agent, perDay);
       return this.takeUp(this.store.group(groupId)!, input.agent, ["quota"], now);
     });
@@ -764,7 +777,7 @@ export class GroupService {
   addToday(caller: Caller, groupId: string, input: { agent: string }): GroupDetail {
     const member = this.requireOwnMember(caller, groupId, input.agent);
     const now = this.stamp();
-    const wake = this.store.transaction(() => {
+    const wake = this.transaction(() => {
       this.store.addShare(groupId, input.agent, beijingDay(this.now()), member.quota);
       return this.takeUp(this.store.group(groupId)!, input.agent, ["quota"], now);
     });
@@ -801,7 +814,7 @@ export class GroupService {
         for (const r of this.store.receiptsOf(group.id, agent, ["reading"])) {
           if (Date.parse(r.updatedAt) < since) this.store.setReceipt(group.id, r.seq, agent, "offline", null, r.epoch, r.updatedAt);
         }
-        const wake = this.store.transaction(() => this.takeUp(group, agent, ["offline"], now));
+        const wake = this.transaction(() => this.takeUp(group, agent, ["offline"], now));
         if (wake.length) this.emit("group.updated", group.id, { wake });
         const waiting = this.waitingOn(group.id, agent);
         if (waiting) out.push({ groupId: group.id, agent, seq: waiting.seq });
@@ -873,7 +886,7 @@ export class GroupService {
     const now = this.stamp();
     // Those still invited hear of it once more.
     const invited = this.store.openInvites(groupId, now).map((i) => this.dir.seat(i.account));
-    this.store.transaction(() => {
+    this.transaction(() => {
       this.store.updateGroup(groupId, { status: "dissolved" }, now);
       for (const from of STOPPABLE) this.store.moveAll(groupId, from, "stopped", now);
       this.store.endActs(groupId, "stopped", now);
@@ -892,7 +905,7 @@ export class GroupService {
     // The same name again: nothing to tell the group.
     if (clean === group.name) return this.detail(caller, groupId);
     const now = this.stamp();
-    this.store.transaction(() => {
+    this.transaction(() => {
       this.store.updateGroup(groupId, { name: clean }, now);
       this.store.addMessage(groupId, { sender: null, kind: "system", body: `群名改成「${clean}」` }, now);
     });

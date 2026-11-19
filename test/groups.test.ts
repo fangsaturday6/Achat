@@ -592,6 +592,27 @@ describe("groups", () => {
     assert.equal(low.length, 3, "used up is not told again");
   });
 
+  test("an AI brought near its 每天次数 by a change that was undone is told of neither then nor by a later event", (t) => {
+    const g = start();
+    groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
+    groups.setQuota(web("fang"), g.id, { agent: "fang/codex", perDay: 2 });
+    const low: GroupEvent[] = [];
+    groups.onEvent((e) => e.type === "group.quotaLow" && low.push(e));
+    // Writing what became of 老王's Codex fails, after 老方's Codex was woken down to 1 left.
+    const setReceipt = groups.store.setReceipt.bind(groups.store);
+    const failing = t.mock.method(groups.store, "setReceipt", (...args: Parameters<typeof setReceipt>) => {
+      if (args[2] === "wang/codex") throw new Error("磁盘满了");
+      setReceipt(...args);
+    });
+    assert.throws(() => groups.postMessage(web("fang"), g.id, { from: "p_fang", body: "@所有人 看看", mentions: [ALL] }), /磁盘满了/);
+    failing.mock.restore();
+    groups.rename(web("fang"), g.id, "支付");
+    assert.deepEqual(low, [], "nothing of what was undone");
+    // Undone with it, being told is still to come.
+    groups.postMessage(web("fang"), g.id, { from: "p_fang", body: "@老方的 Codex 看看", mentions: ["fang/codex"] });
+    assert.deepEqual(low, [{ type: "group.quotaLow", groupId: g.id, members: ["fang/codex"] }]);
+  });
+
   test("加一份 lets an AI be woken another day's 每天次数 today only, and takes up the latest @ kept for it; only its person adds it", () => {
     const g = start();
     groups.acceptInvite(web("wang"), g.id, inviteTo(g, "wang"), { agents: ["wang/codex"] });
