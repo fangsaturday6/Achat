@@ -3,7 +3,8 @@ import { after, afterEach, before, describe, mock, test } from "node:test";
 import { RelayClientError } from "../src/client.js";
 import type { RunningCloud } from "../src/cloud/server.js";
 import { BudgetExceededError, type AgentRunner, type RunInput, type RunOutput } from "../src/sidecar/runners.js";
-import { Sidecar } from "../src/sidecar/sidecar.js";
+import type { Choice, ChoicePrompt } from "../src/sidecar/dialog.js";
+import { Sidecar, type SidecarOptions } from "../src/sidecar/sidecar.js";
 import type { GroupDetail } from "../src/types.js";
 import { addComputer, type Browser, logIn, ScriptedRunner, startTestCloud, until, type MemoryMailer } from "./helpers.js";
 
@@ -50,8 +51,8 @@ describe("an AI @ed in a group answers in the background", () => {
     sidecars = [];
   });
 
-  function sidecarFor(computer: typeof fangMac, agent: string, runner: AgentRunner): void {
-    const sidecar = new Sidecar({ client: computer.client, agents: [], runners: { [agent]: runner }, notify: () => {}, webUrl: cloud.url, log: () => {} });
+  function sidecarFor(computer: typeof fangMac, agent: string, runner: AgentRunner, more: Partial<SidecarOptions> = {}): void {
+    const sidecar = new Sidecar({ client: computer.client, agents: [], runners: { [agent]: runner }, notify: () => {}, webUrl: cloud.url, log: () => {}, ...more });
     sidecar.start();
     sidecars.push(sidecar);
   }
@@ -148,6 +149,106 @@ describe("an AI @ed in a group answers in the background", () => {
     const d: GroupDetail = await fang.call("GET", `/api/groups/${g.id}`);
     assert.ok(!d.messages.some((m) => m.body === "晚到的回答"));
     assert.equal(d.messages.find((m) => m.seq === asked.messages.at(-1).seq)!.receipts[0].state, "stopped");
+  });
+
+  // Says it need not reply every time, so only the 每天次数 count.
+  const counting = (): AgentRunner => new ByPrompt(() => "无需回复：只是在数次数");
+
+  // An AI is in the group with its computer on: its event stream is open,
+  // so the computer hears what comes next.
+  async function online(groupId: string, agent: string): Promise<void> {
+    await until(async () => (await fang.call("GET", `/api/groups/${groupId}`)).members.find((m: any) => m.agent === agent)?.online);
+  }
+
+  // 老方's own AIs in a group of their own, their computers on.
+  async function ownGroup(name: string, agents: string[]): Promise<GroupDetail> {
+    const [first, ...others] = agents;
+    const g = await fangMac.client.createGroup({ from: first, name, members: others.map((agent) => ({ agent })) });
+    for (const agent of agents) await online(g.id, agent);
+    return g;
+  }
+
+  // 老方 @s his AI `n` times; each wake uses one of its 每天次数.
+  async function wake(groupId: string, agent: string, n: number): Promise<void> {
+    for (let i = 1; i <= n; i++) await fang.call("POST", `/api/groups/${groupId}/messages`, { from: fangSeat, body: `第 ${i} 次`, mentions: [agent] });
+  }
+
+  test("with 5 of today's 30 left the person is asked once, 加 30 次 adds a day's more, and their other computer stays quiet", async () => {
+    const claude = fangMac.agent("claude");
+    const iMac = await addComputer(cloud, fang, "iMac", ["codex"]);
+    const codex = iMac.agent("codex");
+    const asked: ChoicePrompt[] = [];
+    let pick!: (c: Choice) => void;
+    sidecarFor(fangMac, claude, counting(), {
+      choose: (prompt) => {
+        asked.push(prompt);
+        const answer = new Promise<Choice>((r) => (pick = r));
+        return { answer, close: () => pick("stop") };
+      },
+    });
+    // The same account's other computer hears the event too, and has no such AI.
+    const elsewhere: string[] = [];
+    sidecarFor(iMac, codex, counting(), {
+      choose: (prompt) => {
+        elsewhere.push(prompt.title);
+        return null;
+      },
+      notify: (title) => elsewhere.push(title),
+    });
+    const g = await ownGroup("支付对接", [claude, codex]);
+
+    await wake(g.id, claude, 25);
+    await until(async () => asked.length === 1);
+    assert.deepEqual(asked[0], { icon: "answer", title: "你的 Claude 在「支付对接」群今天还剩 5 次", body: "25 / 30 次", more: "加 30 次", stop: "用完就停" });
+    pick("more");
+    const mine = await until(async () => {
+      const d: GroupDetail = await fang.call("GET", `/api/groups/${g.id}`);
+      const m = d.members.find((x) => x.agent === claude)!;
+      return m.extraToday === 30 ? m : null;
+    });
+    assert.deepEqual([mine.quota, mine.usedToday], [30, 25], "a day's more on top; the 每天次数 itself stays");
+    assert.deepEqual(elsewhere, [], "nothing on the computer without that AI");
+  });
+
+  test("where no dialog can be shown a notification opens the group's settings, and a day asks once", async () => {
+    const claude = fangMac.agent("claude");
+    const told: string[][] = [];
+    sidecarFor(fangMac, claude, counting(), { choose: () => null, notify: (title, body, url) => told.push([title, body, url]) });
+    const g = await ownGroup("发版计划", [claude]);
+    await fangMac.client.setGroupQuota(g.id, claude, 12);
+
+    await wake(g.id, claude, 7);
+    await until(async () => told.length === 1);
+    assert.deepEqual(told[0], ["你的 Claude 在「发版计划」群今天还剩 5 次", "7 / 12 次", `${cloud.url}/#/g/${g.id}/settings`]);
+    await wake(g.id, claude, 1);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(told.length, 1, "4 left asks nothing more today");
+  });
+
+  test("its own AI @ing the person, and an invite to a group, each show a notification that opens the group", async () => {
+    const claude = fangMac.agent("claude");
+    const codex = wangLaptop.agent("codex");
+    const fangTold: string[][] = [];
+    const wangTold: string[][] = [];
+    sidecarFor(fangMac, claude, new ScriptedRunner([]), { notify: (title, body, url) => fangTold.push([title, body, url]) });
+    sidecarFor(wangLaptop, codex, new ScriptedRunner([]), { notify: (title, body, url) => wangTold.push([title, body, url]) });
+    const g = await meeting("支付对接");
+    await online(g.id, claude);
+    const page = `${cloud.url}/#/g/${g.id}`;
+
+    const body = "@老方 微信商户号用哪家公司的营业执照，你来定";
+    await fangMac.client.postGroupMessage(g.id, { from: claude, body, mentions: [fangSeat] });
+    assert.deepEqual(await until(async () => fangTold.find(([, said]) => said.includes("营业执照"))), ["支付对接", `我的 Claude：${body}`, page]);
+    const long = `@老方 ${"这句话很长".repeat(30)}`;
+    await fangMac.client.postGroupMessage(g.id, { from: claude, body: long, mentions: [fangSeat] });
+    assert.deepEqual(await until(async () => fangTold.find(([, said]) => said.includes("这句话很长"))), ["支付对接", `我的 Claude：${long.slice(0, 100)}`, page]);
+    assert.ok(!wangTold.some(([, said]) => said.startsWith("我的 Claude")), "only 老方 is told");
+
+    // 老方 starts another group on the web and invites 老王, whose computer is on.
+    const later = await fang.call("POST", "/api/groups", { from: fangSeat, name: "发版计划", members: [{ agent: claude }, { account: wangId }] });
+    const card = `${cloud.url}/#/g/${later.id}`;
+    assert.deepEqual(await until(async () => wangTold.find(([, , url]) => url === card)), ["发版计划", "[待加入] 老方邀请你", card]);
+    assert.ok(!fangTold.some(([, , url]) => url === card), "the one who invited is not told");
   });
 });
 

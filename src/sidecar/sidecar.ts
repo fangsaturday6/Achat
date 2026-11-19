@@ -6,7 +6,7 @@ import type { AgentClient, AgentConfig } from "../config.js";
 import { NO_PICK, resolveUse, type ModelOffer, type ModelUse } from "../models.js";
 import { redact } from "../redact.js";
 import { cjk } from "../text.js";
-import { mentionsIn, passReason } from "../groups.js";
+import { beijingDay, mentionsIn, passReason } from "../groups.js";
 import { MIN_ROUND_BUDGET_USD, MODE_LABELS, MORE_SCOPE, waitingForAsker, type GroupEvent, type GroupWork, type Message, type RelayEvent, type ThreadDetail, type ThreadMode } from "../types.js";
 import type { Alerter, Asker, Asking, Chooser, Choosing } from "./dialog.js";
 import { LoginWait } from "./login-wait.js";
@@ -302,6 +302,8 @@ export class Sidecar {
   // Last rounds already put to the person, by thread and question.
   private offered = new Set<string>();
   private choosing = new Map<string, Choosing>();
+  // 每天次数 running low already put to the person, by group, AI and 北京时间 day.
+  private warned = new Set<string>();
   // The asker's words being judged 问答 or 动手, once each.
   private judging = new Map<string, Promise<ThreadDetail>>();
   // Waiting out a login that ran out, and trying a slow answer once more.
@@ -488,9 +490,70 @@ export class Sidecar {
     if (e.type !== "message.created" || e.sender === e.from) void this.answer(e.threadId);
   }
 
-  // A group's message woke AIs here.
+  // A group's message woke AIs here, or the person here is to be told: an AI
+  // here has few 每天次数 left, their own AI @ed them, or they were invited.
+  // The last two only come to the person's own pages and computers.
   private onGroupEvent(e: GroupEvent): void {
     for (const agent of e.wake ?? []) if (this.mine(agent)) void this.answerGroup(e.groupId, agent);
+    if (e.type === "group.quotaLow") {
+      for (const agent of e.members) if (this.mine(agent)) void this.offerMoreWakes(e.groupId, agent);
+    }
+    if (e.type === "group.mention" && e.seq !== undefined) void this.tellMention(e.groupId, e.seq);
+    if (e.type === "group.invited") void this.tellInvited(e.groupId);
+  }
+
+  // An AI here has few of today's 每天次数 left in a group (8n): the person
+  // is asked, once a day for each group and AI, whether to give it a day's
+  // more, the same choice as a conversation's last round (8o). Where no
+  // dialog can be shown, a notification opens the group's settings, where
+  // the 次数 are set.
+  private async offerMoreWakes(groupId: string, agent: string): Promise<void> {
+    const key = `${groupId}:${agent}:${beijingDay(new Date())}`;
+    if (this.warned.has(key)) return;
+    this.warned.add(key);
+    try {
+      const g = await this.relay.group(groupId);
+      const m = g.members.find((x) => x.agent === agent);
+      if (!m || m.quota === undefined || m.usedToday === undefined) return;
+      const total = m.quota + (m.extraToday ?? 0);
+      const title = cjk(m.name.replace(/^我的/, "你的"), `在「${g.name}」群今天还剩 ${total - m.usedToday} 次`);
+      const body = `${m.usedToday} / ${total} 次`;
+      const choosing = this.opts.choose?.({ icon: "answer", title, body, more: `加 ${m.quota} 次`, stop: "用完就停" });
+      if (!choosing) {
+        this.opts.notify(title, body, `${this.opts.webUrl}/#/g/${groupId}/settings`);
+        return;
+      }
+      if ((await choosing.answer) === "more") await this.relay.addGroupExtra(groupId, agent);
+    } catch (err) {
+      if (!this.stopping.signal.aborted) this.log(`${groupId} 的次数弹框：${(err as Error).message}`);
+    }
+  }
+
+  // The person's own AI @ed them in a group: the group's name, then who said
+  // what, cut short; the notification opens the group.
+  private async tellMention(groupId: string, seq: number): Promise<void> {
+    try {
+      const g = await this.relay.group(groupId);
+      const m = g.messages.find((x) => x.seq === seq);
+      if (!m?.sender) return;
+      // Not cjk(): it puts a space before "：" after a Latin name.
+      this.opts.notify(g.name, `${g.names[m.sender] ?? m.sender}：${m.body.slice(0, 100)}`, `${this.opts.webUrl}/#/g/${groupId}`);
+    } catch (err) {
+      if (!this.stopping.signal.aborted) this.log(`${groupId} 的 @ 提醒：${(err as Error).message}`);
+    }
+  }
+
+  // The person here was invited to a group; the card to join is on the web
+  // page, which the notification opens. Someone already in the group, asked
+  // for another of their AIs, finds that in the group's settings instead.
+  private async tellInvited(groupId: string): Promise<void> {
+    try {
+      const g = await this.relay.group(groupId);
+      if (!g.myInvite) return;
+      this.opts.notify(g.name, `[待加入] ${cjk(g.myInvite.invitedByName, "邀请你")}`, `${this.opts.webUrl}/#/g/${groupId}`);
+    } catch (err) {
+      if (!this.stopping.signal.aborted) this.log(`${groupId} 的进群提醒：${(err as Error).message}`);
+    }
   }
 
   // An AI here was @ed in a group: it reads what came since it last did and
