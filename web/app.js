@@ -2,7 +2,22 @@
 // a token; in the cloud the token is empty and the login cookie is used.
 // Layout, colours and wording follow docs/ui.md.
 import { cjk, messageText, SHOWN_TYPES } from "./text.js";
-import { GROUP_STATUS_LABELS, groupPreview, invitesWaiting, RECEIPT_LABELS, receiptLine, segments, tagsOf, timeBreaks } from "./groups.js";
+import {
+  ALL,
+  composeMessage,
+  GROUP_STATUS_LABELS,
+  groupPreview,
+  invitesWaiting,
+  isAnswering,
+  mentionAt,
+  pickerOptions,
+  quotaLine,
+  RECEIPT_LABELS,
+  receiptLine,
+  segments,
+  tagsOf,
+  timeBreaks,
+} from "./groups.js";
 const token = window.ACHAT_TOKEN;
 const cloud = !token;
 const STATUS = { pending: "待批准", active: "进行中", declined: "已拒绝", closed: "已结束", stopped: "已停止", expired: "已过期" };
@@ -41,6 +56,8 @@ const ICONS = {
   wrench: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z",
   // Sending files or pictures, beside the text box.
   attach: "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18zM12 8v8M8 12h8",
+  // 已叫停, at the bottom of a group.
+  pause: "M9 6v12M15 6v12",
 };
 
 // What a message may carry, as the relay checks it.
@@ -1057,6 +1074,11 @@ function writeBox({ label, status, extra, send }) {
     error.hidden = true;
     try {
       await send(text, await Promise.all(picked.map(fileData)));
+      // A box that stays on screen, as a group's does, starts empty again.
+      box.value = "";
+      picked.splice(0);
+      paint();
+      button.disabled = false;
     } catch (err) {
       showError(err.message);
       button.disabled = false;
@@ -1187,7 +1209,8 @@ function withAts(body, mentions, names) {
   return segments(body, tagsOf(mentions, names, { name: myName(), seat: mySeat() })).map((s) => (s.at ? h("span", { class: "at" }, s.text) : s.text));
 }
 
-// A group: its messages, each @ in blue, and under each who did not reply.
+// A group: its messages, each @ in blue, under each who did not reply, and
+// the box to write in.
 function renderGroup(g) {
   const main = document.getElementById("main");
   // A redraw of the same group keeps the place the person was reading,
@@ -1195,10 +1218,19 @@ function renderGroup(g) {
   const old = main.dataset.group === g.id ? main.querySelector(".main-body") : null;
   const stick = !old || old.scrollHeight - old.scrollTop - old.clientHeight < 80;
   const keep = old?.scrollTop ?? 0;
-  const body = showMain(`${g.name}（${g.members.length}）`, groupLog(g), { back: "#/" });
+  // The same box stays across redraws, and so do its focus and caret.
+  const kept = state.composer?.groupId === g.id ? state.composer.box : null;
+  const focused = !!kept && document.activeElement === kept;
+  const caret = kept ? [kept.selectionStart, kept.selectionEnd] : null;
+  const foot = groupFoot(g);
+  const body = showMain(`${g.name}（${g.members.length}）`, groupLog(g), { foot, back: "#/", drop: state.composer?.take });
   main.dataset.group = g.id;
   body.scrollTop = stick ? body.scrollHeight : keep;
   for (const img of body.querySelectorAll("img")) img.addEventListener("load", () => stick && (body.scrollTop = body.scrollHeight), { once: true });
+  if (focused) {
+    kept.focus();
+    kept.setSelectionRange(...caret);
+  }
 }
 
 // The messages of a group, a time before the first and after each pause.
@@ -1255,6 +1287,156 @@ function receiptsUnder(m, names) {
     popup(button, button.parentElement, h("div", { class: "menu receipts-panel", role: "dialog", id, "aria-label": "没有回复的 AI" }, ...rows));
   });
   return button;
+}
+
+// A group's 四宫格 faces, from its row in 消息.
+function facesOf(g) {
+  return state.groups.find((x) => x.id === g.id)?.faces ?? [];
+}
+
+// The bottom of a group: the box to write in, the person's 每天次数 on the
+// left, 叫停 or 继续 on the right. It stays the same box while the group
+// redraws, so what is half written stays. A dissolved group is only read.
+function groupFoot(g) {
+  if (g.status === "dissolved") {
+    state.composer = null;
+    return h("footer", { class: "main-foot" }, h("span", { class: "muted" }, GROUP_STATUS_LABELS.dissolved));
+  }
+  if (state.composer?.groupId !== g.id) state.composer = groupComposer(g);
+  state.composer.update(g);
+  return state.composer.foot;
+}
+
+function groupComposer(first) {
+  let g = first;
+  const status = h("span", { class: "muted usage" });
+  const action = h("span", { class: "group-action" });
+  const { foot, box, take } = writeBox({
+    label: `发到${first.name}`,
+    status,
+    extra: [action],
+    send: async (text, files) => {
+      const { body, mentions } = composeMessage(text, g.members, myName());
+      await api("POST", `/api/groups/${encodeURIComponent(g.id)}/messages`, { from: mySeat(), body, mentions, files });
+      await refresh();
+    },
+  });
+  box.id = "group-input";
+  foot.classList.add("group-foot");
+  foot.querySelector(".btn.primary").id = "group-send";
+  const picker = mentionPicker(box, () => g);
+  foot.append(picker.el);
+  return {
+    groupId: first.id,
+    foot,
+    box,
+    take,
+    update(next) {
+      g = next;
+      box.setAttribute("aria-label", `发到${g.name}`);
+      status.replaceChildren(...groupStatus(g));
+      action.replaceChildren(...groupAction(g));
+      picker.refresh();
+    },
+  };
+}
+
+// The list under "@", typed in the box: 所有人 and the AIs in the group.
+// ↑↓ move, Return or Tab picks, Esc closes; a pick writes "@名字 ".
+function mentionPicker(box, groupOf) {
+  const el = h("div", { class: "menu mention-picker", role: "listbox", id: "mention-picker", "aria-label": "选择要 @ 的 AI", hidden: true });
+  let at = null;
+  let options = [];
+  let active = 0;
+  const close = () => {
+    at = null;
+    el.hidden = true;
+    box.removeAttribute("aria-activedescendant");
+  };
+  const pick = (o) => {
+    if (!at || !o || o.disabled) return;
+    box.setRangeText(`@${o.name} `, at.start, box.selectionStart, "end");
+    close();
+    box.focus();
+  };
+  const paint = () => {
+    el.replaceChildren(
+      ...options.map((o, i) => {
+        const row = h(
+          "div",
+          { class: `mention-option${i === active ? " on" : ""}`, role: "option", id: `mention-${i}`, "data-agent": o.id, "aria-selected": String(i === active), "aria-disabled": o.disabled ? "true" : null },
+          o.id === ALL ? groupAvatar(facesOf(groupOf()), 28) : avatar(o.name, 28),
+          h("span", { class: "grow" }, o.name),
+          o.note ? h("span", { class: "muted" }, o.note) : null,
+        );
+        // mousedown, so the box keeps its focus and caret.
+        row.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+          pick(o);
+        });
+        return row;
+      }),
+    );
+    box.setAttribute("aria-activedescendant", `mention-${active}`);
+  };
+  const refresh = () => {
+    at = mentionAt(box.value, box.selectionStart);
+    options = at ? pickerOptions(groupOf().members, at.query) : [];
+    if (!options.length) return close();
+    active = Math.min(active, options.length - 1);
+    el.hidden = false;
+    paint();
+  };
+  box.addEventListener("input", () => {
+    active = 0;
+    refresh();
+  });
+  // Ahead of writeBox's own Return, which would send.
+  box.addEventListener(
+    "keydown",
+    (e) => {
+      if (el.hidden || e.isComposing) return;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const step = e.key === "ArrowDown" ? 1 : -1;
+        for (let i = 1; i <= options.length; i++) {
+          const next = (active + step * i + options.length) % options.length;
+          if (!options[next].disabled) {
+            active = next;
+            break;
+          }
+        }
+        paint();
+      } else if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        pick(options[active]);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      }
+    },
+    { capture: true },
+  );
+  // A redraw takes the box off the page for a moment; it closes only when the focus really left.
+  box.addEventListener("blur", () => setTimeout(() => document.activeElement !== box && close(), 100));
+  return { el, refresh: () => !el.hidden && refresh() };
+}
+
+// Left of the buttons: 已叫停, or the person's AI nearest its 每天次数, which opens 群设置.
+function groupStatus(g) {
+  if (g.status === "stopped") return [h("span", { class: "stopped" }, icon("pause", 14, 2), GROUP_STATUS_LABELS.stopped)];
+  const q = quotaLine(g.members);
+  if (!q) return [];
+  return [h("a", { class: `quota-link${q.full ? " full" : ""}`, id: "group-quota-link", href: `#/g/${encodeURIComponent(g.id)}/settings` }, q.text)];
+}
+
+// 叫停 while some AI is reading; 继续 once stopped.
+function groupAction(g) {
+  const path = `/api/groups/${encodeURIComponent(g.id)}`;
+  if (g.status === "stopped") return [h("button", { type: "button", class: "btn", id: "group-continue", onclick: () => act(() => api("POST", `${path}/continue`, {})) }, "继续")];
+  if (isAnswering(g)) return [h("button", { type: "button", class: "btn danger", id: "group-stop", onclick: () => act(() => api("POST", `${path}/stop`, {})) }, "叫停")];
+  return [];
 }
 
 // --- 通讯录

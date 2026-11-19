@@ -118,3 +118,61 @@ export function receiptLine(receipts, names) {
     .join(" · ");
   return { text, reading: byState.has("reading"), open: items.length > 1 || items.some((i) => i.reason), items };
 }
+
+// Who the person can @, as the list under "@" shows them: 所有人 first, then
+// the AIs that are on (others' before the person's own), then those whose
+// computer is off, and last, grayed out, those that cannot answer yet.
+// `query`: what was typed after the @.
+export function pickerOptions(members, query = "") {
+  const q = query.toLowerCase();
+  const fits = (name) => !q || name.toLowerCase().includes(q);
+  const rank = (m) => (!m.canReceive ? 3 : !m.online ? 2 : m.quota !== undefined ? 1 : 0);
+  const ais = members
+    .map((m, i) => ({ m, i }))
+    .filter(({ m }) => fits(m.name))
+    .sort((a, b) => rank(a.m) - rank(b.m) || a.i - b.i)
+    .map(({ m }) => ({ id: m.agent, name: m.name, note: !m.canReceive ? "还不能接收" : !m.online ? "不在线" : null, disabled: !m.canReceive }));
+  const everyone = fits("所有人") || "all".startsWith(q) ? [{ id: ALL, name: "所有人", note: null, disabled: false }] : [];
+  return [...everyone, ...ais];
+}
+
+// The @ being typed just before the caret, and what follows it; null when
+// there is none, or the line or a space after a name ended it.
+export function mentionAt(text, caret) {
+  const before = text.slice(0, caret);
+  const at = before.lastIndexOf("@");
+  if (at < 0) return null;
+  const query = before.slice(at + 1);
+  return /\n|\s$/.test(query) || query.length > 30 ? null : { start: at, query };
+}
+
+// What the person wrote, as it goes into the group: the AIs it @s (所有人
+// first, then in the order written), and each "@我的 Claude" written from
+// nobody's side ("@老方的 Claude"), as the AIs write. Longer names first, so
+// "@老王的 Codex（iMac）" is not also taken for "@老王的 Codex".
+export function composeMessage(text, members, myName) {
+  let marked = text.trim();
+  for (const m of [...members].sort((a, b) => b.name.length - a.name.length)) {
+    marked = marked.replaceAll(`@${m.name}`, `@\u0000${m.agent}\u0000`);
+  }
+  const mentions = marked.includes("@所有人") ? [ALL] : [];
+  const body = marked.replace(/@\u0000([^\u0000]*)\u0000/g, (_, id) => {
+    if (!mentions.includes(id)) mentions.push(id);
+    return `@${plainName(members.find((m) => m.agent === id).name, myName)}`;
+  });
+  return { body, mentions };
+}
+
+// The person's AI nearest its 每天次数, for the bottom of the group: "我的
+// Claude 今天 12 / 30 次". `full` once it is used up. Null without one.
+export function quotaLine(members) {
+  const mine = members.filter((m) => m.quota !== undefined);
+  if (!mine.length) return null;
+  const m = mine.reduce((a, b) => (b.usedToday / b.quota > a.usedToday / a.quota ? b : a));
+  return { agent: m.agent, text: `${m.name} 今天 ${m.usedToday} / ${m.quota} 次`, full: m.usedToday >= m.quota };
+}
+
+// Some AI is reading a message right now: 叫停 shows.
+export function isAnswering(g) {
+  return g.status === "open" && g.messages.some((m) => m.receipts.some((r) => r.state === "reading"));
+}

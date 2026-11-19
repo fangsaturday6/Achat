@@ -102,3 +102,57 @@ test("the line under a message says who did not reply, the same state together, 
   assert.equal(page.receiptLine(["a", "b", "c", "d"].map((x) => r(x, "stopped")), names).text, "老王的 Claude 等 4 个 AI 已叫停");
   assert.equal(page.receiptLine([r("gone", "failed", "不在群里了")], names).text, "已移除的 AI 没答上");
 });
+
+// 支付对接 from 老方's side, in the order they joined.
+const MEMBERS = [
+  { agent: "f/claude", name: "我的 Claude", canReceive: true, online: true, quota: 30, usedToday: 12 },
+  { agent: "w/codex", name: "老王的 Codex", canReceive: true, online: true },
+  { agent: "w/claude", name: "老王的 Claude", canReceive: true, online: true },
+  { agent: "l/claude", name: "小林的 Claude", canReceive: true, online: false },
+  { agent: "l/doubao", name: "小林的豆包", canReceive: false, online: false },
+  { agent: "c/codex", name: "王闯的 Codex", canReceive: true, online: true },
+];
+
+test("the list under @: 所有人, the AIs that are on (the person's own after), those off, and grayed out last those that cannot answer", () => {
+  assert.deepEqual(page.pickerOptions(MEMBERS).map((o: any) => [o.name, o.note, o.disabled]), [
+    ["所有人", null, false],
+    ["老王的 Codex", null, false],
+    ["老王的 Claude", null, false],
+    ["王闯的 Codex", null, false],
+    ["我的 Claude", null, false],
+    ["小林的 Claude", "不在线", false],
+    ["小林的豆包", "还不能接收", true],
+  ]);
+  assert.deepEqual(page.pickerOptions(MEMBERS, "老王").map((o: any) => o.name), ["老王的 Codex", "老王的 Claude"]);
+  assert.deepEqual(page.pickerOptions(MEMBERS, "all").map((o: any) => o.id), [ALL]);
+  assert.deepEqual(page.pickerOptions(MEMBERS, "没有这个人"), []);
+});
+
+test("the @ being typed is found just before the caret", () => {
+  assert.deepEqual(page.mentionAt("你好 @老王", 6), { start: 3, query: "老王" });
+  assert.deepEqual(page.mentionAt("@", 1), { start: 0, query: "" });
+  assert.equal(page.mentionAt("没有", 2), null);
+  assert.equal(page.mentionAt("第一行@\n第二", 6), null);
+  assert.equal(page.mentionAt("@老王的 Codex ", 11), null, "a space after a name ends it");
+});
+
+test("what the person writes goes in with its @s, each AI named from nobody's side", () => {
+  assert.deepEqual(page.composeMessage(" @我的 Claude 和 @老王的 Codex 看看，@所有人 也说说 ", MEMBERS, "老方"), {
+    body: "@老方的 Claude 和 @老王的 Codex 看看，@所有人 也说说",
+    mentions: [ALL, "f/claude", "w/codex"],
+  });
+  const twins = [...MEMBERS, { agent: "w2/codex", name: "老王的 Codex（iMac）", canReceive: true, online: true }];
+  assert.deepEqual(page.composeMessage("@老王的 Codex（iMac） 你呢", twins, "老方").mentions, ["w2/codex"]);
+  assert.deepEqual(page.composeMessage("没有点名", MEMBERS, "老方"), { body: "没有点名", mentions: [] });
+});
+
+test("the bottom names the person's AI nearest its 每天次数, red once used up; 叫停 shows while an AI reads", () => {
+  assert.deepEqual(page.quotaLine(MEMBERS), { agent: "f/claude", text: "我的 Claude 今天 12 / 30 次", full: false });
+  const two = [MEMBERS[0], { agent: "f/codex", name: "我的 Codex", canReceive: true, online: true, quota: 5, usedToday: 5 }];
+  assert.deepEqual(page.quotaLine(two), { agent: "f/codex", text: "我的 Codex 今天 5 / 5 次", full: true });
+  assert.equal(page.quotaLine(MEMBERS.slice(1)), null);
+  const msg = (state: string) => ({ receipts: [{ agent: "c/codex", state, reason: null }] });
+  assert.equal(page.isAnswering({ status: "open", messages: [msg("passed"), msg("reading")] }), true);
+  assert.equal(page.isAnswering({ status: "open", messages: [msg("passed")] }), false);
+  assert.equal(page.isAnswering({ status: "stopped", messages: [msg("reading")] }), false);
+});

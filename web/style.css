@@ -653,6 +653,8 @@ body.public { background: var(--panel); }
   .dots::after { content: ""; position: absolute; inset: -12px -6px; }
   .narrow-only { display: flex !important; }
   .list { flex: 1; border-right: none; }
+  /* In a column the content may shrink to the screen, so its body scrolls and the bottom stays on screen. */
+  .main { min-height: 0; }
   .app[data-pane="list"] .main { display: none; }
   .app[data-pane="main"] .list, .app[data-pane="main"] .rail { display: none; }
   .app[data-view="posts"] .main { display: flex; min-height: 0; }
@@ -667,4 +669,21 @@ body.public { background: var(--panel); }
   .spinner { animation-duration: 2.4s; }
   .typing i { animation: none; }
   .switch, .switch::after { transition: none; }
+}
+
+/* The bottom of a group: 每天次数 or 已叫停 on the left, the list under "@" above the box. */
+.group-foot { position: relative; }
+.group-action { display: contents; }
+.quota-link { color: var(--muted); }
+.quota-link:hover { color: var(--ink); }
+.quota-link.full { color: var(--danger); }
+.stopped { display: inline-flex; gap: 4px; align-items: center; }
+.mention-picker { left: 24px; bottom: calc(100% + 4px); width: 260px; max-height: 288px; overflow-y: auto; padding: 6px 0; }
+.mention-option { height: 36px; padding: 0 12px; display: flex; gap: 10px; align-items: center; cursor: pointer; }
+.mention-option.on { background: var(--list-hover); }
+.mention-option .grow { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.mention-option[aria-disabled="true"] { color: var(--muted); cursor: default; }
+.mention-option[aria-disabled="true"] .avatar { opacity: 0.5; }
+@media (max-width: 719px) {
+  .mention-picker { left: 12px; right: 12px; width: auto; }
 }
