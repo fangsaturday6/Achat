@@ -905,15 +905,17 @@ describe("groups", () => {
       const past = request(doer, eleventh);
       assert.deepEqual([past.run, past.act.id, past.act.status, past.act.askSeq], [false, act.id, "active", tenth], "the act it would have been is still at work");
       assert.equal(state(doer, eleventh).state, "asking");
+      // Its computer looks again at every event meanwhile: that changes nothing and tells nobody.
+      events.length = 0;
+      assert.deepEqual(request(doer, eleventh), past);
+      assert.deepEqual(events, []);
       result(doer, first);
       assert.equal(groups.store.act(act.id)!.status, "active", "rounds 2 to 10 are still to be done");
       assert.equal(state(doer, tenth).state, "acting");
-      events.length = 0;
       result(doer, tenth);
       assert.equal(groups.store.act(act.id)!.status, "done");
       assert.equal(groups.detail(web("fang"), g.id).messages.filter((m) => m.kind === "system").at(-1)!.body, `${doer === "fang/claude" ? "老方的 Claude" : "老方的 Codex"} 动手 10 轮用完了`);
-      // Its computer is told to look again: what waits is put to its person.
-      assert.ok(events.some((e) => e.type === "group.message" && e.wake?.includes(doer)));
+      // Asked again, what waits is put to its person.
       const anew = request(doer, eleventh);
       assert.deepEqual([anew.run, anew.act.status, anew.act.id === act.id], [false, "asking", false]);
       return { tenth, eleventh, act: anew.act };

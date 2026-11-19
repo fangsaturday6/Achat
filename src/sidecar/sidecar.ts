@@ -390,7 +390,9 @@ export class Sidecar {
   private actShown = new Map<string, number>();
   // 动手 here that waits its turn, by asker and AI (actKey), with its newest
   // request: looked at again on the group's next event, since the round
-  // before may be back (nextRound); gone once nothing waits on it.
+  // before may be back (nextRound); and a request past an act still at
+  // work (":past"), until the act is done (groupAct). Gone once nothing
+  // waits on it.
   private turns = new Map<string, { groupId: string; agent: string; seq: number }>();
   // 动手 conversations being opened, by asker and AI: a request that comes
   // meanwhile waits its turn. The TaskBook says what one was given only once
@@ -588,9 +590,7 @@ export class Sidecar {
 
   // A group's message woke AIs here, or the person here is to be told: an AI
   // here has few 每天次数 left, their own AI @ed them, or they were invited.
-  // The last two only come to the person's own pages and computers. An AI
-  // whose act of 动手 just ended with a request past it waiting is woken
-  // too: that is put to its person.
+  // The last two only come to the person's own pages and computers.
   private onGroupEvent(e: GroupEvent): void {
     for (const agent of e.wake ?? []) if (this.mine(agent)) void this.answerGroup(e.groupId, agent);
     // A round of 动手 waiting its turn there: its round before may be back.
@@ -867,10 +867,15 @@ export class Sidecar {
       return err.status === 409;
     }
     if (asked.run) await this.nextRound(groupId, agent, asked.act, me);
-    else if (asked.act.status === "asking") this.promptAct(groupId, agent, asked.act);
-    // Past the rounds of an act still at work: its person is asked once
-    // those are back, when the service has this computer look again.
-    else this.log(`${groupId} 第 ${work.wake.seq} 条等这次动手做完再问主人`);
+    else if (asked.act.status === "asking") {
+      this.endTurns(groupId, agent, work.wake.seq);
+      this.promptAct(groupId, agent, asked.act);
+    } else {
+      // Past the rounds of an act still at work: looked at again on the
+      // group's events, as a round waiting its turn, and put to its person
+      // once those rounds are back.
+      this.turns.set(`${actKey(groupId, asked.act.asker, agent)}:past`, { groupId, agent, seq: work.wake.seq });
+    }
     return true;
   }
 

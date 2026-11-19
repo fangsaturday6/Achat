@@ -579,11 +579,8 @@ export class GroupService {
         now,
       );
       if (answering) this.settle(groupId, from.id, input.replyTo!, "replied", null, input, now);
-      const wake = this.wake(this.store.group(groupId)!, msg, from.id);
-      // The act's last round answered, and what its asker asked past it is
-      // to be put to its person: its computer looks again, as if woken.
-      if (acting && this.resultBack(groupId, from.id, input.replyTo!, now)) wake.push(from.id);
-      return { seq: msg.seq, wake };
+      if (acting) this.resultBack(groupId, from.id, input.replyTo!, now);
+      return { seq: msg.seq, wake: this.wake(this.store.group(groupId)!, msg, from.id) };
     });
     this.emit("group.message", groupId, posted);
     // An AI calling its own person (@老方): they alone are told, on the page and their computer.
@@ -693,16 +690,14 @@ export class GroupService {
 
   // 动手's result for `seq` came back. Once nothing of its act is left to
   // do, an act whose rounds are used, or that a request it does not cover
-  // waits on (requestAct), ends. True when such a request waits: its
-  // computer is to put it to its person now.
-  private resultBack(groupId: string, doer: string, seq: number, now: string): boolean {
+  // waits on (requestAct), ends; its computer, looking again at the
+  // group's event, then puts that request to its person.
+  private resultBack(groupId: string, doer: string, seq: number, now: string): void {
     const asker = this.store.message(groupId, seq)?.sender;
     const act = asker ? this.store.openAct(groupId, asker, doer) : null;
-    if (act?.status !== "active" || this.due(act)) return false;
-    const waiting = this.askedBy(groupId, doer, asker, "asking").length > 0;
-    if (act.roundsUsed < act.maxRounds && !waiting) return false;
+    if (act?.status !== "active" || this.due(act)) return;
+    if (act.roundsUsed < act.maxRounds && !this.askedBy(groupId, doer, asker, "asking").length) return;
     this.end(act, now);
-    return waiting;
   }
 
   // Its person's own asking, which needs no dialog: their words in person,
@@ -721,8 +716,8 @@ export class GroupService {
   // asker's next request goes on with it (covers); otherwise the person
   // decides in a dialog on that computer (approveAct, declineAct). A request
   // the act under way does not cover, such as an 11th, waits for what that
-  // act has still to do (its rounds were approved), then for a yes; the
-  // service tells its computer once that is back (resultBack). `run`: the
+  // act has still to do (its rounds were approved), then for a yes: asked
+  // again once that is back (resultBack), it starts a new act. `run`: the
   // computer starts the work, or goes on with it, now.
   requestAct(caller: Caller, groupId: string, input: { doer: string; seq: number }): { act: GroupAct; run: boolean } {
     const member = this.requireDoer(caller, groupId, input.doer);
@@ -735,6 +730,9 @@ export class GroupService {
     if (r.state === "acting" && open?.status === "active") return { act: open, run: true };
     if (r.state === "acting") throw new RelayError(409, "这条已经不用回了");
     if (r.state === "asking" && open?.status === "asking") return { act: open, run: false };
+    // Still waiting for what the act under way has to do: nothing changes,
+    // and nobody is told, however often its computer looks.
+    if (r.state === "asking" && open?.status === "active" && this.due(open)) return { act: open, run: false };
     const now = this.stamp();
     const result = this.transaction((): { act: GroupAct; run: boolean } => {
       if (open?.status === "active" && r.state === "reading" && this.covers(open, this.ownAsk(msg, member.owner))) {
