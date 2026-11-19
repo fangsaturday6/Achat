@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { RelayClient } from "../src/client.js";
+import { RelayClient } from "../src/client.js";
 import { createMcpServer } from "../src/mcp/server.js";
 import { lastRoundTitle, usageLine } from "../src/asking.js";
 import type { RelayEvent } from "../src/types.js";
@@ -136,16 +136,22 @@ test("the last-round dialog names both AIs and what was used", () => {
   assert.equal(usageLine({ ...t, mode: "do" }), "动手 · 9 / 10 轮");
 });
 
-// Holds the second answer until the test lets it go, so the dialog is shown
-// while the last round is still being answered.
+// Holds one answer until the test lets it go, the second by default, so the
+// dialog is shown while the last round is still being answered.
 class HeldRunner extends ScriptedRunner {
   private release!: () => void;
   private held = new Promise<void>((r) => (this.release = r));
+  constructor(
+    replies: (string | Error)[],
+    private holdAt = 1,
+  ) {
+    super(replies);
+  }
   letGo(): void {
     this.release();
   }
   async run(input: RunInput): Promise<RunOutput> {
-    if (this.calls.length === 1) await this.held;
+    if (this.calls.length === this.holdAt) await this.held;
     return super.run(input);
   }
 }
@@ -386,4 +392,62 @@ test("the last-round dialog stays when the last answer uses the rounds up, so �
     await new Promise((r) => setTimeout(r, 200));
     assert.equal(closes(), 0);
   });
+});
+
+test("the last-round dialog goes away once the asker ends the thread early, as rounds can no longer be added", async () => {
+  await withLastRoundDialog(async ({ client, closes, threadId }) => {
+    await client.close(threadId, CODEX);
+    await until(async () => closes() === 1);
+  });
+});
+
+test("a computer that was off when the last round opened asks once it is back, and not again when it reconnects", async (ctx) => {
+  // Each time its event stream connects, the sidecar looks at what it missed;
+  // calling this again is the stream coming back after a drop.
+  const connects: (() => void)[] = [];
+  const subscribe = RelayClient.prototype.subscribe;
+  ctx.mock.method(RelayClient.prototype, "subscribe", function (this: RelayClient, ...args: Parameters<RelayClient["subscribe"]>) {
+    connects.push(() => args[2]?.());
+    return subscribe.apply(this, args);
+  });
+  const { relay, client, config } = await startTestRelay();
+  const asked: ChoicePrompt[] = [];
+  // Holds its first answer, so the thread stays in its last round.
+  const runner = new HeldRunner(["用 Midjourney 出的"], 0);
+  const sidecar = new Sidecar({
+    client,
+    agents: config.agents,
+    runners: { [CLAUDE]: runner },
+    choose: (prompt) => {
+      asked.push(prompt);
+      return { answer: new Promise<Choice>(() => {}), close: () => {} };
+    },
+    notify: () => {},
+    webUrl: relay.url,
+    log: () => {},
+  });
+  try {
+    const t = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "视频制作流程", message: "第一步怎么做？" });
+    await client.approve(t.id, { maxRounds: 2, budgetUsd: 1 });
+    await client.postMessage(t.id, { from: CLAUDE, body: "先写分镜", costUsd: 0.05 });
+    await client.postMessage(t.id, { from: CODEX, body: "封面图怎么出的？" });
+    assert.equal((await client.getThread(t.id)).lastRound, true, "the last round opened while the computer was off");
+
+    sidecar.start();
+    await until(async () => asked.length === 1);
+    assert.deepEqual(asked[0], {
+      icon: "answer",
+      title: "我的 Codex 和你的 Claude 到最后 1 轮了",
+      body: "视频制作流程\n\n问答 · 1 / 2 轮 · $0.05 / $1.00",
+      more: "加 10 轮",
+      stop: "用完就停",
+    });
+    connects[0]();
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(asked.length, 1, "once for these rounds");
+  } finally {
+    runner.letGo();
+    sidecar.stop();
+    await relay.close();
+  }
 });
