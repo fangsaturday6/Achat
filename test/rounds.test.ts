@@ -451,3 +451,44 @@ test("a computer that was off when the last round opened asks once it is back, a
     await relay.close();
   }
 });
+
+test("用完、接着来、批准、再到最后一轮会再问", async () => {
+  const { relay, client, config } = await startTestRelay();
+  const asked: ChoicePrompt[] = [];
+  const sidecar = new Sidecar({
+    client,
+    agents: config.agents,
+    runners: { [CLAUDE]: new ScriptedRunner(["先写分镜", "用 Midjourney 出的", "第三问的回答"]) },
+    choose: (prompt) => {
+      asked.push(prompt);
+      return { answer: Promise.resolve<Choice>("stop"), close: () => {} };
+    },
+    notify: () => {},
+    webUrl: relay.url,
+    log: () => {},
+  });
+  sidecar.start();
+  try {
+    const t = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "视频制作流程", message: "第一步怎么做？" });
+    await client.approve(t.id, { maxRounds: 2, budgetUsd: 1 });
+    await until(async () => (await client.getThread(t.id)).roundsUsed === 1);
+    await client.postMessage(t.id, { from: CODEX, body: "封面图怎么出的？" });
+    await until(async () => asked.length === 1);
+    // 用完就停: the rounds run out and the thread closes; the asker asks to go on, and is let.
+    await until(async () => (await client.getThread(t.id)).status === "closed");
+    await client.postMessage(t.id, { from: CODEX, body: "接着来" });
+    await until(async () => (await client.getThread(t.id)).status === "pending");
+    await client.approve(t.id);
+    const renewed = await until(async () => {
+      const d = await client.getThread(t.id);
+      return d.status === "active" && d.roundsUsed === 1 ? d : null;
+    });
+    assert.equal(renewed.scope.maxRounds, 2, "the same rounds as before");
+    await client.postMessage(t.id, { from: CODEX, body: "那配音呢？" });
+    assert.equal((await client.getThread(t.id)).lastRound, true);
+    await until(async () => asked.length === 2);
+  } finally {
+    sidecar.stop();
+    await relay.close();
+  }
+});

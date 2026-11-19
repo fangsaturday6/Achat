@@ -7,7 +7,7 @@ import { NO_PICK, resolveUse, type ModelOffer, type ModelUse } from "../models.j
 import { redact } from "../redact.js";
 import { cjk } from "../text.js";
 import { beijingDay, mentionsIn, passReason } from "../groups.js";
-import { canAddRounds, MIN_ROUND_BUDGET_USD, MODE_LABELS, MORE_SCOPE, todayTotal, waitingForAsker, type GroupAct, type GroupEvent, type GroupMessage, type GroupWork, type Message, type RelayEvent, type ThreadDetail, type ThreadMode } from "../types.js";
+import { MIN_ROUND_BUDGET_USD, MODE_LABELS, MORE_SCOPE, todayTotal, waitingForAsker, type GroupAct, type GroupEvent, type GroupMessage, type GroupWork, type Message, type RelayEvent, type ThreadDetail, type ThreadMode } from "../types.js";
 import type { Alerter, Asker, Asking, Chooser, Choosing } from "./dialog.js";
 import { LoginWait } from "./login-wait.js";
 import type { Notifier } from "./notify.js";
@@ -352,7 +352,8 @@ export class Sidecar {
   // Shown once already, up to which message; "稍后" means the web page, not
   // the same dialog again. A request made later in the thread is new.
   private shown = new Map<string, number>();
-  // Last rounds already put to the person, by thread and the rounds it had then.
+  // Last rounds already put to the person, by thread and the asker's question
+  // that opened each.
   private offered = new Set<string>();
   private choosing = new Map<string, Choosing>();
   // 每天次数 running low already put to the person, by group, AI and 北京时间 day.
@@ -990,18 +991,21 @@ export class Sidecar {
   }
 
   // The asker's question opened the last round of a thread with another
-  // person's AI: the person here is asked, once for the rounds it has, whether
-  // to give ten more before they run out; once given, the next last round asks
-  // again. The AI goes on answering meanwhile; added right after the rounds ran
-  // out, the thread opens again. A thread that can no longer get rounds, such
-  // as one ended early, is not asked about.
+  // person's AI: the person here is asked, once for that question, whether to
+  // give ten more before they run out; the next last round asks again, also
+  // one of rounds allowed anew after these ran out, however many. The AI goes
+  // on answering meanwhile; added right after the rounds ran out, the thread
+  // opens again. A thread that can no longer get rounds, such as one ended
+  // early, is not asked about.
   private async offerMore(threadId: string): Promise<void> {
     try {
       const t = await this.relay.getThread(threadId);
-      // Looked up and marked with nothing awaited between, so the event and a
-      // reconnect that come together ask once.
-      const key = `${threadId}:${t.scope.maxRounds}`;
-      if (this.offered.has(key) || !canAddRounds(t)) return;
+      // The question is read from the thread, for the event and a reconnect
+      // alike, and marked with nothing awaited between: the two coming
+      // together ask once.
+      const question = t.messages.filter((m) => m.kind !== "system" && m.sender === t.from && !m.toPerson).at(-1);
+      const key = `${threadId}:${question?.seq ?? 0}`;
+      if (this.offered.has(key) || !t.canAddRounds) return;
       this.offered.add(key);
       const from = (await this.agent(t.from))?.name ?? t.from;
       const to = ((await this.agent(t.to))?.name ?? t.to).replace(/^我的/, "你的");
@@ -1032,7 +1036,7 @@ export class Sidecar {
   private async closeMoreIfDone(threadId: string): Promise<void> {
     try {
       const t = await this.relay.getThread(threadId);
-      if (!canAddRounds(t) || t.scope.maxRounds - t.roundsUsed > 1) this.choosing.get(threadId)?.close();
+      if (!t.canAddRounds || t.scope.maxRounds - t.roundsUsed > 1) this.choosing.get(threadId)?.close();
     } catch (err) {
       this.log(`${threadId} 的加轮弹框：${(err as Error).message}`);
     }
