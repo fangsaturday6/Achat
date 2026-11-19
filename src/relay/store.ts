@@ -212,6 +212,15 @@ export interface ThreadPatch {
   effort?: Effort | null;
 }
 
+// Adds a column a table got later, once; older rows take its default. True
+// when it was added just now, so the caller can fill it in for older rows.
+export function addColumn(db: DatabaseSync, table: string, column: string, ddl: string): boolean {
+  const have = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (have.some((c) => c.name === column)) return false;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+  return true;
+}
+
 export class Store {
   // Shared with the cloud's account tables, which live in the same file.
   readonly db: DatabaseSync;
@@ -223,19 +232,12 @@ export class Store {
     this.db.exec(SCHEMA);
     // Threads from before asker_seen: their asking AIs got every answer while
     // waiting, so nothing in them is new.
-    const columns = this.db.prepare("PRAGMA table_info(threads)").all() as { name: string }[];
-    if (!columns.some((c) => c.name === "asker_seen")) {
-      this.db.exec(`
-        ALTER TABLE threads ADD COLUMN asker_seen INTEGER NOT NULL DEFAULT 0;
-        UPDATE threads SET asker_seen = (SELECT COALESCE(MAX(seq), 0) FROM messages WHERE thread_id = threads.id);
-      `);
+    if (addColumn(this.db, "threads", "asker_seen", "INTEGER NOT NULL DEFAULT 0")) {
+      this.db.exec("UPDATE threads SET asker_seen = (SELECT COALESCE(MAX(seq), 0) FROM messages WHERE thread_id = threads.id)");
     }
     // Columns added later; older rows take the defaults (问答, nothing
     // waiting, nothing reminded or mailed, written by an AI).
-    const add = (table: string, column: string, ddl: string): void => {
-      const have = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
-      if (!have.some((c) => c.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
-    };
+    const add = (table: string, column: string, ddl: string) => addColumn(this.db, table, column, ddl);
     add("threads", "mode", "TEXT NOT NULL DEFAULT 'answer'");
     add("threads", "prior_status", "TEXT");
     add("threads", "prior_mode", "TEXT");

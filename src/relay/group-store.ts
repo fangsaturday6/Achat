@@ -1,7 +1,7 @@
 import type { NewFile } from "../attachments.js";
 import { isEffort, type Effort } from "../models.js";
 import type { Group, GroupAct, GroupActStatus, GroupMessage, GroupStatus, Receipt, ReceiptState } from "../types.js";
-import type { Store } from "./store.js";
+import { addColumn, type Store } from "./store.js";
 
 // 群（8n）: tables of their own beside the threads', in the same file. A
 // group's files are in the threads' files table, keyed by the group's id.
@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS group_members (
   left_at TEXT,
   PRIMARY KEY (group_id, agent)
 );
+-- The groups an AI is in, for its computer and its front session.
+CREATE INDEX IF NOT EXISTS group_members_by_agent ON group_members (agent);
 CREATE TABLE IF NOT EXISTS group_invites (
   id TEXT PRIMARY KEY,
   group_id TEXT NOT NULL REFERENCES chat_groups(id),
@@ -269,14 +271,9 @@ export class GroupStore {
     this.db.exec(SCHEMA);
     // Columns added later; older rows take the defaults (nothing added, nobody
     // told, nothing looked at in front).
-    this.addColumn("group_usage", "extra", "INTEGER NOT NULL DEFAULT 0");
-    this.addColumn("group_usage", "warned", "INTEGER NOT NULL DEFAULT 0");
-    this.addColumn("group_members", "seen_seq", "INTEGER NOT NULL DEFAULT 0");
-  }
-
-  private addColumn(table: string, column: string, ddl: string): void {
-    const have = this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
-    if (!have.some((c) => c.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+    addColumn(this.db, "group_usage", "extra", "INTEGER NOT NULL DEFAULT 0");
+    addColumn(this.db, "group_usage", "warned", "INTEGER NOT NULL DEFAULT 0");
+    addColumn(this.db, "group_members", "seen_seq", "INTEGER NOT NULL DEFAULT 0");
   }
 
   transaction<T>(fn: () => T): T {
