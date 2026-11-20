@@ -696,7 +696,7 @@ body.public { background: var(--panel); }
   display: flex; flex-direction: column; gap: 20px; background: var(--panel); box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
 }
 .group-settings .spacer { flex: 1; }
-/* Wide enough for both (BESIDE in app.js), the group and its box make room for it; narrower, it lies over the group. */
+/* Wide enough for both, the group and its box make room for it; narrower, it lies over the group. A click on the group closes it either way. */
 @media (min-width: 1080px) {
   .main-body.beside-drawer, .main-foot.beside-drawer { padding-right: 344px; }
 }

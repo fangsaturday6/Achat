@@ -72,9 +72,6 @@ import {
 } from "./groups.js";
 import { cjk, isOwn, ownerName } from "./text.js";
 
-// Wide enough for 群设置 beside the group, not over it (style.css says the same).
-const BESIDE = matchMedia("(min-width: 1080px)");
-
 // --- 消息: a group's row, and loading the groups
 
 // A group in 消息: its 四宫格 with a red dot for new words (never a number),
@@ -160,18 +157,18 @@ export function renderGroup(g, r) {
     main.append(drawer);
     drawer.scrollTop = keepDrawer;
     if (focusedIn) document.getElementById(focusedIn)?.focus({ preventScroll: true });
-    // In a window too narrow for both side by side, 群设置 lies over the
-    // group: a click on the group left of it closes it, as in WeChat.
-    body.addEventListener(
-      "click",
-      (e) => {
-        if (BESIDE.matches) return;
-        e.preventDefault();
-        e.stopPropagation();
-        location.hash = `#/g/${encodeURIComponent(g.id)}`;
-      },
-      { capture: true },
-    );
+    // A click on the group left of 群设置, or on the blank of its title bar,
+    // closes it, as in WeChat, beside the group or over it; the click does
+    // nothing else. Words dragged over to copy keep it open, and the box at
+    // the bottom is still for writing.
+    const close = (e) => {
+      if (getSelection()?.toString()) return;
+      e.preventDefault();
+      e.stopPropagation();
+      location.hash = `#/g/${encodeURIComponent(g.id)}`;
+    };
+    body.addEventListener("click", close, { capture: true });
+    body.previousElementSibling?.addEventListener("click", (e) => e.target.closest("a, button") || close(e));
   }
   body.scrollTop = stick ? body.scrollHeight : keep;
   for (const img of body.querySelectorAll("img")) img.addEventListener("load", () => stick && (body.scrollTop = body.scrollHeight), { once: true });
