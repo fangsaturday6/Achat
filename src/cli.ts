@@ -93,8 +93,10 @@ async function main(): Promise<void> {
       const { createMcpServer, readLocalImage } = await import("./mcp/server.js");
       const { TaskBook } = await import("./sidecar/tasks.js");
       const { startLink } = await import("./link.js");
+      const { formSupport } = await import("./asking.js");
       const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
       const server = createMcpServer({
+        forms: formSupport(),
         connection: () => {
           const conn = connect(loadConfig());
           return { client: conn.client, agentId: conn.agentId(localId), webUrl: conn.webUrl, mode: conn.mode };
@@ -128,10 +130,11 @@ async function main(): Promise<void> {
       const input = await readHookInput();
       const { userPromptHook } = await import("./hook.js");
       const { TaskBook } = await import("./sidecar/tasks.js");
+      const { formSupport } = await import("./asking.js");
       const conn = connect(cfg);
       // A 动手 conversation runs in the folder it works in.
       const task = new TaskBook().at(input.cwd ?? process.cwd());
-      const out = await userPromptHook(conn.client, conn.agentId(localId), { transcriptPath: input.transcriptPath, task });
+      const out = await userPromptHook(conn.client, conn.agentId(localId), { transcriptPath: input.transcriptPath, task, forms: formSupport() });
       if (out) process.stdout.write(out);
       return;
     }

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { RelayClient } from "./client.js";
-import { ownerOf } from "./asking.js";
+import { ownerOf, type FormSupport } from "./asking.js";
 import { cjk } from "./text.js";
 import type { ThreadSummary, UnseenGroup } from "./types.js";
 
@@ -12,6 +12,10 @@ export interface HookInput {
   // threads it asked and groups it spoke in are the front session's, and
   // the tools for them are not its own (createMcpServer).
   task?: string | null;
+  // Whether this client shows review_pending's form (formSupport): where it
+  // cannot, requests waiting for approval are left to the dialog on the
+  // computer and the session is not told of them.
+  forms?: FormSupport;
 }
 
 // The session's own log, which tells the threads and groups it took part in:
@@ -51,7 +55,7 @@ export async function userPromptHook(client: RelayClient, agentId: string, input
     return null;
   }
   const lines: string[] = [];
-  if (pending.length) {
+  if (pending.length && input.forms !== "unshown") {
     lines.push(
       `Achat：有 ${pending.length} 个待批准的请求。先调用 achat 的 review_pending 工具，` +
         "让主人在弹出的对话框里同意或拒绝，然后继续主人刚才的事。不要猜测请求内容。",

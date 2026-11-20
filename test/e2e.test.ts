@@ -6,6 +6,7 @@ import { after, afterEach, before, describe, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema, type ElicitResult } from "@modelcontextprotocol/sdk/types.js";
+import { formSupport, type FormSupport } from "../src/asking.js";
 import type { RelayClient } from "../src/client.js";
 import type { AchatConfig } from "../src/config.js";
 import { userPromptHook } from "../src/hook.js";
@@ -18,11 +19,12 @@ import { CLAUDE, CODEX, ScriptedRunner, startTestRelay, until } from "./helpers.
 
 type Elicit = () => ElicitResult;
 
-async function mcpClient(relayClient: RelayClient, agentId: string, webUrl: string, elicit?: Elicit): Promise<Client> {
+async function mcpClient(relayClient: RelayClient, agentId: string, webUrl: string, elicit?: Elicit, forms?: FormSupport): Promise<Client> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await createMcpServer({
     connection: () => ({ client: relayClient, agentId, webUrl, mode: "local" }),
     waitSeconds: 10,
+    ...(forms ? { forms } : {}),
   }).connect(serverSide);
   const client = new Client({ name: "test", version: "1" }, { capabilities: elicit ? { elicitation: { form: {} } } : {} });
   if (elicit) client.setRequestHandler(ElicitRequestSchema, async () => elicit());
@@ -292,6 +294,48 @@ describe("experiment 0 end to end", () => {
       delete process.env.ACHAT_HEADLESS;
     }
   });
+});
+
+// Claude Code in the desktop app, VS Code or the SDK answers a form
+// "decline" itself without showing it (2.1.326): a request was declined
+// with nobody asked, before the dialog on the computer came up.
+test("a 拒绝 the person did not give in the terminal never declines a request", async () => {
+  const { relay, client } = await startTestRelay();
+  try {
+    const t = await client.createRequest({ from: CODEX, to: CLAUDE, topic: "别的客户端", message: "问题" });
+    const other = await mcpClient(client, CLAUDE, relay.url, () => ({ action: "decline" }));
+    const left = textOf(await other.callTool({ name: "review_pending", arguments: {} }));
+    assert.match(left, /拒绝 0 个，还有 1 个/);
+    assert.equal((await client.getThread(t.id)).status, "pending", "a client that may not show the form");
+
+    const desktop = await mcpClient(
+      client,
+      CLAUDE,
+      relay.url,
+      () => {
+        throw new Error("the desktop app is never sent a form");
+      },
+      "unshown",
+    );
+    assert.match(textOf(await desktop.callTool({ name: "review_pending", arguments: {} })), /电脑弹出的对话框/);
+    assert.equal((await client.getThread(t.id)).status, "pending");
+    assert.equal(await userPromptHook(client, CLAUDE, { forms: "unshown" }), null, "nor told to approve there");
+    assert.match((await userPromptHook(client, CLAUDE, { forms: "shown" })) ?? "", /review_pending/);
+
+    const terminal = await mcpClient(client, CLAUDE, relay.url, () => ({ action: "decline" }), "shown");
+    assert.match(textOf(await terminal.callTool({ name: "review_pending", arguments: {} })), /拒绝 1 个/);
+    assert.equal((await client.getThread(t.id)).status, "declined", "the terminal shows the form: 拒绝 there is the person's");
+  } finally {
+    await relay.close();
+  }
+});
+
+test("only Claude Code in the terminal shows a form; elsewhere it says no for the person", () => {
+  assert.equal(formSupport({ CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli" }), "shown");
+  assert.equal(formSupport({ CLAUDECODE: "1" }), "shown");
+  assert.equal(formSupport({ CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "claude-desktop" }), "unshown");
+  assert.equal(formSupport({ CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "claude-vscode" }), "unshown");
+  assert.equal(formSupport({}), "unknown", "Codex and other clients");
 });
 
 test("a dialog on the computer approves or declines, one at a time, and goes away when handled on the web", async () => {

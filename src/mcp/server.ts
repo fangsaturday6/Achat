@@ -9,7 +9,7 @@ import { RelayClient, RelayClientError, type DeviceLinkTicket, type PostView } f
 import { dateLabel } from "../cloud/pages.js";
 import { canDo, type AgentConfig } from "../config.js";
 import { cjk } from "../text.js";
-import { ownerOf, pendingMessage, requestReason, requestTitle, scopeLine, speaker, withFileNames } from "../asking.js";
+import { ownerOf, pendingMessage, requestReason, requestTitle, scopeLine, speaker, withFileNames, type FormSupport } from "../asking.js";
 import { redact } from "../redact.js";
 import { HAND_BACK, markTaskSeen, TaskBook, taskFor, type TaskFor } from "../sidecar/tasks.js";
 import { EFFORT_LABELS, EFFORTS, resolveUse, useLine, type AgentModels, type Effort } from "../models.js";
@@ -50,6 +50,8 @@ export interface McpOptions {
   // Off for AIs that connect by address: their credential can neither
   // approve nor change what the person's AIs on a computer run on.
   review?: boolean;
+  // Whether the client shows review_pending's form to its person (formSupport).
+  forms?: FormSupport;
   // How long a tool call waits for the other side before handing back a
   // thread id to check later.
   waitSeconds?: number;
@@ -645,8 +647,10 @@ export function createMcpServer(opts: McpOptions): McpServer {
         const client = c.client;
         const pending = await client.listThreads({ to: c.agentId, status: "pending", surfaced: true });
         if (!pending.length) return text("没有待批准的请求。");
-        if (!server.server.getClientCapabilities()?.elicitation) {
-          return text(`有 ${pending.length} 个待批准的请求。这个客户端不能弹出对话框，请让主人打开 ${c.webUrl} 批准。`);
+        // Only a form the person surely saw can say no for them (formSupport).
+        const forms = opts.forms ?? "unknown";
+        if (forms === "unshown" || !server.server.getClientCapabilities()?.elicitation) {
+          return text(`有 ${pending.length} 个待批准的请求。这里弹不出批准框，请主人在电脑弹出的对话框里处理，或打开 ${c.webUrl}。`);
         }
         let approved = 0;
         let declined = 0;
@@ -676,7 +680,9 @@ export function createMcpServer(opts: McpOptions): McpServer {
               doing
                 ? `同意后，${me}在这台电脑上开一个新对话来做：新文件夹里改文件不问你，跑命令、动别的文件夹先问你。`
                 : `同意后，${me}只读本机对话记录来回答。`,
-              "提交表示同意，拒绝表示不接受，取消则留到以后处理。",
+              forms === "shown"
+                ? "提交表示同意，拒绝表示不接受，取消则留到以后处理。"
+                : "提交表示同意；要拒绝，在电脑弹出的对话框或网页上点拒绝。",
             ].join("\n"),
             requestedSchema: {
               type: "object",
@@ -721,7 +727,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
               ...(effort ? { effort } : {}),
             });
             approved += 1;
-          } else if (result.action === "decline") {
+          } else if (result.action === "decline" && forms === "shown") {
             await client.decline(t.id);
             declined += 1;
           } else {

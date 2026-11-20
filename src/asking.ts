@@ -7,6 +7,18 @@ import { MODE_LABELS, type Message, type Thread, type ThreadDetail } from "./typ
 // 问答 asking to 动手, or asking to go on once the thread ended or its rounds
 // or money ran out.
 
+// Whether the AI client puts an MCP form (review_pending) in front of its
+// person. Claude Code shows one only in the terminal; in the desktop app,
+// VS Code and the SDK it answers "decline" itself, unseen (2.1.326), so it
+// is sent none there and the dialog on the computer asks. Other clients
+// may show it, but a "decline" from them is not taken for the person's.
+export type FormSupport = "shown" | "unshown" | "unknown";
+
+export function formSupport(env: NodeJS.ProcessEnv = process.env): FormSupport {
+  if (env.CLAUDECODE !== "1") return "unknown";
+  return (env.CLAUDE_CODE_ENTRYPOINT || "cli") === "cli" ? "shown" : "unshown";
+}
+
 function upgrade(t: Thread): boolean {
   return t.prior?.mode === "answer" && t.mode === "do";
 }
